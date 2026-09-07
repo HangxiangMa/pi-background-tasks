@@ -335,8 +335,8 @@ void describe('rpc', () => {
       await rpc.wait(
         (event) =>
           field(event, 'type') === 'extension_ui_request' &&
-          field(event, 'method') === 'setStatus' &&
-          field(event, 'statusKey') === 'background-tasks',
+          field(event, 'method') === 'setWidget' &&
+          field(event, 'widgetKey') === 'background-tasks',
       );
       const bgTasksResponse = await rpc.prompt('/bg-tasks bdeadbeef');
       assert.equal(field(bgTasksResponse, 'success'), true);

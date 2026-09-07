@@ -20,6 +20,7 @@ import {
 
 export interface TaskManagerTheme {
   fg: Theme['fg'];
+  bg: Theme['bg'];
 }
 
 export type BackgroundTaskForUi = BgTaskSnapshot & { name: string; outputAbsPath: string };
@@ -31,11 +32,9 @@ const STATUS_INTERVAL_MS = 1000;
 // gives thousands of lines of scrollback when the user pauses the live tail.
 const DETAIL_TAIL_BYTES = 128 * 1024;
 const LIST_VISIBLE_ROWS = 14;
-const DETAIL_VISIBLE_OUTPUT_LINES = 12;
-const LIGHT_BLUE_BG = '\x1b[48;2;183;223;255m';
-const LIGHT_BLUE_FG = '\x1b[38;2;11;70;110m';
-const LIGHT_BLUE_BORDER = '\x1b[38;2;83;160;215m';
-const ANSI_RESET = '\x1b[0m';
+// Keep detail content compact enough for bottom overlays while retaining scrollback.
+const DETAIL_VISIBLE_OUTPUT_LINES = 6;
+
 
 function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString();
@@ -69,12 +68,12 @@ function padAnsi(value: string, width: number): string {
   return value + ' '.repeat(Math.max(0, width - visibleWidth(value)));
 }
 
-function lightBlue(value: string): string {
-  return `${LIGHT_BLUE_BG}${LIGHT_BLUE_FG}${value}${ANSI_RESET}`;
+function lightBlue(theme: TaskManagerTheme, value: string): string {
+  return theme.bg('selectedBg', theme.fg('text', value));
 }
 
-function blueBorder(value: string): string {
-  return `${LIGHT_BLUE_BORDER}${value}${ANSI_RESET}`;
+function blueBorder(theme: TaskManagerTheme, value: string): string {
+  return theme.fg('borderAccent', value);
 }
 
 function statusLabel(status: BgTaskSnapshot['status']): string {
@@ -281,7 +280,9 @@ export class BackgroundTasksManager implements Component {
   }
 
   render(width: number): string[] {
-    const boxWidth = Math.max(2, Math.min(width, 118));
+    // Overlay supplies its actual viewport width. Do not clamp to a smaller
+    // constant: that leaves an unpainted strip inside the overlay on wide terminals.
+    const boxWidth = Math.max(2, width);
     return this.mode === 'detail' ? this.renderDetail(boxWidth) : this.renderList(boxWidth);
   }
 
@@ -575,14 +576,14 @@ export class BackgroundTasksManager implements Component {
     width: number,
   ): string[] {
     const inner = Math.max(1, width - 2);
-    const top = blueBorder(`╭${'─'.repeat(inner)}╮`);
-    const bottom = blueBorder(`╰${'─'.repeat(inner)}╯`);
+    const top = blueBorder(this.theme, `╭${'─'.repeat(inner)}╮`);
+    const bottom = blueBorder(this.theme, `╰${'─'.repeat(inner)}╯`);
     const row = (content = '') =>
-      `${blueBorder('│')}${padAnsi(truncateToWidth(content, inner), inner)}${blueBorder('│')}`;
-    const header = lightBlue(padAnsi(` ${title}`, inner));
+      `${blueBorder(this.theme, '│')}${padAnsi(truncateToWidth(content, inner), inner)}${blueBorder(this.theme, '│')}`;
+    const header = lightBlue(this.theme, padAnsi(` ${title}`, inner));
     const subtitleLine = subtitle
-      ? lightBlue(padAnsi(` ${subtitle}`, inner))
-      : lightBlue(' '.repeat(inner));
+      ? lightBlue(this.theme, padAnsi(` ${subtitle}`, inner))
+      : lightBlue(this.theme, ' '.repeat(inner));
     const lines = [top, row(header), row(subtitleLine), row()];
     for (const line of body) lines.push(row(line));
     lines.push(row());
@@ -665,7 +666,8 @@ export class BackgroundTasksManager implements Component {
         const exit =
           task.status !== 'running' ? this.theme.fg('dim', formatExitCodeText(task.exitCode)) : '';
         let row = ` ${pointer} ${unreadMark} ${name} ${this.theme.fg('dim', task.id)} ${this.theme.fg('dim', '·')} ${status}${exit} ${this.theme.fg('dim', `${runtime} ${size}`)}${contextText}${modelText}${tokenText}${toolText}${activityText}`;
-        if (selected) row = lightBlue(padAnsi(truncateToWidth(row, width - 4), width - 4));
+        if (selected)
+          row = lightBlue(this.theme, padAnsi(truncateToWidth(row, width - 4), width - 4));
         body.push(row);
       }
       if (tasks.length > LIST_VISIBLE_ROWS) {
@@ -739,10 +741,10 @@ export class BackgroundTasksManager implements Component {
 
   private renderOutputBox(width: number): string[] {
     const inner = Math.max(1, width - 2);
-    const top = ` ${blueBorder(`╭${'─'.repeat(inner)}╮`)}`;
-    const bottom = ` ${blueBorder(`╰${'─'.repeat(inner)}╯`)}`;
+    const top = ` ${blueBorder(this.theme, `╭${'─'.repeat(inner)}╮`)}`;
+    const bottom = ` ${blueBorder(this.theme, `╰${'─'.repeat(inner)}╯`)}`;
     const row = (content = '') =>
-      ` ${blueBorder('│')}${padAnsi(truncateToWidth(content, inner), inner)}${blueBorder('│')}`;
+      ` ${blueBorder(this.theme, '│')}${padAnsi(truncateToWidth(content, inner), inner)}${blueBorder(this.theme, '│')}`;
     const lines = [top];
     if (this.tailError) {
       lines.push(row(this.theme.fg('error', this.tailError)));
