@@ -187,6 +187,10 @@ void describe('BackgroundTasksManager component', () => {
       assert.match(stripAnsi(lines.join('\n')), /bg tasks focused/);
       assert.match(stripAnsi(lines.join('\n')), /First Task/);
       assertWidth(lines, 90);
+      assert.equal(visibleWidth(stripAnsi(lines[0] ?? '')), 90);
+
+      const wideLines = h.instance.render(140);
+      assert.equal(visibleWidth(stripAnsi(wideLines[0] ?? '')), 140);
 
       h.instance.handleInput('\x1b[B');
       h.instance.handleInput('k');
@@ -321,25 +325,30 @@ void describe('BackgroundTasksManager component', () => {
         let text = stripAnsi(h.instance.render(100).join('\n'));
         assert.match(text, /following tail/);
         assert.match(text, /LINE-040/);
-        assert.match(text, /LINE-029/);
+        assert.match(text, /LINE-035/);
         assert.doesNotMatch(text, /LINE-001/);
         assert.doesNotMatch(text, /LINE-005/);
 
         // Scroll up 20 lines: pauses follow, reveals earlier lines, hides the latest.
         for (let i = 0; i < 20; i++) h.instance.handleInput('\x1b[A');
         text = stripAnsi(h.instance.render(100).join('\n'));
-        assert.match(text, /lines 9\u201320 of 40/);
-        assert.match(text, /LINE-009/);
+        assert.match(text, /lines 15\u201320 of 40/);
+        assert.match(text, /LINE-015/);
         assert.match(text, /LINE-020/);
         assert.doesNotMatch(text, /LINE-040/);
 
         // PageUp reaches the top of the buffer.
         h.instance.handleInput('\x1b[5~');
+        h.instance.handleInput('\x1b[5~');
+        h.instance.handleInput('\x1b[5~');
         text = stripAnsi(h.instance.render(100).join('\n'));
-        assert.match(text, /lines 1\u201312 of 40/);
+        assert.match(text, /lines 1\u20136 of 40/);
         assert.match(text, /LINE-001/);
 
         // Paging back past the end resumes the live tail.
+        h.instance.handleInput('\x1b[6~');
+        h.instance.handleInput('\x1b[6~');
+        h.instance.handleInput('\x1b[6~');
         h.instance.handleInput('\x1b[6~');
         h.instance.handleInput('\x1b[6~');
         h.instance.handleInput('\x1b[6~');

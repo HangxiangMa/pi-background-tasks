@@ -7,7 +7,7 @@ import type {
   ToolRenderResultOptions,
 } from '@earendil-works/pi-coding-agent';
 import { formatSize } from '@earendil-works/pi-coding-agent';
-import { Text, type KeyId } from '@earendil-works/pi-tui';
+import { Text, truncateToWidth, type KeyId } from '@earendil-works/pi-tui';
 import { Type, type Static } from 'typebox';
 import {
   DEFAULT_LOG_BYTES,
@@ -68,13 +68,8 @@ const packageInfo = readPackageInfo(new URL('../package.json', import.meta.url),
 });
 const PACKAGE_NAME = packageInfo.name ?? 'pi-background-tasks';
 const PACKAGE_VERSION = packageInfo.version;
-const LIGHT_BLUE_BG = '\x1b[48;2;183;223;255m';
-const LIGHT_BLUE_FG = '\x1b[38;2;11;70;110m';
-const ANSI_RESET = '\x1b[0m';
-
-function lightBlue(value: string): string {
-  return `${LIGHT_BLUE_BG}${LIGHT_BLUE_FG}${value}${ANSI_RESET}`;
-}
+const BACKGROUND_TASKS_WIDGET_KEY = 'background-tasks';
+const BACKGROUND_TASKS_WIDGET_OPTIONS = { placement: 'aboveEditor' } as const;
 
 function textContent(text: string) {
   return [{ type: 'text' as const, text }];
@@ -290,12 +285,9 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       );
       const unseenFinishedCount = unseenFailed.length + unseenStopped.length + unseenDone.length;
       const updateSegment = formatUpdateSegment(latestKnownVersion, PACKAGE_VERSION ?? '');
-      ctx.ui.setWidget('background-tasks', undefined);
+      ctx.ui.setStatus(BACKGROUND_TASKS_WIDGET_KEY, undefined);
       if (running.length === 0 && unseenFinishedCount === 0) {
-        ctx.ui.setStatus(
-          'background-tasks',
-          updateSegment ? lightBlue(` bg ${updateSegment} `) : undefined,
-        );
+        ctx.ui.setWidget(BACKGROUND_TASKS_WIDGET_KEY, undefined);
         return;
       }
 
@@ -309,8 +301,21 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
         : `Shift↓${unseenFinishedCount > 0 ? ' · /bg-clear' : ''}`;
       const segments = [...parts, entryHint];
       if (updateSegment) segments.push(updateSegment);
-      const label = ` bg ${segments.join(' · ')} `;
-      ctx.ui.setStatus('background-tasks', lightBlue(label));
+      const label = `bg ${segments.join(' · ')}`;
+      ctx.ui.setWidget(
+        BACKGROUND_TASKS_WIDGET_KEY,
+        (_tui, theme) => ({
+          render: (width) => [
+            truncateToWidth(
+              `${theme.fg('accent', 'bg')} ${theme.fg('dim', label.slice(3))}`,
+              Math.max(0, width),
+              '',
+            ),
+          ],
+          invalidate: () => {},
+        }),
+        BACKGROUND_TASKS_WIDGET_OPTIONS,
+      );
     } catch (error) {
       console.error(
         `[background-tasks] UI update failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -412,7 +417,9 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
             anchor: 'bottom-center',
             width: '96%',
             minWidth: 64,
-            maxHeight: '60%',
+            // Keep detail pages above bottom chrome while allowing enough room
+            // for metadata and a compact output tail.
+            maxHeight: '90%',
             margin: { bottom: 1, left: 1, right: 1 },
           },
         },
@@ -485,6 +492,10 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
 
   pi.on('session_shutdown', async (_event, ctx) => {
     registry.setShuttingDown(true);
+    if (ctx.hasUI) {
+      ctx.ui.setStatus(BACKGROUND_TASKS_WIDGET_KEY, undefined);
+      ctx.ui.setWidget(BACKGROUND_TASKS_WIDGET_KEY, undefined);
+    }
     currentCtx = undefined;
     if (statusInterval) {
       clearInterval(statusInterval);
