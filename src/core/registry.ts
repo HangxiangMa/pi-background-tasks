@@ -1,7 +1,7 @@
 import { spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { createWriteStream, existsSync } from 'node:fs';
-import { mkdir, realpath, writeFile } from 'node:fs/promises';
+import { createWriteStream, existsSync, readFileSync } from 'node:fs';
+import { mkdir, realpath, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -71,6 +71,25 @@ export const KILL_GRACE_MS = 3000;
 export const STOP_WAIT_MS = KILL_GRACE_MS + 1500;
 export const MAX_RECENT_TASKS = 100;
 const TELEMETRY_BUFFER_CHARS = 512 * 1024;
+const liveRegistries = new Set<BackgroundTaskRegistry>();
+let processCleanupInstalled = false;
+
+function cleanupLiveRegistries(signal: NodeJS.Signals): void {
+  for (const registry of liveRegistries) registry.cleanupChildProcesses(signal);
+}
+
+function installProcessCleanup(): void {
+  if (processCleanupInstalled) return;
+  processCleanupInstalled = true;
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+    process.once(signal, () => {
+      cleanupLiveRegistries(signal);
+      process.exit(128 + (signal === 'SIGINT' ? 2 : signal === 'SIGHUP' ? 1 : 15));
+    });
+  }
+  process.once('exit', () => cleanupLiveRegistries('SIGKILL'));
+}
+
 export const WIN32_CMD_PI_TELEMETRY_UNAVAILABLE_REASON =
   'win32-cmd-cannot-safely-intercept-pi-argv';
 
@@ -169,6 +188,19 @@ export interface BackgroundTaskRegistryOptions {
 interface RuntimeDir {
   abs: string;
   display: string;
+}
+
+function processStartIdentity(pid: number): string | undefined {
+  if (process.platform === 'win32') return undefined;
+  try {
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8');
+    const afterCommand = stat.lastIndexOf(') ');
+    if (afterCommand < 0) return undefined;
+    const fields = stat.slice(afterCommand + 2).trim().split(/\s+/);
+    return fields[19];
+  } catch {
+    return undefined;
+  }
 }
 
 interface ModelWindowIndex {
@@ -718,6 +750,7 @@ function writeDelegateStdin(
 export class BackgroundTaskRegistry {
   private readonly tasks = new Map<string, BgTask>();
   private runtimeDir: RuntimeDir | undefined;
+  private orphanScanDone = false;
   private shuttingDown = false;
   private readonly spawn: BackgroundTaskSpawn;
   private readonly killProcess: KillProcessFn;
@@ -735,6 +768,8 @@ export class BackgroundTaskRegistry {
   private readonly sendCompletionNotification: CompletionNotificationSender;
   private readonly publishTerminalSnapshot: (task: BgTaskSnapshot) => void;
   private readonly windowsKillStates = new WeakMap<BgTask, WindowsKillState>();
+  private readonly ownerPid = process.pid;
+  private readonly ownerStartIdentity = processStartIdentity(process.pid);
 
   constructor(options: BackgroundTaskRegistryOptions) {
     this.spawn =
@@ -759,6 +794,28 @@ export class BackgroundTaskRegistry {
     this.onChange = options.onChange ?? noopOnChange;
     this.sendCompletionNotification = options.sendCompletionNotification;
     this.publishTerminalSnapshot = options.publishTerminal ?? noopOnChange;
+    liveRegistries.add(this);
+    installProcessCleanup();
+  }
+
+  /** Best-effort synchronous cleanup used when Node is terminating unexpectedly. */
+  cleanupChildProcesses(signal: NodeJS.Signals): void {
+    for (const task of this.tasks.values()) {
+      if (task.status !== 'running' || task.pid === undefined) continue;
+      try {
+        if (this.platform !== 'win32') {
+          this.killProcess(-task.pid, signal);
+        } else {
+          this.killProcess(task.pid, signal);
+        }
+      } catch {
+        try {
+          this.killProcess(task.pid, signal);
+        } catch {
+          // Child may have already exited.
+        }
+      }
+    }
   }
 
   isShuttingDown(): boolean {
@@ -779,6 +836,10 @@ export class BackgroundTaskRegistry {
 
   async ensureRuntimeDir(ctx: BackgroundTaskContext): Promise<RuntimeDir> {
     if (this.runtimeDir) return this.runtimeDir;
+    if (!this.orphanScanDone) {
+      this.orphanScanDone = true;
+      await this.reapOrphanedTasks(ctx.cwd);
+    }
     const sessionId = sanitizePathSegment(ctx.sessionId ?? `session-${String(process.pid)}`);
     const runId = `${sessionId}-${String(process.pid)}`;
     const runtimeDirAbs = join(ctx.cwd, '.pi', 'tasks', runId);
@@ -786,6 +847,78 @@ export class BackgroundTaskRegistry {
     await mkdir(runtimeDirAbs, { recursive: true });
     this.runtimeDir = { abs: runtimeDirAbs, display: runtimeDirDisplay };
     return this.runtimeDir;
+  }
+
+  private async reapOrphanedTasks(cwd: string): Promise<void> {
+    if (this.platform === 'win32') return;
+    const tasksRoot = join(cwd, '.pi', 'tasks');
+    let runDirs;
+    try {
+      runDirs = await readdir(tasksRoot, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const runDir of runDirs) {
+      if (!runDir.isDirectory()) continue;
+      let metadataFiles;
+      try {
+        metadataFiles = await readdir(join(tasksRoot, runDir.name));
+      } catch {
+        continue;
+      }
+      for (const file of metadataFiles) {
+        if (!file.endsWith('.json')) continue;
+        const metadataPath = join(tasksRoot, runDir.name, file);
+        try {
+          const raw: unknown = JSON.parse(await readFile(metadataPath, 'utf8'));
+          if (raw === null || typeof raw !== 'object') continue;
+          const metadata = raw as Record<string, unknown>;
+          if (metadata['status'] !== 'running') continue;
+          const recordedOwnerPid = metadata['ownerPid'];
+          const ownerStart = metadata['ownerStartIdentity'];
+          const legacyOwnerPid = Number(runDir.name.match(/-(\d+)$/u)?.[1]);
+          const ownerPid =
+            typeof recordedOwnerPid === 'number' ? recordedOwnerPid : legacyOwnerPid;
+          const childPid = metadata['pid'];
+          if (
+            typeof ownerPid !== 'number' ||
+            !Number.isInteger(ownerPid) ||
+            typeof childPid !== 'number'
+          )
+            continue;
+          if (
+            typeof ownerStart === 'string' &&
+            ownerPid === this.ownerPid &&
+            ownerStart === this.ownerStartIdentity
+          )
+            continue;
+          if (typeof ownerStart === 'string') {
+            if (processStartIdentity(ownerPid) === ownerStart) continue;
+          } else if (processStartIdentity(ownerPid) !== undefined) {
+            // Legacy metadata has no start identity; never touch a live PID.
+            continue;
+          }
+          try {
+            this.killProcess(-childPid, 'SIGKILL');
+          } catch {
+            try {
+              this.killProcess(childPid, 'SIGKILL');
+            } catch {
+              // Child may have already exited.
+            }
+          }
+          await writeJsonAtomic(metadataPath, {
+            ...metadata,
+            status: 'killed',
+            endTime: Date.now(),
+            signal: 'SIGKILL',
+            error: 'Owner Pi process exited; orphan reaped.',
+          });
+        } catch (error) {
+          this.logger.error(`[background-tasks] failed to reap ${metadataPath}:`, error);
+        }
+      }
+    }
   }
 
   async startTask(
@@ -838,6 +971,8 @@ export class BackgroundTaskRegistry {
       startTime: this.now(),
       exitCode: undefined,
       pid: undefined,
+      ownerPid: this.ownerPid,
+      ownerStartIdentity: this.ownerStartIdentity,
       bytesWritten: 0,
       isAgent,
       notified: false,
@@ -1007,6 +1142,8 @@ export class BackgroundTaskRegistry {
       notifyOnCompletion: request.notifyOnCompletion,
       triggerOnCompletion: request.triggerOnCompletion,
       fusion: request.fusion,
+      ownerPid: this.ownerPid,
+      ownerStartIdentity: this.ownerStartIdentity,
       managedCancel: request.cancel,
       managedStopWaitMs: request.stopWaitMs,
       terminalPublicationGate: request.terminalPublicationGate,
@@ -1132,6 +1269,8 @@ export class BackgroundTaskRegistry {
       triggerOnCompletion: request.triggerOnCompletion,
       timeoutSeconds: request.timeoutSeconds,
       model: request.facts.route.qualifiedId,
+      ownerPid: this.ownerPid,
+      ownerStartIdentity: this.ownerStartIdentity,
       delegate: request.facts,
       waiters: [],
     };
@@ -1288,6 +1427,8 @@ export class BackgroundTaskRegistry {
       notifyOnCompletion: false,
       triggerOnCompletion: false,
       timeoutSeconds,
+      ownerPid: this.ownerPid,
+      ownerStartIdentity: this.ownerStartIdentity,
       attestationPath: paths.attestationPath,
       attestedPi: {
         eventsPath: paths.eventsPath,
