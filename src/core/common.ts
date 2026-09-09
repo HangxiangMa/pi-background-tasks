@@ -49,6 +49,9 @@ export interface BgTaskSnapshot {
   exitCode?: number | null | undefined;
   signal?: string | null | undefined;
   pid?: number | undefined;
+  /** Pi process that owned this task; used to reap detached children after a crash. */
+  ownerPid?: number | undefined;
+  ownerStartIdentity?: string | undefined;
   bytesWritten: number;
   isAgent: boolean;
   error?: string | undefined;
@@ -762,6 +765,8 @@ export function snapshot(task: BgTask): BgTaskSnapshot {
     exitCode: task.exitCode,
     signal: task.signal,
     pid: task.pid,
+    ownerPid: task.ownerPid,
+    ownerStartIdentity: task.ownerStartIdentity,
     bytesWritten: task.bytesWritten,
     isAgent: task.isAgent,
     error: task.error,
