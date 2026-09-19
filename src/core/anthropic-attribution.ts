@@ -80,7 +80,7 @@ const NATIVE_ATTESTATION_PLACEHOLDER = '00000';
 const ANTHROPIC_CACHE_CONTROL_BREAKPOINT_LIMIT = 4;
 const ANTHROPIC_LINEAGE_DIAGNOSTIC_TYPE = 'anthropic-cache-lineage';
 const ANTHROPIC_LINEAGE_SCHEMA = 'pi-anthropic-attribution.lineage.v1';
-// Bump whenever any system/tool/message wire projection changes. Old receipts then
+// Bump whenever the system/tool/message wire projection changes. Old receipts then
 // become legacy and cannot authorize signature replay under a rewritten prefix.
 const ANTHROPIC_PROJECTION_VERSION = 3;
 const ANTHROPIC_OFFICIAL_ORIGIN = 'https://api.anthropic.com';
@@ -1458,6 +1458,33 @@ interface AnthropicLineageDetails {
   readonly previous_message_id: string | null;
 }
 
+function isAnthropicLineageDetails(
+  value: JsonObject,
+): value is JsonObject & AnthropicLineageDetails {
+  return (
+    value['schema_version'] === ANTHROPIC_LINEAGE_SCHEMA &&
+    value['projection_version'] === ANTHROPIC_PROJECTION_VERSION &&
+    value['source_provider'] === 'anthropic' &&
+    value['source_api'] === 'anthropic-messages' &&
+    typeof value['source_model'] === 'string' &&
+    typeof value['response_id'] === 'string' &&
+    isSha256(value['assistant_content_sha256']) &&
+    isSha256(value['conversation_static_sha256']) &&
+    Number.isSafeInteger(value['request_message_count']) &&
+    (value['request_message_count'] as number) >= 0 &&
+    isSha256(value['request_messages_sha256']) &&
+    isSha256(value['cache_profile_sha256']) &&
+    (value['cache_retention'] === 'none' ||
+      value['cache_retention'] === 'short' ||
+      value['cache_retention'] === 'long') &&
+    (value['compaction_boundary_sha256'] === null ||
+      isSha256(value['compaction_boundary_sha256'])) &&
+    isSha256(value['signature_epoch_sha256']) &&
+    typeof value['signature_epoch_inherits_prior'] === 'boolean' &&
+    (value['previous_message_id'] === null || typeof value['previous_message_id'] === 'string')
+  );
+}
+
 function parseAnthropicLineageDetails(
   message: Extract<PiMessage, { role: 'assistant' }>,
 ): AnthropicLineageDetails | undefined {
@@ -1465,32 +1492,8 @@ function parseAnthropicLineageDetails(
     .reverse()
     .find((candidate) => candidate.type === ANTHROPIC_LINEAGE_DIAGNOSTIC_TYPE);
   const details = diagnostic?.details;
-  if (!isPlainObject(details)) return undefined;
-  if (
-    details['schema_version'] !== ANTHROPIC_LINEAGE_SCHEMA ||
-    details['projection_version'] !== ANTHROPIC_PROJECTION_VERSION ||
-    details['source_provider'] !== 'anthropic' ||
-    details['source_api'] !== 'anthropic-messages' ||
-    typeof details['source_model'] !== 'string' ||
-    typeof details['response_id'] !== 'string' ||
-    !isSha256(details['assistant_content_sha256']) ||
-    !isSha256(details['conversation_static_sha256']) ||
-    !Number.isSafeInteger(details['request_message_count']) ||
-    (details['request_message_count'] as number) < 0 ||
-    !isSha256(details['request_messages_sha256']) ||
-    !isSha256(details['cache_profile_sha256']) ||
-    (details['cache_retention'] !== 'none' &&
-      details['cache_retention'] !== 'short' &&
-      details['cache_retention'] !== 'long') ||
-    (details['compaction_boundary_sha256'] !== null &&
-      !isSha256(details['compaction_boundary_sha256'])) ||
-    !isSha256(details['signature_epoch_sha256']) ||
-    typeof details['signature_epoch_inherits_prior'] !== 'boolean' ||
-    (details['previous_message_id'] !== null && typeof details['previous_message_id'] !== 'string')
-  ) {
-    return undefined;
-  }
-  return details as unknown as AnthropicLineageDetails;
+  if (!isPlainObject(details) || !isAnthropicLineageDetails(details)) return undefined;
+  return details;
 }
 
 function canTargetReadAnthropicThinking(sourceModel: string, targetModel: string): boolean {

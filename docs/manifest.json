@@ -900,7 +900,7 @@
         "id": "command:claude-cache",
         "kind": "command",
         "name": "claude-cache",
-        "source": "src/core/anthropic-attribution.ts:3026"
+        "source": "src/core/anthropic-attribution.ts:3029"
       },
       {
         "description": "Start fixed-purpose Fusion reason in the background and return immediately.",

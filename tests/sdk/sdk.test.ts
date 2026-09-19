@@ -546,7 +546,6 @@ void describe('sdk', () => {
         'jobs',
         'logs',
         'kill',
-        'tasks',
         'bg-tasks',
         'bg-clear',
         'bg-update',

@@ -81,8 +81,8 @@ void describe('posix invariance', () => {
       const direct = join(dir, 'direct.txt');
       await writeFileDurable(direct, 'payload');
       assert.equal(await readFile(direct, 'utf8'), 'payload');
-      // Direct writes inherit the process umask, historically 0644.
-      if (checksModes) assert.equal((await stat(direct)).mode & 0o777, 0o644);
+      // Direct writes use the platform default mode, filtered by the process umask.
+      if (checksModes) assert.equal((await stat(direct)).mode & 0o777, 0o666 & ~process.umask());
 
       const replaced = join(dir, 'replaced.json');
       await replaceFileDurable(replaced, '{"a":1}');
