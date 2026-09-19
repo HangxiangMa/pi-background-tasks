@@ -1414,6 +1414,10 @@ function isSha256(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 function blockWithoutCacheControl(block: unknown): unknown {
   if (!isPlainObject(block)) return block;
   const output = { ...block };
@@ -1470,8 +1474,7 @@ function isAnthropicLineageDetails(
     typeof value['response_id'] === 'string' &&
     isSha256(value['assistant_content_sha256']) &&
     isSha256(value['conversation_static_sha256']) &&
-    Number.isSafeInteger(value['request_message_count']) &&
-    (value['request_message_count'] as number) >= 0 &&
+    isNonNegativeSafeInteger(value['request_message_count']) &&
     isSha256(value['request_messages_sha256']) &&
     isSha256(value['cache_profile_sha256']) &&
     (value['cache_retention'] === 'none' ||
@@ -2230,22 +2233,23 @@ function resolveAnthropicBetaMessagesUrl(model: PiModelLike): string {
     typeof model.baseUrl === 'string' && model.baseUrl.trim().length > 0
       ? model.baseUrl.trim()
       : ANTHROPIC_OFFICIAL_ORIGIN;
-  let parsed: URL;
+  let endpoint: URL;
   try {
-    parsed = new URL(configured);
+    endpoint = new URL(configured);
   } catch (error) {
     throw new Error(
       `Anthropic attribution requires the official Anthropic HTTPS endpoint; invalid model.baseUrl: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  const { origin, protocol, username, password, pathname, search, hash } = endpoint;
   if (
-    parsed.origin !== ANTHROPIC_OFFICIAL_ORIGIN ||
-    parsed.protocol !== 'https:' ||
-    parsed.username.length > 0 ||
-    parsed.password.length > 0 ||
-    (parsed.pathname !== '' && parsed.pathname !== '/') ||
-    parsed.search.length > 0 ||
-    parsed.hash.length > 0
+    origin !== ANTHROPIC_OFFICIAL_ORIGIN ||
+    protocol !== 'https:' ||
+    username.length > 0 ||
+    password.length > 0 ||
+    (pathname !== '' && pathname !== '/') ||
+    search.length > 0 ||
+    hash.length > 0
   ) {
     throw new Error(
       `Anthropic attribution requires the official Anthropic HTTPS endpoint ${ANTHROPIC_OFFICIAL_ORIGIN}; refusing model.baseUrl ${JSON.stringify(configured)}`,

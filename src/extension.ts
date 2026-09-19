@@ -286,7 +286,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       const unseenFinishedCount = unseenFailed.length + unseenStopped.length + unseenDone.length;
       const updateSegment = formatUpdateSegment(latestKnownVersion, PACKAGE_VERSION ?? '');
       ctx.ui.setStatus(BACKGROUND_TASKS_WIDGET_KEY, undefined);
-      if (running.length === 0 && unseenFinishedCount === 0) {
+      if (running.length === 0 && unseenFinishedCount === 0 && !updateSegment) {
         ctx.ui.setWidget(BACKGROUND_TASKS_WIDGET_KEY, undefined);
         return;
       }
@@ -299,8 +299,8 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       const entryHint = dockOpen
         ? 'focused'
         : `Shift↓${unseenFinishedCount > 0 ? ' · /bg-clear' : ''}`;
-      const segments = [...parts, entryHint];
-      if (updateSegment) segments.push(updateSegment);
+      const segments = parts.length === 0 && updateSegment ? [updateSegment] : [...parts, entryHint];
+      if (updateSegment && parts.length > 0) segments.push(updateSegment);
       const label = `bg ${segments.join(' · ')}`;
       ctx.ui.setWidget(
         BACKGROUND_TASKS_WIDGET_KEY,

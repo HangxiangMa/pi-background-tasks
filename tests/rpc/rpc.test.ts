@@ -248,7 +248,6 @@ void describe('rpc', () => {
         'jobs',
         'logs',
         'kill',
-        'tasks',
         'bg-tasks',
         'bg-clear',
         'bg-update',
