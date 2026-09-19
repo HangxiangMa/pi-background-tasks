@@ -78,7 +78,6 @@ Every production file under `src/**` and `extensions/**` has exactly one primary
 - `command:jobs`
 - `command:kill`
 - `command:logs`
-- `command:tasks`
 - `eventbus:background-task-v1`
 - `renderer:background-task-notification`
 - `renderer:fusion-result`

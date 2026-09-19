@@ -102,7 +102,6 @@ Generated navigation for every package-local documentation page. This index inte
 | `command:jobs` | [commands/jobs](./commands/jobs.md) |
 | `command:kill` | [commands/kill](./commands/kill.md) |
 | `command:logs` | [commands/logs](./commands/logs.md) |
-| `command:tasks` | [commands/task-manager](./commands/task-manager.md) |
 | `eventbus:background-task-v1` | [api/eventbus-v1](./api/eventbus-v1.md) |
 | `renderer:background-task-notification` | [concepts/completion-delivery](./concepts/completion-delivery.md) |
 | `renderer:fusion-result` | [subsystems/fusion](./subsystems/fusion.md) |
@@ -128,31 +127,30 @@ Generated navigation for every package-local documentation page. This index inte
 
 | Kind | Name | ID | Provenance |
 | --- | --- | --- | --- |
-| command | `bg` | `command:bg` | `src/extension.ts:517` |
-| command | `bg-clear` | `command:bg-clear` | `src/extension.ts:559` |
-| command | `bg-tasks` | `command:bg-tasks` | `src/extension.ts:551` |
-| command | `bg-update` | `command:bg-update` | `src/extension.ts:567` |
+| command | `bg` | `command:bg` | `src/extension.ts:528` |
+| command | `bg-clear` | `command:bg-clear` | `src/extension.ts:562` |
+| command | `bg-tasks` | `command:bg-tasks` | `src/extension.ts:554` |
+| command | `bg-update` | `command:bg-update` | `src/extension.ts:570` |
 | command | `claude-cache` | `command:claude-cache` | `src/core/anthropic-attribution.ts:3026` |
 | command | `fusion` | `command:fusion` | `src/fusion-extension.ts:996` |
 | command | `fusion-models` | `command:fusion-models` | `src/fusion-extension.ts:1029` |
-| command | `jobs` | `command:jobs` | `src/extension.ts:605` |
-| command | `kill` | `command:kill` | `src/extension.ts:649` |
-| command | `logs` | `command:logs` | `src/extension.ts:618` |
-| command | `tasks` | `command:tasks` | `src/extension.ts:543` |
+| command | `jobs` | `command:jobs` | `src/extension.ts:608` |
+| command | `kill` | `command:kill` | `src/extension.ts:652` |
+| command | `logs` | `command:logs` | `src/extension.ts:621` |
 | tool | `bg_delegate` | `tool:bg_delegate` | `src/delegate-extension.ts:340` |
-| tool | `bg_kill` | `tool:bg_kill` | `src/extension.ts:908` |
-| tool | `bg_logs` | `tool:bg_logs` | `src/extension.ts:863` |
+| tool | `bg_kill` | `tool:bg_kill` | `src/extension.ts:911` |
+| tool | `bg_logs` | `tool:bg_logs` | `src/extension.ts:866` |
 | tool | `bg_result` | `tool:bg_result` | `src/delegate-extension.ts:516` |
-| tool | `bg_run` | `tool:bg_run` | `src/extension.ts:682` |
-| tool | `bg_run_pi_attested` | `tool:bg_run_pi_attested` | `src/extension.ts:767` |
-| tool | `bg_status` | `tool:bg_status` | `src/extension.ts:832` |
+| tool | `bg_run` | `tool:bg_run` | `src/extension.ts:685` |
+| tool | `bg_run_pi_attested` | `tool:bg_run_pi_attested` | `src/extension.ts:770` |
+| tool | `bg_status` | `tool:bg_status` | `src/extension.ts:835` |
 | tool | `fusion_investigate` | `tool:fusion_investigate` | `src/fusion-extension.ts:1197` |
 | tool | `fusion_reason` | `tool:fusion_reason` | `src/fusion-extension.ts:1179` |
 | tool | `fusion_research` | `tool:fusion_research` | `src/fusion-extension.ts:1216` |
 | tool | `fusion_validate` | `tool:fusion_validate` | `src/fusion-extension.ts:1236` |
-| shortcut | `ctrl+alt+c` | `shortcut:ctrl+alt+c` | `src/extension.ts:597` |
-| shortcut | `shift+down` | `shortcut:shift+down` | `src/extension.ts:590` |
-| renderer | `background-task-notification` | `renderer:background-task-notification` | `src/extension.ts:426` |
+| shortcut | `ctrl+alt+c` | `shortcut:ctrl+alt+c` | `src/extension.ts:600` |
+| shortcut | `shift+down` | `shortcut:shift+down` | `src/extension.ts:593` |
+| renderer | `background-task-notification` | `renderer:background-task-notification` | `src/extension.ts:433` |
 | renderer | `fusion-result` | `renderer:fusion-result` | `src/fusion-extension.ts:980` |
 | eventbus | `background-task-v1` | `eventbus:background-task-v1` | `src/core/extension-api.ts` |
 | workflow | `investigate` | `workflow:investigate` | `src/core/fusion/workflows.ts:80` |
