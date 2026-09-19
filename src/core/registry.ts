@@ -69,7 +69,7 @@ import {
 export const MAX_OUTPUT_BYTES = Number(process.env['PI_BG_MAX_OUTPUT_BYTES'] ?? 20 * 1024 * 1024);
 export const KILL_GRACE_MS = 3000;
 export const STOP_WAIT_MS = KILL_GRACE_MS + 1500;
-export const MAX_RECENT_TASKS = 100;
+export const MAX_RECENT_TASKS = 200;
 const TELEMETRY_BUFFER_CHARS = 512 * 1024;
 const liveRegistries = new Set<BackgroundTaskRegistry>();
 let processCleanupInstalled = false;
@@ -2269,29 +2269,16 @@ export class BackgroundTaskRegistry {
       return;
     }
 
-    const errors: string[] = [];
-    let killed = false;
-
     try {
       this.killProcess(-task.pid, signal);
-      killed = true;
-    } catch (error) {
-      errors.push(
-        `process group kill failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-
-    if (!killed) {
+    } catch (groupError) {
       try {
         task.child.kill(signal);
-        killed = true;
-      } catch (error) {
-        errors.push(`child kill failed: ${error instanceof Error ? error.message : String(error)}`);
+      } catch (childError) {
+        throw new Error(
+          `Could not kill task ${task.id}: process group failed (${BackgroundTaskRegistry.errorMessage(groupError)}); child failed (${BackgroundTaskRegistry.errorMessage(childError)})`,
+        );
       }
-    }
-
-    if (!killed) {
-      throw new Error(`Could not kill task ${task.id}: ${errors.join('; ')}`);
     }
 
     task.killSignalSent = true;
