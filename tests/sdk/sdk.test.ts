@@ -36,6 +36,12 @@ const extensionPath = resolve('extensions/background-tasks.ts');
 const scriptedProviderPath = resolve('tests/scripted-provider/scripted-provider-extension.ts');
 const roots: string[] = [];
 
+// SDK fixtures exercise POSIX shell commands; keep them independent of the host's login shell.
+if (process.platform !== 'win32') process.env['SHELL'] = '/bin/sh';
+afterEach(() => {
+  if (process.platform !== 'win32') process.env['SHELL'] = '/bin/sh';
+});
+
 function skipWin32PiPathFixture(t: TestContext, target: string): boolean {
   if (process.platform !== 'win32') return false;
   t.skip(
@@ -413,6 +419,14 @@ function makeStatusUi(
     },
     setStatus: (_key, text) => {
       statuses.push(text);
+    },
+    setWidget: (_key, factory) => {
+      if (!factory || typeof factory !== 'function') {
+        statuses.push(undefined);
+        return;
+      }
+      const widget = factory({} as never, { fg: (_color: string, text: string) => text } as never);
+      statuses.push(widget.render(200).join(''));
     },
   };
 }
