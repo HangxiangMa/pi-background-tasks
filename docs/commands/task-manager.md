@@ -4,24 +4,21 @@ audience: user
 mode: mixed
 review_policy: contract
 stability: stable
-covers_surfaces: [command:bg-tasks, command:tasks]
+covers_surfaces: [command:bg-tasks]
 covers_sources: []
 ---
-# `/tasks` and `/bg-tasks`
+# `/bg-tasks`
 
 <!-- pi-docs:begin name="command-contract-tasks-bg-tasks" generator="scripts/docs/generate.mjs" -->
 | Command | Description | Provenance |
 | --- | --- | --- |
-| `/tasks` | Open the Claude-like background task manager UI | `src/extension.ts:543` |
-| `/bg-tasks` | Open the background task manager UI | `src/extension.ts:551` |
+| `/bg-tasks` | Open the background task manager UI | `src/extension.ts:554` |
 <!-- pi-docs:end name="command-contract-tasks-bg-tasks" -->
 
-Open the interactive background task manager. `/tasks` and `/bg-tasks` are aliases.
+Open the interactive manager for durable background shell tasks. The `/tasks` command belongs to `pi-tasks` and manages the model task list; it is intentionally not registered here.
 
 ## Synopsis
 
-
-`/tasks [exact-task-id]`
 
 `/bg-tasks [exact-task-id]`
 
@@ -44,7 +41,7 @@ List view sorts tasks as running, failed, killed, then completed; within a statu
 ## Examples
 
 ```text
-/tasks
+/bg-tasks
 /bg-tasks b1234
 ```
 

@@ -14,7 +14,7 @@ This authored section defines the boundary: documentation facts are extracted fr
 <!-- pi-docs:begin name="docs-freshness-gate" generator="scripts/docs/generate.mjs" -->
 - Canonical package version: `2.5.0`
 - Governed markdown docs: 42
-- Public surfaces extracted: 31
+- Public surfaces extracted: 30
 - Governed production sources: 50
 - Tool contracts extracted: 11
 - Schema IDs extracted: 46

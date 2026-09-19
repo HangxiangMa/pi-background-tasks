@@ -551,14 +551,6 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerCommand('tasks', {
-    description: 'Open the Claude-like background task manager UI',
-    handler: async (args, ctx) => {
-      const taskId = optionalTrimmed(args);
-      await openTaskManager(ctx, taskId);
-    },
-  });
-
   pi.registerCommand('bg-tasks', {
     description: 'Open the background task manager UI',
     handler: async (args, ctx) => {
