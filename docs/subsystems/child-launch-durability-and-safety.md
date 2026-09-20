@@ -13,14 +13,27 @@ Primary sources: `src/core/pi-launch.ts` and `src/core/durable-fs.ts`.
 
 ## Pi launch resolution
 
-On non-Windows platforms, `resolvePiLaunch()` returns `{ executable: 'pi', argvPrefix: [], kind: 'path' }`.
+`resolvePiLaunch()` returns a verified executable plus an argv prefix; callers pass both directly to `spawn` without a shell.
 
-On Windows, the package does not trust shell PATH shims. It resolves `@earendil-works/pi-coding-agent/package.json`, reads `bin.pi`, realpaths the package root and bin target, verifies the target stays inside the package root, and accepts only a regular file with one of these forms:
+On POSIX platforms, resolution searches `PATH` in order. A candidate named `pi` must canonicalize to a regular file and pass execute-access validation. Invalid candidates are skipped so a later executable can win. After that concrete admission check, the established `{ executable: "pi", kind: "path" }` spawn shape is retained; production validation and spawn use the same process `PATH`. If no candidate qualifies, resolution canonicalizes the running host script and walks upward through package manifests. It skips only valid nameless sub-manifests, stops at the nearest named package boundary, and accepts the host only when:
 
-- `.js`, `.cjs`, `.mjs`: launch with `process.execPath` and the target as `argvPrefix[0]`;
-- `.exe`, `.com`: launch the target directly.
+- the package name is exactly `@earendil-works/pi-coding-agent`;
+- the package has a valid npm `bin` string or `bin.pi` entry;
+- the canonical host script is the canonical declared bin target.
 
-Resolution failures throw `PiLaunchResolutionError` with code `pi_executable_resolution_failed`; no substitute route or shell fallback is selected.
+An arbitrary JavaScript host is therefore not a Pi fallback merely because its filename ends in `.js`, `.cjs`, or `.mjs`.
+
+Windows never consults PATH shims. It first applies the same named-package check to the running host, which covers a global Pi installation loading this package from Pi's separate extension prefix. A valid running Pi host is authoritative. If the process is instead a foreign SDK/embedded host, resolution retains the module route: resolve the Pi manifest directly or resolve the package entry and walk to its nearest named manifest. Every accepted module manifest must also carry the exact Pi package name; a manifest that claims to be the running Pi host but has an invalid bin does not silently fall through to another installation.
+
+All package routes realpath the manifest root and bin target, reject absolute or escaping bins, require a regular target file, and preserve these launch forms:
+
+- `.js`, `.cjs`, `.mjs`: launch through a generic `node`, `nodejs`, or `bun` `process.execPath`, with the canonical target as `argvPrefix[0]` (`package-node-cli`);
+- Windows `.exe`, `.com`: launch the canonical target directly with an empty argv prefix (retaining the historical `package-node-cli` kind);
+- `.cmd`, `.bat`, `.ps1`, extensionless package targets, and other forms: reject rather than invoke a shell.
+
+A non-generic `process.execPath` paired with either a Bun virtual host script under `/$bunfs/root/` or an executable named `pi` (`pi.exe`/`pi.com` on Windows) is a separate `compiled-host` route: the canonical regular host executable is relaunched directly (with POSIX execute-access or Windows native-extension validation), and a virtual script is not passed as an argument. Other arbitrary native host executables are not treated as Pi. This branch preserves compiled-host mechanics but does not by itself certify any vendor-compiled Pi distribution.
+
+Malformed, unreadable, non-object, or malformed-name manifests are hard package-boundary failures. Resolution failures throw `PiLaunchResolutionError` with code `pi_executable_resolution_failed`; no substitute route, model, shell interpolation, or invalid-manifest fallback is selected.
 
 ## Windows argv and command-line length
 

@@ -1,9 +1,9 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import {
   ModelRuntime,
   createAgentSession,
@@ -31,6 +31,7 @@ interface Harness {
   session: AgentSession;
   cwd: string;
   root: string;
+  hostCliPath: string;
   restore: () => void;
 }
 
@@ -71,6 +72,7 @@ fs.writeFileSync(
       PI_SESSION_FILE: process.env.PI_SESSION_FILE ?? null,
       PI_PROVIDER: process.env.PI_PROVIDER ?? null,
       PI_MODEL: process.env.PI_MODEL ?? null,
+      PI_CHILD_ENTRY: process.argv[1] ?? null,
     },
     null,
     2,
@@ -149,59 +151,99 @@ async function harness(scenario = 'commit'): Promise<Harness> {
   roots.push(root);
   const cwd = join(root, 'project');
   const agentDir = join(root, 'agent');
-  const binDir = join(root, 'bin');
+  const emptyBinA = join(root, 'empty-bin-a');
+  const emptyBinB = join(root, 'empty-bin-b');
+  const hostPackageRoot = join(
+    root,
+    'global Pi installation',
+    'node_modules',
+    '@earendil-works',
+    'pi-coding-agent',
+  );
+  const fakePi = join(hostPackageRoot, 'dist', 'cli.cjs');
   await mkdir(cwd, { recursive: true });
   await mkdir(agentDir, { recursive: true });
-  await mkdir(binDir, { recursive: true });
-  const fakePi = join(binDir, 'pi');
+  await mkdir(emptyBinA, { recursive: true });
+  await mkdir(emptyBinB, { recursive: true });
+  await mkdir(join(hostPackageRoot, 'dist'), { recursive: true });
+  await writeFile(
+    join(hostPackageRoot, 'package.json'),
+    `${JSON.stringify(
+      {
+        name: '@earendil-works/pi-coding-agent',
+        version: '0.0.0-delegate-sdk-fixture',
+        bin: { pi: 'dist/cli.cjs' },
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
   await writeFile(fakePi, FAKE_PI, 'utf8');
   await chmod(fakePi, 0o755);
 
   const previous = {
     path: process.env['PATH'],
     scenario: process.env['PI_BG_DELEGATE_FAKE_SCENARIO'],
+    argv1: process.argv[1],
   };
   Object.assign(process.env, isolatedTestEnv, {
-    PATH: `${binDir}:${process.env['PATH'] ?? ''}`,
+    // Deliberately provide no `pi` executable. POSIX and Windows must both use
+    // the same genuine named-host-package route exercised by production Pi.
+    PATH: `${emptyBinA}${delimiter}${emptyBinB}`,
     PI_BG_DELEGATE_FAKE_SCENARIO: scenario,
   });
 
-  const settingsManager = SettingsManager.inMemory({});
-  const loader = new DefaultResourceLoader({
-    cwd,
-    agentDir,
-    settingsManager,
-    additionalExtensionPaths: [extensionPath],
-    noExtensions: true,
-    noSkills: true,
-    noPromptTemplates: true,
-    noContextFiles: true,
-    noThemes: true,
-  });
-  await loader.reload();
-  const modelRuntime = await ModelRuntime.create({
-    authPath: join(agentDir, 'auth.json'),
-    modelsPath: null,
-  });
-  const { session } = await createAgentSession({
-    cwd,
-    agentDir,
-    resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(cwd),
-    settingsManager,
-    modelRuntime,
-    noTools: 'builtin',
-  });
-  await session.extensionRunner.emit({ type: 'session_start', reason: 'startup' });
-  return {
-    session,
-    cwd,
-    root,
-    restore: () => {
-      restoreEnvValue('PATH', previous.path);
-      restoreEnvValue('PI_BG_DELEGATE_FAKE_SCENARIO', previous.scenario);
-    },
+  let restored = false;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
+    restoreEnvValue('PATH', previous.path);
+    restoreEnvValue('PI_BG_DELEGATE_FAKE_SCENARIO', previous.scenario);
+    if (previous.argv1 === undefined) process.argv.splice(1, 1);
+    else process.argv[1] = previous.argv1;
   };
+  process.argv[1] = fakePi;
+
+  try {
+    const settingsManager = SettingsManager.inMemory({});
+    const loader = new DefaultResourceLoader({
+      cwd,
+      agentDir,
+      settingsManager,
+      additionalExtensionPaths: [extensionPath],
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noContextFiles: true,
+      noThemes: true,
+    });
+    await loader.reload();
+    const modelRuntime = await ModelRuntime.create({
+      authPath: join(agentDir, 'auth.json'),
+      modelsPath: null,
+    });
+    const { session } = await createAgentSession({
+      cwd,
+      agentDir,
+      resourceLoader: loader,
+      sessionManager: SessionManager.inMemory(cwd),
+      settingsManager,
+      modelRuntime,
+      noTools: 'builtin',
+    });
+    await session.extensionRunner.emit({ type: 'session_start', reason: 'startup' });
+    return {
+      session,
+      cwd,
+      root,
+      hostCliPath: realpathSync(fakePi),
+      restore,
+    };
+  } catch (error) {
+    restore();
+    throw error;
+  }
 }
 
 async function dispose(h: Harness): Promise<void> {
@@ -446,6 +488,11 @@ void describe('bg_delegate and bg_result public surface', { concurrency: false }
         ) as Record<string, unknown>;
         assert.equal(env['PI_SESSION_ID'], null);
         assert.equal(env['PI_SESSION_FILE'], null);
+        assert.equal(
+          env['PI_CHILD_ENTRY'],
+          h.hostCliPath,
+          'the SDK child must launch the named host package bin rather than a PATH shim',
+        );
       } finally {
         await dispose(h);
       }
