@@ -3,24 +3,11 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { existsSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rm,
-  symlink,
-  writeFile,
-} from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { basename, delimiter, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import {
-  parseJsonText,
-  shellQuote,
-  type StartDelegateTaskOptions,
-} from '../../src/core/common.js';
+import { parseJsonText, shellQuote, type StartDelegateTaskOptions } from '../../src/core/common.js';
 import {
   BackgroundTaskRegistry,
   WIN32_CMD_PI_TELEMETRY_UNAVAILABLE_REASON,
@@ -352,11 +339,7 @@ function pidExists(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return !(
-      typeof error === 'object' &&
-      error !== null &&
-      Reflect.get(error, 'code') === 'ESRCH'
-    );
+    return !(typeof error === 'object' && error !== null && Reflect.get(error, 'code') === 'ESRCH');
   }
 }
 
@@ -609,8 +592,10 @@ void describe('BackgroundTaskRegistry', () => {
       });
       const child = lastSpawn(h).child;
       assert.equal(task.surviveReload, true);
-      assert.equal(task.reloadExecution?.admissionCommitted, true);
-      assert.equal(task.reloadExecution?.child, child);
+      const execution = task.reloadExecution;
+      assert.ok(execution);
+      assert.equal(execution.admissionCommitted, true);
+      assert.equal(execution.child, child);
       assert.equal(task.reloadSurvival?.authority, 'same-process-live-owner');
       assert.equal(task.reloadSurvival?.hostPid, process.pid);
       assert.equal(task.reloadSurvival?.sessionId, h.ctx.sessionId);
@@ -620,14 +605,22 @@ void describe('BackgroundTaskRegistry', () => {
       assert.equal(task.reloadSurvival?.handoffCount, 0);
       assert.match(task.reloadSurvival?.launchNonce ?? '', /^[0-9a-f]{32}$/u);
       assert.equal(task.reloadSurvival?.completionId, `${task.id}:1`);
-      assert.equal(task.telemetryWrapped, undefined, 'opted ordinary work never creates a Pi wrapper');
+      assert.equal(
+        task.telemetryWrapped,
+        undefined,
+        'opted ordinary work never creates a Pi wrapper',
+      );
       assert.equal(hub.isCurrentLease(lease), true);
 
       child.writeStdout('owner-output\n');
       child.close(0, null);
       await waitFor(() => task.status === 'completed', 'owner-backed completion');
       assert.equal(task.exitCode, 0);
-      assert.equal(task.reloadExecution?.closeObservation?.code, 0);
+      assert.equal(execution.closeObservation?.code, 0);
+      await waitFor(
+        () => task.reloadExecution === undefined,
+        'released terminal execution reference',
+      );
       assert.match(await readFile(task.outputAbsPath, 'utf8'), /owner-output/u);
       await waitFor(async () => {
         const metadata = await readJsonEventually(task.metadataAbsPath);
@@ -1041,7 +1034,11 @@ void describe('BackgroundTaskRegistry', () => {
       assert.equal(task.status, 'killed');
       assert.deepEqual(phases, ['terminate', 'force']);
       assert.equal(softAborted, 1);
-      assert.deepEqual(child.killCalls, [], 'Windows owner must never fall back to root-only child.kill');
+      assert.deepEqual(
+        child.killCalls,
+        [],
+        'Windows owner must never fall back to root-only child.kill',
+      );
       await waitFor(() => task.reloadExecution === undefined, 'Windows owner release');
     } finally {
       if (fresh !== undefined && freshLease !== undefined) {
@@ -1160,7 +1157,10 @@ void describe('BackgroundTaskRegistry', () => {
       assert.match(logs.join('\n'), /reload handoff expiry could not settle/u);
 
       const replacement = hub.beginActivation(identity, 'startup', '5'.repeat(32));
-      replacementLease = hub.commitActivation(replacement, await h.registry.stageReloadActivation(replacement));
+      replacementLease = hub.commitActivation(
+        replacement,
+        await h.registry.stageReloadActivation(replacement),
+      );
       assert.equal(hub.isCurrentLease(replacementLease), true);
       passingAssertionsCompleted = true;
     } finally {
@@ -1175,9 +1175,11 @@ void describe('BackgroundTaskRegistry', () => {
             // Failure-only rescue; passing assertions require the natural close.
           }
         }
-        await waitFor(() => !pidExists(pid), 'deadline late-close failure-only cleanup', 2000).catch(
-          () => undefined,
-        );
+        await waitFor(
+          () => !pidExists(pid),
+          'deadline late-close failure-only cleanup',
+          2000,
+        ).catch(() => undefined);
       }
       if (replacementLease !== undefined) h.registry.releaseReloadActivation(replacementLease);
       h.registry.setShuttingDown(true);
@@ -1457,16 +1459,11 @@ void describe('BackgroundTaskRegistry', () => {
         prompt: 'write report.md',
         reportPath: 'report.md',
       });
-      await assert.rejects(
-        start,
-        (error: unknown) => {
-          if (typeof error !== 'object' || error === null) return false;
-          const code = Reflect.get(error, 'code');
-          return (
-            code === 'pi_background_tasks_admission_timeout' || code === 'attested_git_timeout'
-          );
-        },
-      );
+      await assert.rejects(start, (error: unknown) => {
+        if (typeof error !== 'object' || error === null) return false;
+        const code = Reflect.get(error, 'code');
+        return code === 'pi_background_tasks_admission_timeout' || code === 'attested_git_timeout';
+      });
       await h.registry.waitForTaskAdmissions();
       assert.equal(gitSpawns, 1);
       assert.deepEqual(gitSignals, ['SIGTERM', 'SIGKILL']);
@@ -2000,7 +1997,10 @@ setInterval(() => {}, 1000);
       await Promise.all(stops);
       assert.equal(signals.filter((signal) => signal === 'SIGTERM').length, 1);
       assert.equal(signals.filter((signal) => signal === 'SIGKILL').length, 1);
-      assert.ok(signals.some((signal) => signal === 0), 'group disappearance must be observed');
+      assert.ok(
+        signals.some((signal) => signal === 0),
+        'group disappearance must be observed',
+      );
       assert.equal(task.status, 'killed');
       assert.equal(task.killEscalationTimer, undefined);
       assert.equal(terminals.length, 1);
@@ -2797,7 +2797,11 @@ setInterval(() => {}, 1000);
         'terminal metadata must survive publication abandonment',
       );
       assert.equal(metadata['status'], 'completed');
-      assert.equal(task.notified, true, 'notification truth remains independent of EventBus delivery');
+      assert.equal(
+        task.notified,
+        true,
+        'notification truth remains independent of EventBus delivery',
+      );
     } finally {
       failPublication = false;
       if (task !== undefined) {
@@ -2903,7 +2907,11 @@ setInterval(() => {}, 1000);
       assert.notEqual(task.terminalPublished, true);
       assert.equal(Reflect.get(task, 'terminalPublicationState'), 'abandoned');
       assert.equal(task.terminalPublishRetryHandle, undefined);
-      assert.equal(task.terminalPublicationGate, undefined, 'closure must release the gate reference');
+      assert.equal(
+        task.terminalPublicationGate,
+        undefined,
+        'closure must release the gate reference',
+      );
       assert.equal(task.terminalPublishInFlight, false);
       assert.equal(h.notifications.length, 0, 'shutdown still suppresses completion notification');
       const metadata = parseJsonObject(
@@ -2952,7 +2960,11 @@ setInterval(() => {}, 1000);
       assert.equal(Reflect.get(task, 'terminalPublicationState'), 'abandoned');
       assert.equal(Reflect.get(task, 'terminalPublicationAbandonReason'), 'registry_shutdown');
       assert.equal(task.terminalPublishRetryHandle, undefined);
-      assert.equal(task.terminalPublicationGate, undefined, 'closure must release the gate reference');
+      assert.equal(
+        task.terminalPublicationGate,
+        undefined,
+        'closure must release the gate reference',
+      );
       assert.equal(task.terminalPublishInFlight, false);
       assert.equal(h.notifications.length, 0);
       const metadata = parseJsonObject(
@@ -3641,7 +3653,10 @@ setInterval(() => {}, 1000);
       assert.ok(Array.isArray(content));
       const firstContent = requiredJsonObject(content[0], 'bg_result content item');
 
-      assert.deepEqual(h.registry.allTasks().map((task) => task.id), [runId]);
+      assert.deepEqual(
+        h.registry.allTasks().map((task) => task.id),
+        [runId],
+      );
       assert.equal(blocked.terminalPublicationState, 'abandoned');
       assert.equal(blocked.terminalPublicationAbandonReason, 'retention_limit');
       assert.equal(managed.notified, true);

@@ -115,7 +115,7 @@ void describe('packed lazy-module closure', { concurrency: false }, () => {
     await mkdir(unpacked, { recursive: true });
     await execFileAsync('tar', ['-xzf', tarball, '-C', unpacked], { cwd: root });
     const packedRoot = join(unpacked, 'package');
-    const deferredModule = join(packedRoot, 'src/core/delegate/runner.ts');
+    const deferredModule = join(packedRoot, 'dist/src/core/delegate/runner.js');
     assert.ok(existsSync(deferredModule), 'the real tarball must close over the deferred module');
     await rm(deferredModule);
     await symlink(
@@ -140,7 +140,7 @@ void describe('packed lazy-module closure', { concurrency: false }, () => {
       cwd,
       agentDir,
       settingsManager,
-      additionalExtensionPaths: [join(packedRoot, 'extensions/background-tasks.ts')],
+      additionalExtensionPaths: [join(packedRoot, 'dist/extensions/background-tasks.js')],
       noExtensions: true,
       noSkills: true,
       noPromptTemplates: true,

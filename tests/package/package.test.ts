@@ -511,8 +511,8 @@ void describe('package', () => {
     assert.ok(p.keywords.includes('pi-package'));
     assert.ok(p.keywords.includes('pi-extension'));
     assert.deepEqual(p.pi.extensions, [
-      './extensions/anthropic-attribution.ts',
-      './extensions/background-tasks.ts',
+      './dist/extensions/anthropic-attribution.js',
+      './dist/extensions/background-tasks.js',
     ]);
     assert.equal(
       p.pi.image,
@@ -522,6 +522,7 @@ void describe('package', () => {
     assert.match(p.scripts['test:full'] ?? '', /test:agent-loop/);
     assert.match(p.scripts['test:compat'] ?? '', /test-compat/);
     assert.match(p.scripts['test:pnpm-pack'] ?? '', /test-pnpm-pack-install/);
+    assert.ok(p.files.includes('dist/'));
     assert.ok(p.files.includes('extensions/'));
     assert.ok(p.files.includes('src/'));
     assert.ok(p.files.includes('docs/'));
@@ -529,10 +530,12 @@ void describe('package', () => {
     assert.ok(p.files.includes('THIRD_PARTY_NOTICES.md'));
     assert.ok(p.files.includes('logo.png'));
     assert.ok(!p.files.includes('scripts/'));
+    assert.equal(p.scripts['build:runtime'], 'node scripts/build-runtime.mjs');
     assert.equal(p.scripts['docs:generate'], 'node scripts/docs/generate.mjs');
     assert.equal(p.scripts['docs:verify'], 'node scripts/docs/verify.mjs');
+    assert.match(p.scripts['prepack'] ?? '', /build:runtime/);
     assert.match(p.scripts['prepack'] ?? '', /docs:verify/);
-    assert.match(p.scripts['prepack'] ?? '', /payload:check/);
+    assert.match(p.scripts['prepack'] ?? '', /check-package-payload/);
     assert.ok(p.peerDependencies['@earendil-works/pi-coding-agent']);
     assert.ok(p.peerDependencies['@earendil-works/pi-tui']);
     assert.ok(p.peerDependencies['typebox']);
@@ -551,7 +554,10 @@ void describe('package', () => {
       'src/core/common.ts',
       'src/core/registry.ts',
       'src/core/extension-api.ts',
+      'src/core/attested-pi-contract.ts',
       'src/core/attested-pi-run.ts',
+      'src/core/canonical-json.ts',
+      'src/core/task-durable.ts',
       'src/core/anthropic-attribution.ts',
       'src/core/anthropic-attribution-path.ts',
       'src/core/config.ts',
@@ -584,12 +590,25 @@ void describe('package', () => {
       'extensions/background-tasks.ts',
       'extensions/fusion-child.ts',
       'extensions/delegate-child.ts',
+      'dist/extensions/anthropic-attribution.js',
+      'dist/extensions/background-tasks.js',
+      'dist/extensions/anthropic-attribution-child.js',
+      'dist/extensions/delegate-child.js',
+      'dist/extensions/fusion-child.js',
+      'dist/src/core/delegate/hook-contract-evidence.json',
+      'dist/package.json',
     ])
       assert.ok(existsSync(new URL(f, root)), f);
 
     const extensionSource = await text('src/extension.ts');
-    assert.match(extensionSource, /if \(config\.features\.fusion\) \{[\s\S]*?registerFusionExtension\(pi, \{/);
-    assert.match(extensionSource, /if \(config\.features\.delegate\) \{[\s\S]*?registerDelegateExtension\(pi, \{/);
+    assert.match(
+      extensionSource,
+      /if \(config\.features\.fusion\) \{[\s\S]*?registerFusionExtension\(pi, \{/,
+    );
+    assert.match(
+      extensionSource,
+      /if \(config\.features\.delegate\) \{[\s\S]*?registerDelegateExtension\(pi, \{/,
+    );
     assert.match(
       extensionSource,
       /if \(config\.features\.delegate \|\| config\.features\.fusion\) \{[\s\S]*?registerBackgroundResultExtension\(pi, \{/,
@@ -1478,10 +1497,7 @@ void describe('package', () => {
       "const host = 'example.com';",
       'const fromTemplate = new URL(`https://${host}/v1`, import.meta.url).pathname;',
     ].join('\n');
-    assert.deepEqual(
-      findFileUrlPathnameViolations('absolute-https-first.ts', httpsCases),
-      [],
-    );
+    assert.deepEqual(findFileUrlPathnameViolations('absolute-https-first.ts', httpsCases), []);
   });
 
   void it('file URL guard retains explicit bases for possibly relative first inputs', () => {
@@ -1601,10 +1617,7 @@ void describe('package', () => {
     assert.equal(new URL('ht\ntps://example.com/request/path', import.meta.url).protocol, 'https:');
     assert.equal(new URL('ht\ttps://example.com/request/path', import.meta.url).protocol, 'https:');
     assert.equal(new URL('ht\rtps://example.com/request/path', import.meta.url).protocol, 'https:');
-    assert.equal(
-      new URL(`\r\nht\ntps://${runtimeHost}/v1`, import.meta.url).protocol,
-      'https:',
-    );
+    assert.equal(new URL(`\r\nht\ntps://${runtimeHost}/v1`, import.meta.url).protocol, 'https:');
   });
 
   void it('file URL guard preserves explicit abrupt completion states', () => {
@@ -2038,10 +2051,7 @@ void describe('package', () => {
       'const requestPath = new URL(target).pathname;',
       "target = 'file:///C:/work/file.ts';",
     ].join('\n');
-    assert.deepEqual(
-      findFileUrlPathnameViolations('write-after-read.ts', writeAfterRead),
-      [],
-    );
+    assert.deepEqual(findFileUrlPathnameViolations('write-after-read.ts', writeAfterRead), []);
 
     const unreachableFileWrite = [
       "let target = 'https://example.com/request/path';",
@@ -2081,10 +2091,7 @@ void describe('package', () => {
       "  return new URL('file:///C:/still-not-a-real-url-object')[key];",
       '}',
     ].join('\n');
-    assert.deepEqual(
-      findFileUrlPathnameViolations('pathname-alias-controls.ts', controls),
-      [],
-    );
+    assert.deepEqual(findFileUrlPathnameViolations('pathname-alias-controls.ts', controls), []);
   });
 
   void it('converts file URLs to native paths instead of using URL.pathname', async () => {
@@ -2161,19 +2168,23 @@ void describe('package', () => {
     const envRoot = makeIsolatedEnvRoot('pi-bg-pack-env-');
     const packCwd = join(envRoot, 'pack-project');
     makeIsolatedNpmProject(packCwd, 'payload-pack-project');
-    const r = runNpm(
-      ['pack', '--dry-run', '--ignore-scripts', '--json', fileURLToPath(root)],
-      {
-        cwd: packCwd,
-        env: isolatedNpmEnv(envRoot),
-      },
-    );
+    const r = runNpm(['pack', '--dry-run', '--ignore-scripts', '--json', fileURLToPath(root)], {
+      cwd: packCwd,
+      env: isolatedNpmEnv(envRoot),
+    });
     removeIsolatedEnvRoot(envRoot);
     assert.equal(r.status, 0, r.stderr);
     const firstEntry = parsePackEntries(r.stdout)[0];
     assert.ok(firstEntry, 'npm pack must return one entry');
     const files = firstEntry.files.map((file) => file.path).sort();
     for (const f of [
+      'dist/extensions/anthropic-attribution-child.js',
+      'dist/extensions/anthropic-attribution.js',
+      'dist/extensions/background-tasks.js',
+      'dist/extensions/delegate-child.js',
+      'dist/extensions/fusion-child.js',
+      'dist/src/core/delegate/hook-contract-evidence.json',
+      'dist/package.json',
       'extensions/anthropic-attribution-child.ts',
       'extensions/anthropic-attribution.ts',
       'extensions/background-tasks.ts',
@@ -2223,6 +2234,10 @@ void describe('package', () => {
       'package.json',
     ])
       assert.ok(files.includes(f), f);
+    assert.ok(
+      files.some((f) => f.startsWith('dist/src/') && f.endsWith('.js')),
+      'compiled runtime closure must ship',
+    );
     assert.ok(!files.some((f) => f.startsWith('tests/')), 'tests must not ship');
     assert.ok(!files.some((f) => f.startsWith('scripts/')), 'release-only scripts must not ship');
     assert.ok(!files.some((f) => f.includes('node_modules')), 'node_modules must not ship');
@@ -2250,16 +2265,10 @@ void describe('package', () => {
         );
       }
       await writeFile(join(probeProject, '.npmrc'), '');
-      await writeFile(
-        join(hostileProject, '.npmrc'),
-        `@mixmark-io:registry=${hostileRegistry}\n`,
-      );
+      await writeFile(join(hostileProject, '.npmrc'), `@mixmark-io:registry=${hostileRegistry}\n`);
       await writeFile(safeUserConfig, '');
       await writeFile(safeGlobalConfig, '');
-      await writeFile(
-        hostileGlobalConfig,
-        `@mixmark-io:registry=${hostileRegistry}\n`,
-      );
+      await writeFile(hostileGlobalConfig, `@mixmark-io:registry=${hostileRegistry}\n`);
 
       const vulnerableEnv = localRegistryNpmEnv(envRoot, ownedRegistry);
       vulnerableEnv['NPM_CONFIG_GLOBALCONFIG'] = hostileGlobalConfig;
@@ -2352,11 +2361,7 @@ void describe('package', () => {
     const temp = await mkdtemp(join(tmpdir(), 'pi-bg-pack-script-denial-'));
     const envRoot = makeIsolatedEnvRoot('pi-bg-pack-script-env-');
     const packageRoot = join(temp, 'fixture-root');
-    const sentinelDirectory = join(
-      packageRoot,
-      'node_modules',
-      'npm-pack-lifecycle-sentinel',
-    );
+    const sentinelDirectory = join(packageRoot, 'node_modules', 'npm-pack-lifecycle-sentinel');
     const packProject = join(temp, 'pack-project');
     const markerDirectory = join(temp, 'markers');
     const sentinelScripts = {
@@ -2408,7 +2413,7 @@ void describe('package', () => {
           'mkdirSync(markers, { recursive: true });',
           "appendFileSync(join(markers, 'attempts.log'), `${event}\\n`, 'utf8');",
           'if (process.env.NPM_PACK_SENTINEL_FAIL_EVENT === event) {',
-          "  throw new Error(`sentinel lifecycle executed: ${event}`);",
+          '  throw new Error(`sentinel lifecycle executed: ${event}`);',
           '}',
           '',
         ].join('\n'),
@@ -2425,13 +2430,7 @@ void describe('package', () => {
       const attemptedTarballs = join(temp, 'attempted-tarballs');
       mkdirSync(attemptedTarballs, { recursive: true });
       const lifecycleAttempt = runNpm(
-        [
-          'pack',
-          '--json',
-          '--pack-destination',
-          attemptedTarballs,
-          sentinelDirectory,
-        ],
+        ['pack', '--json', '--pack-destination', attemptedTarballs, sentinelDirectory],
         { cwd: packProject, env: sentinelEnv('postpack') },
       );
       assert.notEqual(lifecycleAttempt.status, 0, 'the lifecycle control must fail loudly');
@@ -2503,13 +2502,7 @@ void describe('package', () => {
         )}\n`,
       );
       const install = await runNpmAsync(
-        [
-          'install',
-          '--ignore-scripts',
-          '--no-audit',
-          '--no-fund',
-          '--package-lock=false',
-        ],
+        ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--package-lock=false'],
         {
           cwd: consumer,
           env: {
@@ -2623,10 +2616,7 @@ void describe('package', () => {
         packageRoot: fileURLToPath(root),
         scratchDir: join(temp, 'dependency-registry'),
       });
-      assert.deepEqual(registry.packageVersions, [
-        '@mixmark-io/domino@2.2.0',
-        'turndown@7.2.4',
-      ]);
+      assert.deepEqual(registry.packageVersions, ['@mixmark-io/domino@2.2.0', 'turndown@7.2.4']);
       assert.deepEqual(
         realDependencyDirectories.map(hashReadOnlyTree),
         realDependencyHashesBefore,
@@ -2706,9 +2696,7 @@ void describe('package', () => {
       );
       assert.equal(install.status, 0, install.stderr);
       assert.equal(
-        existsSync(
-          join(installedConsumer, 'node_modules', '@ravshansbox', 'pi-anthropic-sps'),
-        ),
+        existsSync(join(installedConsumer, 'node_modules', '@ravshansbox', 'pi-anthropic-sps')),
         false,
         'packed consumers must not install the retired URL-based sanitizer dependency',
       );
@@ -2799,10 +2787,7 @@ void describe('package', () => {
         'src/ui/background-tasks-manager.ts',
         'src/ui/fusion-model-selector.ts',
       ]) {
-        assert.ok(
-          existsSync(join(installedConsumer, 'node_modules', 'pi-background-tasks', f)),
-          f,
-        );
+        assert.ok(existsSync(join(installedConsumer, 'node_modules', 'pi-background-tasks', f)), f);
       }
     } finally {
       if (registry !== undefined) await registry.close();

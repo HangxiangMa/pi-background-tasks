@@ -22,7 +22,9 @@ Every production file under `src/**` and `extensions/**` has exactly one primary
 | `extensions/fusion-child.ts` | [subsystems/fusion](./subsystems/fusion.md) |
 | `src/core/anthropic-attribution-path.ts` | [subsystems/anthropic-attribution](./subsystems/anthropic-attribution.md) |
 | `src/core/anthropic-attribution.ts` | [subsystems/anthropic-attribution](./subsystems/anthropic-attribution.md) |
+| `src/core/attested-pi-contract.ts` | [subsystems/attested-pi-runs](./subsystems/attested-pi-runs.md) |
 | `src/core/attested-pi-run.ts` | [subsystems/attested-pi-runs](./subsystems/attested-pi-runs.md) |
+| `src/core/canonical-json.ts` | [subsystems/child-launch-durability-and-safety](./subsystems/child-launch-durability-and-safety.md) |
 | `src/core/common.ts` | [subsystems/background-task-runtime](./subsystems/background-task-runtime.md) |
 | `src/core/config.ts` | [subsystems/host-ui-and-telemetry](./subsystems/host-ui-and-telemetry.md) |
 | `src/core/context/parent-snapshot.ts` | [concepts/context-projection-and-budgeting](./concepts/context-projection-and-budgeting.md) |
@@ -63,6 +65,7 @@ Every production file under `src/**` and `extensions/**` has exactly one primary
 | `src/core/registry.ts` | [subsystems/background-task-runtime](./subsystems/background-task-runtime.md) |
 | `src/core/reload-shell-owner.ts` | [subsystems/background-task-runtime](./subsystems/background-task-runtime.md) |
 | `src/core/shell-policy.ts` | [subsystems/background-task-runtime](./subsystems/background-task-runtime.md) |
+| `src/core/task-durable.ts` | [subsystems/child-launch-durability-and-safety](./subsystems/child-launch-durability-and-safety.md) |
 | `src/core/update-check.ts` | [subsystems/host-ui-and-telemetry](./subsystems/host-ui-and-telemetry.md) |
 | `src/core/windows-taskkill.ts` | [subsystems/background-task-runtime](./subsystems/background-task-runtime.md) |
 | `src/delegate-child-extension.ts` | [subsystems/delegation](./subsystems/delegation.md) |

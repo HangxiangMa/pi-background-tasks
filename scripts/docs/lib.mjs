@@ -244,6 +244,36 @@ function moduleInfo(ts, root, rel, cache) {
       }
     }
   }
+  const unwrapDynamicImport = (initializer) => {
+    let current = initializer;
+    while (ts.isAwaitExpression(current) || ts.isParenthesizedExpression(current) || ts.isAsExpression(current) || ts.isTypeAssertionExpression(current) || ts.isSatisfiesExpression?.(current)) current = current.expression;
+    if (!ts.isCallExpression(current) || current.expression.kind !== ts.SyntaxKind.ImportKeyword || current.arguments.length !== 1 || !ts.isStringLiteral(current.arguments[0])) return undefined;
+    return current.arguments[0].text;
+  };
+  const scanDynamicImports = (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer) {
+      const specifier = unwrapDynamicImport(node.initializer);
+      if (specifier !== undefined) {
+        const target = resolveTsModule(root, rel, specifier);
+        if (target === null) throw new DocsGateError(`${lineOf(sf, node, ts)} registration-bearing dynamic import must target package source`);
+        for (const element of node.name.elements) {
+          if (element.dotDotDotToken || !ts.isIdentifier(element.name)) throw new DocsGateError(`${lineOf(sf, element, ts)} dynamic registration import must use explicit identifier bindings`);
+          const exported = element.propertyName
+            ? ts.isIdentifier(element.propertyName) || ts.isStringLiteral(element.propertyName)
+              ? element.propertyName.text
+              : undefined
+            : element.name.text;
+          if (exported === undefined) throw new DocsGateError(`${lineOf(sf, element, ts)} dynamic registration import has an unsupported property name`);
+          const existing = imports.get(element.name.text);
+          if (existing !== undefined && (existing.rel !== target || existing.exported !== exported)) throw new DocsGateError(`${lineOf(sf, element, ts)} dynamic registration import shadows ${element.name.text}`);
+          imports.set(element.name.text, { rel: target, exported });
+        }
+      }
+    }
+    ts.forEachChild(node, scanDynamicImports);
+  };
+  scanDynamicImports(sf);
+
   const info = { rel, text, sf, imports, externalImports, exportedFunctions, localFunctions, defaultFunction, constDecls };
   cache.set(rel, info);
   return info;
@@ -870,6 +900,19 @@ function collectRegistrationsInFunction(
       }
     }
     return undefined;
+  };
+  const isLiteralDynamicRegistrationBinding = (element) => {
+    if (!ts.isBindingElement(element) || !ts.isIdentifier(element.name)) return false;
+    const pattern = element.parent;
+    if (!ts.isObjectBindingPattern(pattern)) return false;
+    const declaration = pattern.parent;
+    if (!ts.isVariableDeclaration(declaration) || !declaration.initializer) return false;
+    let initializer = declaration.initializer;
+    while (ts.isAwaitExpression(initializer) || ts.isParenthesizedExpression(initializer) || ts.isAsExpression(initializer) || ts.isTypeAssertionExpression(initializer) || ts.isSatisfiesExpression(initializer)) initializer = initializer.expression;
+    if (!ts.isCallExpression(initializer) || initializer.expression.kind !== ts.SyntaxKind.ImportKeyword || initializer.arguments.length !== 1 || !ts.isStringLiteral(initializer.arguments[0])) return false;
+    const target = resolveTsModule(root, rel, initializer.arguments[0].text);
+    const imported = info.imports.get(element.name.text);
+    return target !== null && imported?.rel === target;
   };
   const localBindingNames = new Set();
   for (const parameter of fn.parameters ?? []) bindingNames(parameter.name, localBindingNames);
@@ -1847,7 +1890,7 @@ function collectRegistrationsInFunction(
     }
     if (ts.isBindingElement(node)) {
       const registrationBinding = destructuredRegistrationBinding(node.parent);
-      if (registrationBinding !== undefined) {
+      if (registrationBinding !== undefined && !isLiteralDynamicRegistrationBinding(node)) {
         throw new DocsGateError(
           `${lineOf(info.sf, node, ts)} destructured registration binding ${registrationBinding} is unsupported`,
         );
@@ -2043,12 +2086,15 @@ function uniqueRegistrations(regs) {
 
 function extractEntrypoint(root, pkg, ts, cache) {
   const entries = pkg.pi?.extensions;
-  if (!Array.isArray(entries) || entries.length === 0 || entries.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)) throw new DocsGateError('package.json pi.extensions must contain at least one non-blank TypeScript entrypoint');
+  if (!Array.isArray(entries) || entries.length === 0 || entries.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)) throw new DocsGateError('package.json pi.extensions must contain at least one non-blank extension entrypoint');
   const regs = [];
   for (const declaredEntry of entries) {
     const entry = declaredEntry.replace(/^\.\//u, '');
-    const entryRel = entry.endsWith('.ts') ? entry : `${entry}.ts`;
-    if (!existsSync(packagePath(root, entryRel))) throw new DocsGateError(`package.json pi extension ${entry} does not exist`);
+    const compiledSource = entry.startsWith('dist/') && entry.endsWith('.js')
+      ? `${entry.slice('dist/'.length, -'.js'.length)}.ts`
+      : undefined;
+    const entryRel = compiledSource ?? (entry.endsWith('.ts') ? entry : `${entry}.ts`);
+    if (!existsSync(packagePath(root, entryRel))) throw new DocsGateError(`package.json Pi extension ${entry} has no authoritative TypeScript source ${entryRel}`);
     const target = findExportedFunction(ts, root, entryRel, 'default', cache);
     moduleInfo(ts, root, target.rel, cache);
     const piParameter = target.node.parameters[0]?.name;
@@ -3324,8 +3370,9 @@ function assertSvgSafe(root, rel) {
 
 export function checkPayloadFiles(files, root = PACKAGE_ROOT) {
   const fileSet = new Set(files);
-  const requiredRoots = ['extensions/anthropic-attribution.ts', 'extensions/background-tasks.ts', 'extensions/delegate-child.ts', 'extensions/fusion-child.ts', 'README.md', 'TESTING.md', 'TEST_PLAN.md', 'PUBLISHING.md', 'BACKGROUND-TASKS-INSTRUCTIONS.md', 'THIRD_PARTY_NOTICES.md', 'logo.png', 'LICENSE', 'package.json'];
+  const requiredRoots = ['dist/extensions/anthropic-attribution.js', 'dist/extensions/background-tasks.js', 'dist/extensions/anthropic-attribution-child.js', 'dist/extensions/delegate-child.js', 'dist/extensions/fusion-child.js', 'dist/package.json', 'extensions/anthropic-attribution.ts', 'extensions/background-tasks.ts', 'extensions/delegate-child.ts', 'extensions/fusion-child.ts', 'README.md', 'TESTING.md', 'TEST_PLAN.md', 'PUBLISHING.md', 'BACKGROUND-TASKS-INSTRUCTIONS.md', 'THIRD_PARTY_NOTICES.md', 'logo.png', 'LICENSE', 'package.json'];
   for (const f of requiredRoots) if (!fileSet.has(f)) throw new DocsGateError(`packed payload missing ${f}`);
+  for (const f of walkFiles(root, 'dist', () => true)) if (!fileSet.has(f)) throw new DocsGateError(`packed payload missing ${f}`);
   for (const f of walkFiles(root, 'src', () => true)) if (!fileSet.has(f)) throw new DocsGateError(`packed payload missing ${f}`);
   for (const f of walkFiles(root, 'extensions', () => true)) if (!fileSet.has(f)) throw new DocsGateError(`packed payload missing ${f}`);
   const docsModel = loadDocsModel({ packageRoot: root });

@@ -19,7 +19,7 @@ const SCENARIOS = Object.freeze([
 ]);
 
 function parseArgs(argv) {
-  const out = { samples: 30, warmups: 1, worker: DEFAULT_WORKER };
+  const out = { samples: 30, warmups: 1, worker: DEFAULT_WORKER, runtime: 'source' };
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index];
     const value = argv[index + 1];
@@ -31,6 +31,7 @@ function parseArgs(argv) {
     else if (key === '--worker' && value) out.worker = resolve(value);
     else if (key === '--node' && value) out.node = resolve(value);
     else if (key === '--scratch' && value) out.scratch = resolve(value);
+    else if (key === '--runtime' && value) out.runtime = value;
     else if (key === '--scenarios' && value) out.scenarios = value.split(',').filter(Boolean);
     else if (key === '--help') out.help = true;
     else throw new Error(`unknown or incomplete argument: ${key ?? '(missing)'}`);
@@ -42,6 +43,7 @@ function parseArgs(argv) {
   }
   if (!Number.isSafeInteger(out.samples) || out.samples < 1) throw new Error('--samples must be a positive integer');
   if (!Number.isSafeInteger(out.warmups) || out.warmups < 0) throw new Error('--warmups must be a non-negative integer');
+  if (out.runtime !== 'source' && out.runtime !== 'compiled') throw new Error('--runtime must be source or compiled');
   out.node ??= process.execPath;
   out.scratch ??= join(dirname(out.output), `benchmark-${out.label}-scratch`);
   out.scenarios ??= [...SCENARIOS];
@@ -55,7 +57,7 @@ function help() {
   console.log(`Usage: node scripts/benchmark-cold-load.mjs \\
   --root <package-root> --label <baseline|candidate> --output <receipt.json> \\
   [--samples 30] [--warmups 1] [--node /path/to/node] [--scratch /owned/path] \\
-  [--scenarios sdk-process-only-load,...]
+  [--runtime source|compiled] [--scenarios sdk-process-only-load,...]
 
 Cold means a fresh Node process with an empty JS/Jiti module cache. It does not
 flush the host filesystem cache. Timing is evidence only; there is no CI threshold.`);
@@ -166,8 +168,13 @@ async function main() {
     source_commit: await textCommand('git', ['rev-parse', 'HEAD^{commit}'], args.root, env),
     source_tree: await textCommand('git', ['rev-parse', 'HEAD^{tree}'], args.root, env),
     source_status: gitStatus === '' ? 'clean' : gitStatus,
-    source_format: 'TypeScript source loaded through Pi/Jiti; no compiled package distribution',
-    package_entrypoints: packageJson.pi?.extensions ?? [],
+    runtime: args.runtime,
+    source_format: args.runtime === 'compiled'
+      ? 'precompiled JavaScript distribution loaded through Pi/Jiti'
+      : 'authoritative TypeScript source loaded through Pi/Jiti',
+    package_entrypoints: args.runtime === 'compiled'
+      ? packageJson.pi?.extensions ?? []
+      : ['./extensions/anthropic-attribution.ts', './extensions/background-tasks.ts'],
     features: {
       'sdk-no-extension-load': '(no package entrypoint)',
       'sdk-process-only-load': 'process',
@@ -188,8 +195,8 @@ async function main() {
     limitations: [
       'No filesystem-cache flush; this is process/module-cache cold only.',
       'Baseline and candidate are sequential because no third worktree/copy is permitted; host drift remains possible.',
-      'No native Windows result and no compiled-Bun/distributed-binary result.',
-      'Process-only still statically imports facade source through src/extension.ts in P1a.',
+      'No native Windows result and no compiled-Bun executable result.',
+      'Compiled measurements still use Pi/Jiti to load JavaScript and do not represent a vendor Bun binary.',
     ],
   };
   const scenarios = args.scenarios;
@@ -201,7 +208,7 @@ async function main() {
     await mkdir(sampleRoot, { recursive: true });
     const result = await run(
       args.node,
-      ['--import', 'tsx', args.worker, '--root', args.root, '--scenario', scenario, '--sample-root', sampleRoot],
+      ['--import', 'tsx', args.worker, '--root', args.root, '--scenario', scenario, '--sample-root', sampleRoot, '--runtime', args.runtime],
       { cwd: args.root, env, timeoutMs: scenario === 'fusion-first' ? 180_000 : 120_000 },
     );
     const lines = result.stdout.trim().split('\n').filter(Boolean);

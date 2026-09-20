@@ -1,9 +1,6 @@
 import type { Provider } from '@earendil-works/pi-ai';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
-import spawnAnthropicAttribution, {
-  type PiContextLike,
-  type PiExtensionHost,
-} from '../src/core/anthropic-attribution.js';
+import type { PiContextLike, PiExtensionHost } from '../src/core/anthropic-attribution.js';
 import { parseBackgroundTasksConfig } from '../src/core/config.js';
 
 const ANTHROPIC_PROVIDER = 'anthropic';
@@ -147,9 +144,12 @@ function restoreProviderInstallation(installation: ProviderInstallation): void {
   }
 }
 
-export default function ambientAnthropicAttribution(pi: PiExtensionHost): void {
+export default async function ambientAnthropicAttribution(pi: PiExtensionHost): Promise<void> {
   const config = parseBackgroundTasksConfig();
   if (config.features.attribution) {
+    const { default: spawnAnthropicAttribution } = await import(
+      '../src/core/anthropic-attribution.js'
+    );
     let installation: ProviderInstallation | undefined;
     pi.on('session_start', (_event, context) => {
       const registry = (context as AmbientAttributionContext).modelRegistry;

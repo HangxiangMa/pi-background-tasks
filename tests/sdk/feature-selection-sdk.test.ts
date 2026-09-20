@@ -28,6 +28,8 @@ import {
 const ambientAttributionPath = resolve('extensions/anthropic-attribution.ts');
 const childAttributionPath = resolve('extensions/anthropic-attribution-child.ts');
 const backgroundPath = resolve('extensions/background-tasks.ts');
+const compiledAmbientAttributionPath = resolve('dist/extensions/anthropic-attribution.js');
+const compiledBackgroundPath = resolve('dist/extensions/background-tasks.js');
 const shortcutOwnerPath = resolve('tests/fixtures/shortcut-owner.ts');
 const featureToolCollisionsPath = resolve('tests/fixtures/feature-tool-collisions.ts');
 const attributionCopyPath = resolve('tests/fixtures/anthropic-attribution-copy.ts');
@@ -55,12 +57,7 @@ const FUSION_TOOLS = [
   'fusion_validate',
 ] as const;
 const FUSION_COMMANDS = ['fusion', 'fusion-models'] as const;
-const ADVANCED_TOOLS = [
-  'bg_delegate',
-  'bg_result',
-  'bg_run_pi_attested',
-  ...FUSION_TOOLS,
-] as const;
+const ADVANCED_TOOLS = ['bg_delegate', 'bg_result', 'bg_run_pi_attested', ...FUSION_TOOLS] as const;
 
 interface RegistrationInventory {
   tools: string[];
@@ -94,7 +91,10 @@ function inventory(result: LoadExtensionsResult): RegistrationInventory {
   };
 }
 
-function expectedInventory(features: ReadonlySet<string>, shortcut = 'shift+down'): RegistrationInventory {
+function expectedInventory(
+  features: ReadonlySet<string>,
+  shortcut = 'shift+down',
+): RegistrationInventory {
   const tools: string[] = [...PROCESS_TOOLS];
   const commands: string[] = [...PROCESS_COMMANDS];
   const renderers: string[] = ['background-task-notification'];
@@ -128,15 +128,23 @@ async function makeRoot(prefix: string): Promise<{ root: string; cwd: string; ag
 
 async function loadPackage(
   options: { extraPaths?: string[]; paths?: string[] } = {},
-): Promise<{ loader: DefaultResourceLoader; result: LoadExtensionsResult; cwd: string; agentDir: string }> {
+): Promise<{
+  loader: DefaultResourceLoader;
+  result: LoadExtensionsResult;
+  cwd: string;
+  agentDir: string;
+}> {
   const { cwd, agentDir } = await makeRoot('pi-bg-feature-loader-');
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir,
     settingsManager: SettingsManager.inMemory(),
     eventBus: createEventBus(),
-    additionalExtensionPaths:
-      options.paths ?? [ambientAttributionPath, ...(options.extraPaths ?? []), backgroundPath],
+    additionalExtensionPaths: options.paths ?? [
+      ambientAttributionPath,
+      ...(options.extraPaths ?? []),
+      backgroundPath,
+    ],
     noExtensions: true,
     noSkills: true,
     noPromptTemplates: true,
@@ -160,6 +168,7 @@ interface SessionHarnessOptions {
   setupModelRuntime?: (runtime: ModelRuntime) => void;
   onExtensionError?: (error: { event: string; error: string }) => void;
   skipBind?: boolean;
+  paths?: string[];
 }
 
 async function makeSession(
@@ -174,7 +183,11 @@ async function makeSession(
     agentDir,
     settingsManager,
     eventBus,
-    additionalExtensionPaths: [ambientAttributionPath, ...extraPaths, backgroundPath],
+    additionalExtensionPaths: options.paths ?? [
+      ambientAttributionPath,
+      ...extraPaths,
+      backgroundPath,
+    ],
     noExtensions: true,
     noSkills: true,
     noPromptTemplates: true,
@@ -231,10 +244,9 @@ function hasCacheCommand(session: AgentSession): boolean {
 
 function sessionInventory(session: AgentSession): RegistrationInventory {
   const runner = session.extensionRunner;
-  const toolNames = [
-    ...PROCESS_TOOLS,
-    ...ADVANCED_TOOLS,
-  ].filter((name) => session.getToolDefinition(name) !== undefined);
+  const toolNames = [...PROCESS_TOOLS, ...ADVANCED_TOOLS].filter(
+    (name) => session.getToolDefinition(name) !== undefined,
+  );
   return {
     tools: sorted(toolNames),
     commands: sorted(runner.getRegisteredCommands().map((command) => command.invocationName)),
@@ -299,6 +311,31 @@ afterEach(async () => {
 });
 
 void describe('C1a feature selection and dock configuration', { concurrency: false }, () => {
+  void it('loads the compiled distribution entrypoints with the complete default surface', async () => {
+    configure(undefined, undefined);
+    const { session } = await makeSession([], {
+      paths: [compiledAmbientAttributionPath, compiledBackgroundPath],
+    });
+    try {
+      const all = new Set(['process', 'delegate', 'fusion', 'attested', 'attribution']);
+      assert.deepEqual(sessionInventory(session), expectedInventory(all));
+    } finally {
+      await closeSession(session);
+    }
+  });
+
+  void it('loads compiled process-only mode without advanced registrations', async () => {
+    configure('process', 'off');
+    const { session } = await makeSession([], {
+      paths: [compiledAmbientAttributionPath, compiledBackgroundPath],
+    });
+    try {
+      assert.deepEqual(sessionInventory(session), expectedInventory(new Set(['process']), 'off'));
+    } finally {
+      await closeSession(session);
+    }
+  });
+
   void it('keeps the default full public registration surface', async () => {
     configure(undefined, undefined);
     const { session } = await makeSession();
@@ -306,7 +343,10 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
       const all = new Set(['process', 'delegate', 'fusion', 'attested', 'attribution']);
       assert.deepEqual(sessionInventory(session), expectedInventory(all));
       for (const name of [...PROCESS_TOOLS, ...ADVANCED_TOOLS]) {
-        assert.ok(session.getActiveToolNames().includes(name), `${name} should be active by default`);
+        assert.ok(
+          session.getActiveToolNames().includes(name),
+          `${name} should be active by default`,
+        );
       }
     } finally {
       await closeSession(session);
@@ -322,7 +362,11 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
       const { session } = await makeSession();
       try {
         const actual = sessionInventory(session);
-        assert.deepEqual(actual, expectedInventory(features), `inventory for ${[...features].join(',')}`);
+        assert.deepEqual(
+          actual,
+          expectedInventory(features),
+          `inventory for ${[...features].join(',')}`,
+        );
         assert.equal(
           actual.tools.filter((name) => name === 'bg_result').length,
           features.has('delegate') || features.has('fusion') ? 1 : 0,
@@ -353,7 +397,10 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
       const message = result.errors.map((error) => error.error).join('\n');
       assert.match(message, /pi_bg_config_invalid/);
       assert.match(message, testCase.expected);
-      assert.ok(message.length < 8_000, `diagnostic should stay bounded, got ${String(message.length)}`);
+      assert.ok(
+        message.length < 8_000,
+        `diagnostic should stay bounded, got ${String(message.length)}`,
+      );
       assert.doesNotMatch(message, /x{200}/, 'oversized invalid values must not be echoed');
       assert.deepEqual(inventory(result), {
         tools: [],
@@ -398,7 +445,11 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
 
   void it('restores preexisting public config, routing, auth, stream, and future merges', async () => {
     configure('process,attribution', 'off');
-    const routeContext: Context = { systemPrompt: 'provider route fixture', messages: [], tools: [] };
+    const routeContext: Context = {
+      systemPrompt: 'provider route fixture',
+      messages: [],
+      tools: [],
+    };
     const routeCalls: Array<{
       baseUrl: string | undefined;
       contextIdentity: boolean;
@@ -408,11 +459,7 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
     }> = [];
     const hostStream: NonNullable<
       NonNullable<ReturnType<ModelRuntime['getRegisteredProviderConfig']>>['streamSimple']
-    > = (
-      model,
-      context,
-      options,
-    ) => {
+    > = (model, context, options) => {
       routeCalls.push({
         baseUrl: model.baseUrl,
         contextIdentity: context === routeContext,
@@ -552,7 +599,10 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
         api: 'anthropic-messages',
         streamSimple: laterStream,
       });
-      assert.equal(modelRuntime.getRegisteredProviderConfig('anthropic')?.streamSimple, laterStream);
+      assert.equal(
+        modelRuntime.getRegisteredProviderConfig('anthropic')?.streamSimple,
+        laterStream,
+      );
       await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
       shutdown = true;
       assert.equal(
@@ -562,7 +612,8 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
       );
       assert.ok(modelRuntime.getProvider('anthropic'), 'later provider must remain effective');
     } finally {
-      if (!shutdown) await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+      if (!shutdown)
+        await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
       session.dispose();
     }
   });
@@ -591,7 +642,8 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
       assert.equal(modelRuntime.getProvider('anthropic'), laterNative);
       assert.equal(modelRuntime.getRegisteredProviderConfig('anthropic'), undefined);
     } finally {
-      if (!shutdown) await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+      if (!shutdown)
+        await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
       session.dispose();
     }
   });
@@ -610,7 +662,10 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
           streamSimple: hostStream,
         });
         const realRegister = runtime.registerProvider.bind(runtime);
-        const rejectingRegister: ModelRuntime['registerProvider'] = (providerId, providerConfig) => {
+        const rejectingRegister: ModelRuntime['registerProvider'] = (
+          providerId,
+          providerConfig,
+        ) => {
           if (providerId === 'anthropic' && providerConfig.streamSimple !== hostStream) {
             packageRegistrationFailures += 1;
             throw new Error('fixture rejects package provider registration');
@@ -722,10 +777,18 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
       assert.equal(empty.modelRuntime.getRegisteredNativeProvider('anthropic'), undefined);
       configure('process,attribution', 'off');
       await empty.session.reload();
-      assert.equal(attributionClaimCount(empty.eventBus), 0, 'empty-binding reload remains blocked');
+      assert.equal(
+        attributionClaimCount(empty.eventBus),
+        0,
+        'empty-binding reload remains blocked',
+      );
       assert.equal(hasCacheCommand(empty.session), false);
       await empty.session.bindExtensions({});
-      assert.equal(attributionClaimCount(empty.eventBus), 1, 'explicit post-reload rebind initializes');
+      assert.equal(
+        attributionClaimCount(empty.eventBus),
+        1,
+        'explicit post-reload rebind initializes',
+      );
       assert.equal(hasCacheCommand(empty.session), true);
     } finally {
       await closeSession(empty.session);
@@ -803,22 +866,26 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
       assert.ok(session.getToolDefinition('bg_result'));
       assert.ok(session.getActiveToolNames().includes('fusion_reason'));
       assert.equal(session.extensionRunner.hasHandlers('session_tree'), true);
-      const ambientProvider = session.extensionRunner
-        .getModelRegistry()
-        .getProvider('anthropic');
+      const ambientProvider = session.extensionRunner.getModelRegistry().getProvider('anthropic');
       assert.ok(ambientProvider);
 
       configure('process', 'off');
       await session.reload();
       assert.deepEqual(sessionInventory(session), expectedInventory(new Set(['process']), 'off'));
       for (const name of ADVANCED_TOOLS) {
-        assert.equal(session.getToolDefinition(name), undefined, `${name} must be absent after reload`);
-        assert.equal(session.getActiveToolNames().includes(name), false, `${name} must not stay active`);
+        assert.equal(
+          session.getToolDefinition(name),
+          undefined,
+          `${name} must be absent after reload`,
+        );
+        assert.equal(
+          session.getActiveToolNames().includes(name),
+          false,
+          `${name} must not stay active`,
+        );
       }
       assert.equal(session.extensionRunner.hasHandlers('session_tree'), false);
-      const restoredProvider = session.extensionRunner
-        .getModelRegistry()
-        .getProvider('anthropic');
+      const restoredProvider = session.extensionRunner.getModelRegistry().getProvider('anthropic');
       assert.ok(restoredProvider);
       assert.notEqual(
         restoredProvider.streamSimple,
@@ -850,18 +917,13 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
     configure('process', 'ctrl+alt+b');
     const { session, eventBus } = await makeSession([shortcutOwnerPath]);
     const fixtureEvents: unknown[] = [];
-    const unsubscribe = eventBus.on(
-      'pi-bg-test:shortcut-owner:shift-down',
-      (event) => fixtureEvents.push(event),
+    const unsubscribe = eventBus.on('pi-bg-test:shortcut-owner:shift-down', (event) =>
+      fixtureEvents.push(event),
     );
     const customCalls = { value: 0 };
     const statuses: string[] = [];
     session.extensionRunner.setUIContext(
-      uiWithDispatchCounters(
-        session.extensionRunner.getUIContext(),
-        customCalls,
-        statuses,
-      ),
+      uiWithDispatchCounters(session.extensionRunner.getUIContext(), customCalls, statuses),
     );
     try {
       const shortcuts = session.extensionRunner.getShortcuts({});
@@ -890,9 +952,8 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
     configure('process', 'off');
     const { session, eventBus } = await makeSession([shortcutOwnerPath]);
     const fixtureEvents: unknown[] = [];
-    const unsubscribe = eventBus.on(
-      'pi-bg-test:shortcut-owner:shift-down',
-      (event) => fixtureEvents.push(event),
+    const unsubscribe = eventBus.on('pi-bg-test:shortcut-owner:shift-down', (event) =>
+      fixtureEvents.push(event),
     );
     const customCalls = { value: 0 };
     session.extensionRunner.setUIContext(

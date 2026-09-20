@@ -5,11 +5,11 @@ mode: authored
 review_policy: behavioral
 stability: evolving
 covers_surfaces: []
-covers_sources: [src/core/attested-pi-run.ts]
+covers_sources: [src/core/attested-pi-contract.ts, src/core/attested-pi-run.ts]
 ---
 # Attested Pi runs subsystem
 
-This document is the primary behavioral owner for `src/core/attested-pi-run.ts`.
+This document is the primary behavioral owner for `src/core/attested-pi-contract.ts` and `src/core/attested-pi-run.ts`.
 
 It does **not** claim ownership of shared registry, Pi-launch, common task, or durable-fs modules. Those modules spawn the prepared request, store task metadata, publish terminal state, and provide atomic write primitives used by this subsystem.
 

@@ -33,10 +33,14 @@ void describe('docs package integration contract', () => {
       pkg.scripts['test:docs'],
       'tsx --test tests/unit/docs-gate.test.ts tests/package/docs-contract.test.ts',
     );
-    assert.equal(pkg.scripts['payload:check'], 'node scripts/check-package-payload.mjs');
+    assert.equal(
+      pkg.scripts['payload:check'],
+      'npm run build:runtime && node scripts/check-package-payload.mjs',
+    );
     assert.equal(pkg.scripts['release:check-version'], 'node scripts/check-release-version.mjs');
+    assert.match(pkg.scripts['prepack'] ?? '', /build:runtime/);
     assert.match(pkg.scripts['prepack'] ?? '', /docs:verify/);
-    assert.match(pkg.scripts['prepack'] ?? '', /payload:check/);
+    assert.match(pkg.scripts['prepack'] ?? '', /check-package-payload/);
     for (const path of [
       'docs/INDEX.md',
       'docs/read-before-edit.md',
@@ -128,9 +132,7 @@ void describe('docs package integration contract', () => {
     const optional = [...byFeature.keys()];
     const docks = ['shift+down', 'ctrl+alt+b', 'off'] as const;
     for (let mask = 0; mask < 1 << optional.length; mask += 1) {
-      const selected = new Set(
-        optional.filter((_feature, index) => (mask & (1 << index)) !== 0),
-      );
+      const selected = new Set(optional.filter((_feature, index) => (mask & (1 << index)) !== 0));
       for (const dock of docks) {
         const expected = new Set(always);
         for (const feature of selected) {

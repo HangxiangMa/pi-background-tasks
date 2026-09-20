@@ -13,7 +13,7 @@ This subsystem owns the extension entrypoint, command/tool registration, footer 
 
 ## Entrypoint and registration
 
-`extensions/background-tasks.ts` re-exports `src/extension.ts`. Before creating the registry or registering a surface, the extension strictly parses the shared capability/shortcut configuration. `process` is mandatory and registers:
+The published `dist/extensions/background-tasks.js` entrypoint is compiled from `extensions/background-tasks.ts`, which re-exports the authoritative `src/extension.ts`. Before creating the registry or registering a surface, the extension strictly parses the shared capability/shortcut configuration. It dynamically imports delegate/Fusion facade registration only for enabled capabilities; the dock component is imported only when an interactive manager is opened. `process` is mandatory and registers:
 
 - commands: `/bg`, `/tasks`, `/bg-tasks`, `/bg-clear`, `/bg-update`, `/jobs`, `/logs`, `/kill`;
 - tools: `bg_run`, `bg_status`, `bg_logs`, `bg_kill`;
@@ -21,7 +21,7 @@ This subsystem owns the extension entrypoint, command/tool registration, footer 
 - renderer: `background-task-notification`;
 - the task UI and EventBus service.
 
-Delegate, Fusion, attested-run, and ambient attribution registrations are independently selected by `PI_BG_FEATURES`. `bg_result` is derived and registered once iff delegate or Fusion is enabled. Disabled package registrations are absent rather than merely inactive. Active-tool cleanup is delegated to Pi's registration rebuild: a stale package name with no current definition is dropped, while an active definition from another extension remains active even when it uses a disabled package capability name such as `bg_delegate` or the retired `fusion_brainstorm`. The package does not perform name-wide subtraction. The default selection preserves the complete historical surface. Capability flags alone make no startup-performance claim.
+Delegate, Fusion, attested-run, and ambient attribution registrations are independently selected by `PI_BG_FEATURES`. `bg_result` is derived and registered once iff delegate or Fusion is enabled. Disabled facade/attribution modules are absent from the process-only static startup graph rather than merely inactive. Active-tool cleanup is delegated to Pi's registration rebuild: a stale package name with no current definition is dropped, while an active definition from another extension remains active even when it uses a disabled package capability name such as `bg_delegate` or the retired `fusion_brainstorm`. The package does not perform name-wide subtraction. The default selection preserves the complete historical surface. Capability flags alone make no startup-performance claim.
 
 ## Agent-visible shell guidance
 

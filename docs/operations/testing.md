@@ -38,6 +38,7 @@ From current `package.json`:
 
 | Lane | Script | Meaning |
 |---|---|---|
+| Runtime build | `npm run build:runtime` | Compile authoritative extension/runtime TypeScript into the shipped `dist/` JavaScript closure. |
 | Typecheck | `npm run typecheck` | `tsc --noEmit`. |
 | Type safety package tests | `npm run test:type-safety` | Package/type-safety tests. |
 | Unit | `npm run test:unit` | Pure/unit coverage, including durable fs, budgets, projection, Fusion/delegate core. |
@@ -60,7 +61,7 @@ From current `package.json`:
 | Docs attestation | `npm run docs:attest/record -- <doc_id> --reviewer <identity-after-semantic-review> --verdict PASS --notes <review-notes>` | Computes hashes and records an explicit semantic PASS receipt after review; `npm run docs:attest` is an alias and still needs args. |
 | Docs unit/package gate | `npm run test:docs` | Docs-gate unit/package tests. |
 | Payload check | `npm run payload:check` | Package payload policy check. |
-| Cold-load benchmark | `node scripts/benchmark-cold-load.mjs --root "$PWD" --label <label> --output <owned.json> --samples 30 --scratch <owned-dir>` | Fresh-process source/Jiti load and first-use distributions; evidence only, never a CI timing threshold. |
+| Cold-load benchmark | `node scripts/benchmark-cold-load.mjs --root "$PWD" --runtime <source|compiled> --label <label> --output <owned.json> --samples 30 --scratch <owned-dir>` | Fresh-process source or compiled-distribution load and first-use distributions; evidence only, never a CI timing threshold. |
 | Release version check | `npm run release:check-version` | Tag-only version sanity; requires explicit `GITHUB_REF_TYPE=tag`/`GITHUB_REF_NAME=v$VERSION` and never publishes. |
 
 ### Cold-load measurement discipline
@@ -69,9 +70,9 @@ The cold-load driver starts a new Node process for every sample and gives each w
 
 Here, **cold** means a fresh process and empty JavaScript/Jiti module cache. It does not mean a flushed filesystem cache. Baseline and candidate must use the same driver and worker bytes, Node/Pi/dependency tree, host, features, and root conditions. If worktree limits force sequential baseline-then-candidate collection rather than simultaneous AB/BA, record that host-drift risk; do not fabricate interleaving. There is no machine-specific pass threshold.
 
-The benchmark exercises source TypeScript, not a compiled distribution. It supports no native-Windows or compiled-Bun speed claim without separate runs. P1a also leaves a deliberate process-only limitation: `src/extension.ts` statically imports light delegate/Fusion facade source even when their registrars are disabled. Remaining extension/dock/attested startup seams and any precompiled packaging decision belong to later work.
+The benchmark requires an explicit `--runtime source|compiled` choice. Published package entrypoints select the compiled JavaScript distribution, while source mode remains an authoritative development control. Process-only startup no longer statically imports delegate/Fusion facades, dock UI, the attribution transport, or attested execution; enabled registrations still load their lightweight facade before the extension factory resolves. Neither mode supports a native-Windows or vendor compiled-Bun timing claim without separate runs.
 
-The package gate separately walks literal deferred imports and verifies every target is under the shipped `src/` closure. A packed-copy regression then removes one verifier/producer module from an otherwise real tarball: package startup and immediate inventory still work, the first producer invocation fails with the bounded module-specific error, and no delegate artifact is created. This characterizes damaged payload behavior without weakening the real payload-closure check.
+The package gate separately walks literal deferred imports, verifies every source target, builds its compiled counterpart, and requires the complete `dist/` closure in the tarball. A packed-copy regression then removes one verifier/producer module from an otherwise real tarball: package startup and immediate inventory still work, the first producer invocation fails with the bounded module-specific error, and no delegate artifact is created. This characterizes damaged payload behavior without weakening the real payload-closure check.
 
 Lazy lifecycle SDK coverage deliberately blocks Fusion cleanup while asserting the shared synchronous fence has already closed delegate, result, command/UI, and both Fusion lanes. A real `AgentSession.reload()` control lets production delegate preparation finish a complete artifact tree before returning, then proves the unregistered transaction is rolled back with no starter or residual run bytes. A separate claim race proves shutdown cannot consume Fusion usage without a successful retrieval, and a registered-task control proves rollback never deletes registry-owned artifacts.
 

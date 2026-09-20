@@ -12,7 +12,7 @@ covers_sources: []
 <!-- pi-docs:begin name="command-contract-fusion-models" generator="scripts/docs/generate.mjs" -->
 | Command | Availability | Default | Description | Provenance |
 | --- | --- | --- | --- | --- |
-| `/fusion-models` | `feature:fusion` | yes | Open the five-slot global fusion model selector. | `src/fusion-extension.ts:1129` |
+| `/fusion-models` | `feature:fusion` | yes | Open the five-slot global fusion model selector. | `src/fusion-extension.ts:1123` |
 <!-- pi-docs:end name="command-contract-fusion-models" -->
 
 Open the global Fusion model selector.

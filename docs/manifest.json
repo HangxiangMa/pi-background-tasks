@@ -25,7 +25,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:2e93d5a38b5de24d8c42c74577dbd7b88ec36fea233ddfb0dd5fd747f57af706",
+      "authored_body_sha256": "sha256:63e32141e9ae60dcc02b3b5e757c5ce39ab38adb1edb9b34ac459894607651fb",
       "covers_sources": [
         "extensions/anthropic-attribution-child.ts",
         "extensions/anthropic-attribution.ts",
@@ -38,8 +38,9 @@
       "state": "missing"
     },
     {
-      "authored_body_sha256": "sha256:0bc7b4aa647eb1819b0fea4213c74451161712f353e6291a63da25ca395d74e3",
+      "authored_body_sha256": "sha256:462e0604e3965782da8aee1f77a113f454d60d905b8e58ecb622b8979d111a00",
       "covers_sources": [
+        "src/core/attested-pi-contract.ts",
         "src/core/attested-pi-run.ts"
       ],
       "doc_id": "subsystems/attested-pi-runs",
@@ -64,10 +65,12 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:3ff0739e8eb5cc0ff95a7a1e0738428ad98691d8144648b76c1e5f9bf30e1193",
+      "authored_body_sha256": "sha256:cf4daaf407a01768f451f2374b5bb0a98efd7b4e5e0db07768c04e66a087f368",
       "covers_sources": [
+        "src/core/canonical-json.ts",
         "src/core/durable-fs.ts",
-        "src/core/pi-launch.ts"
+        "src/core/pi-launch.ts",
+        "src/core/task-durable.ts"
       ],
       "doc_id": "subsystems/child-launch-durability-and-safety",
       "rel": "docs/subsystems/child-launch-durability-and-safety.md",
@@ -76,7 +79,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:cecf91624a911595f5ba8e55486d9acdaa0940f3f20334d396b42f9326917da3",
+      "authored_body_sha256": "sha256:5555c0344c4bdba65e71575163febe4d672a60a5ff944c260604270ceb4cdc69",
       "covers_sources": [
         "extensions/delegate-child.ts",
         "src/core/delegate/artifacts.ts",
@@ -100,7 +103,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:7e820844f15913b3c26b4c7110c55fcac168c62f0bcb581de175559e2d6d1294",
+      "authored_body_sha256": "sha256:97f8ae7b3d811704207fc40fc4126ab85d58e9dd86cb59d496291a2313d85463",
       "covers_sources": [
         "extensions/fusion-child.ts",
         "src/core/fusion/artifacts.ts",
@@ -132,7 +135,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:584218c9892926eda6118f90157e3331a739d4d56c48ee41ff097032c5b3d9c9",
+      "authored_body_sha256": "sha256:b3b66442d3fdb151d99c93f2a536f93e85eec6604a074424d34929b0bce7935a",
       "covers_sources": [
         "extensions/background-tasks.ts",
         "src/core/config.ts",
@@ -463,6 +466,7 @@
     "subsystems/attested-pi-runs": {
       "audience": "maintainer",
       "covers_sources": [
+        "src/core/attested-pi-contract.ts",
         "src/core/attested-pi-run.ts"
       ],
       "covers_surfaces": [],
@@ -489,8 +493,10 @@
     "subsystems/child-launch-durability-and-safety": {
       "audience": "maintainer",
       "covers_sources": [
+        "src/core/canonical-json.ts",
         "src/core/durable-fs.ts",
-        "src/core/pi-launch.ts"
+        "src/core/pi-launch.ts",
+        "src/core/task-durable.ts"
       ],
       "covers_surfaces": [],
       "mode": "authored",
@@ -883,8 +889,8 @@
       "node": ">=22.19.0"
     },
     "entrypoints": [
-      "./extensions/anthropic-attribution.ts",
-      "./extensions/background-tasks.ts"
+      "./dist/extensions/anthropic-attribution.js",
+      "./dist/extensions/background-tasks.js"
     ],
     "files": [
       "BACKGROUND-TASKS-INSTRUCTIONS.md",
@@ -894,6 +900,7 @@
       "TESTING.md",
       "TEST_PLAN.md",
       "THIRD_PARTY_NOTICES.md",
+      "dist/",
       "docs/",
       "extensions/",
       "logo.png",
@@ -947,7 +954,7 @@
         "id": "command:bg",
         "kind": "command",
         "name": "bg",
-        "source": "src/extension.ts:743"
+        "source": "src/extension.ts:750"
       },
       {
         "availability": "always",
@@ -956,7 +963,7 @@
         "id": "command:bg-clear",
         "kind": "command",
         "name": "bg-clear",
-        "source": "src/extension.ts:786"
+        "source": "src/extension.ts:793"
       },
       {
         "availability": "always",
@@ -965,7 +972,7 @@
         "id": "command:bg-tasks",
         "kind": "command",
         "name": "bg-tasks",
-        "source": "src/extension.ts:778"
+        "source": "src/extension.ts:785"
       },
       {
         "availability": "always",
@@ -974,7 +981,7 @@
         "id": "command:bg-update",
         "kind": "command",
         "name": "bg-update",
-        "source": "src/extension.ts:794"
+        "source": "src/extension.ts:801"
       },
       {
         "availability": "feature:attribution",
@@ -992,7 +999,7 @@
         "id": "command:fusion",
         "kind": "command",
         "name": "fusion",
-        "source": "src/fusion-extension.ts:1080"
+        "source": "src/fusion-extension.ts:1083"
       },
       {
         "availability": "feature:fusion",
@@ -1001,7 +1008,7 @@
         "id": "command:fusion-models",
         "kind": "command",
         "name": "fusion-models",
-        "source": "src/fusion-extension.ts:1113"
+        "source": "src/fusion-extension.ts:1123"
       },
       {
         "availability": "always",
@@ -1010,7 +1017,7 @@
         "id": "command:jobs",
         "kind": "command",
         "name": "jobs",
-        "source": "src/extension.ts:843"
+        "source": "src/extension.ts:850"
       },
       {
         "availability": "always",
@@ -1019,7 +1026,7 @@
         "id": "command:kill",
         "kind": "command",
         "name": "kill",
-        "source": "src/extension.ts:887"
+        "source": "src/extension.ts:894"
       },
       {
         "availability": "always",
@@ -1028,7 +1035,7 @@
         "id": "command:logs",
         "kind": "command",
         "name": "logs",
-        "source": "src/extension.ts:856"
+        "source": "src/extension.ts:863"
       },
       {
         "availability": "always",
@@ -1037,7 +1044,7 @@
         "id": "command:tasks",
         "kind": "command",
         "name": "tasks",
-        "source": "src/extension.ts:770"
+        "source": "src/extension.ts:777"
       }
     ],
     "eventbus": [
@@ -1069,7 +1076,7 @@
         "id": "renderer:background-task-notification",
         "kind": "renderer",
         "name": "background-task-notification",
-        "source": "src/extension.ts:620"
+        "source": "src/extension.ts:627"
       },
       {
         "availability": "feature:fusion",
@@ -1077,7 +1084,7 @@
         "id": "renderer:fusion-result",
         "kind": "renderer",
         "name": "fusion-result",
-        "source": "src/fusion-extension.ts:1064"
+        "source": "src/fusion-extension.ts:1067"
       }
     ],
     "shortcut": [
@@ -1088,7 +1095,7 @@
         "id": "shortcut:ctrl+alt+b",
         "kind": "shortcut",
         "name": "ctrl+alt+b",
-        "source": "src/extension.ts:827"
+        "source": "src/extension.ts:834"
       },
       {
         "availability": "always",
@@ -1097,7 +1104,7 @@
         "id": "shortcut:ctrl+alt+c",
         "kind": "shortcut",
         "name": "ctrl+alt+c",
-        "source": "src/extension.ts:835"
+        "source": "src/extension.ts:842"
       },
       {
         "availability": "dock:shift+down",
@@ -1106,7 +1113,7 @@
         "id": "shortcut:shift+down",
         "kind": "shortcut",
         "name": "shift+down",
-        "source": "src/extension.ts:818"
+        "source": "src/extension.ts:825"
       }
     ],
     "tool": [
@@ -1197,7 +1204,7 @@
           ],
           "type": "object"
         },
-        "source": "src/delegate-extension.ts:445"
+        "source": "src/delegate-extension.ts:500"
       },
       {
         "availability": "always",
@@ -1223,7 +1230,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:1173"
+        "source": "src/extension.ts:1181"
       },
       {
         "availability": "always",
@@ -1259,7 +1266,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:1128"
+        "source": "src/extension.ts:1136"
       },
       {
         "availability": "any(feature:delegate,feature:fusion)",
@@ -1291,7 +1298,7 @@
           ],
           "type": "object"
         },
-        "source": "src/delegate-extension.ts:659"
+        "source": "src/delegate-extension.ts:757"
       },
       {
         "availability": "always",
@@ -1354,7 +1361,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:920"
+        "source": "src/extension.ts:927"
       },
       {
         "availability": "feature:attested",
@@ -1417,7 +1424,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:1029"
+        "source": "src/extension.ts:1036"
       },
       {
         "availability": "always",
@@ -1443,7 +1450,7 @@
           "required": [],
           "type": "object"
         },
-        "source": "src/extension.ts:1097"
+        "source": "src/extension.ts:1105"
       },
       {
         "availability": "feature:fusion",
@@ -1508,7 +1515,7 @@
           ],
           "type": "object"
         },
-        "source": "src/fusion-extension.ts:1289"
+        "source": "src/fusion-extension.ts:1305"
       },
       {
         "availability": "feature:fusion",
@@ -1538,7 +1545,7 @@
           ],
           "type": "object"
         },
-        "source": "src/fusion-extension.ts:1271"
+        "source": "src/fusion-extension.ts:1287"
       },
       {
         "availability": "feature:fusion",
@@ -1629,7 +1636,7 @@
           ],
           "type": "object"
         },
-        "source": "src/fusion-extension.ts:1308"
+        "source": "src/fusion-extension.ts:1324"
       },
       {
         "availability": "feature:fusion",
@@ -1761,7 +1768,7 @@
           ],
           "type": "object"
         },
-        "source": "src/fusion-extension.ts:1328"
+        "source": "src/fusion-extension.ts:1344"
       }
     ],
     "workflow": [
@@ -1830,8 +1837,14 @@
     "src/core/anthropic-attribution.ts": [
       "subsystems/anthropic-attribution"
     ],
+    "src/core/attested-pi-contract.ts": [
+      "subsystems/attested-pi-runs"
+    ],
     "src/core/attested-pi-run.ts": [
       "subsystems/attested-pi-runs"
+    ],
+    "src/core/canonical-json.ts": [
+      "subsystems/child-launch-durability-and-safety"
     ],
     "src/core/common.ts": [
       "subsystems/background-task-runtime"
@@ -1952,6 +1965,9 @@
     ],
     "src/core/shell-policy.ts": [
       "subsystems/background-task-runtime"
+    ],
+    "src/core/task-durable.ts": [
+      "subsystems/child-launch-durability-and-safety"
     ],
     "src/core/update-check.ts": [
       "subsystems/host-ui-and-telemetry"

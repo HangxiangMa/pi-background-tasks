@@ -930,7 +930,7 @@ void describe('sdk', () => {
     const dispatch = async (name: string, event: Record<string, unknown>): Promise<void> => {
       for (const handler of [...(handlers.get(name) ?? [])]) await handler(event, ctx);
     };
-    backgroundTasksExtension(pi);
+    await backgroundTasksExtension(pi);
 
     const originalEnsureRuntimeDir = BackgroundTaskRegistry.prototype.ensureRuntimeDir;
     const enteredEnsure = deferred<void>();
@@ -1759,10 +1759,7 @@ console.log(JSON.stringify({ type: "message_end", message: secondMessage }));
       const message = notifications.at(-1)?.message ?? '';
       assert.match(message, /pi install npm:pi-background-tasks@latest/);
       assert.match(message, /pi install npm:pi-background-tasks@999\.0\.0/);
-      assert.match(
-        message,
-        /pi install git:github\.com\/ismailsaleekh\/pi-background-tasks@main/,
-      );
+      assert.match(message, /pi install git:github\.com\/ismailsaleekh\/pi-background-tasks@main/);
       assert.match(message, /first verify the tag exists/);
       assert.doesNotMatch(message, /pi-background-tasks@v999\.0\.0/);
       assert.match(message, /999\.0\.0 is the latest published version/);

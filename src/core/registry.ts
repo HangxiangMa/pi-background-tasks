@@ -51,23 +51,11 @@ import {
   ATTESTED_GIT_KILL_GRACE_MS,
   ATTESTED_GIT_MAX_OUTPUT_BYTES,
   ATTESTED_TASK_ID_PATTERN,
-  attestedPiChildEnv,
-  buildAttestedPiArgv,
-  buildPiTaskAttestation,
-  closeAndFsyncOutputStream,
-  gitAuthoritySnapshot,
-  gitRepoRoot,
-  makeAttestedTaskId,
-  makeAttestedTaskPaths,
-  observePiOAuth,
-  parsePiJsonEvents,
-  resolveReportPath,
-  spawnAndCapturePi,
-  writeFileFsynced,
-  writeJsonAtomic,
-  type AttestedGitSpawn,
-  type GitCommandOptions,
-} from './attested-pi-run.js';
+} from './attested-pi-contract.js';
+import type { AttestedGitSpawn, GitCommandOptions } from './attested-pi-run.js';
+import { closeAndFsyncOutputStream, writeFileFsynced, writeJsonAtomic } from './task-durable.js';
+
+type AttestedPiRuntime = typeof import('./attested-pi-run.js');
 import {
   assertWindowsCommandLineWithinLimit,
   piLaunchArgv,
@@ -833,14 +821,12 @@ export class BackgroundTaskRegistry {
   private readonly attestedGitKillGraceMs: number;
   private readonly attestedGitMaxOutputBytes: number;
   private readonly attestedGitSpawn: AttestedGitSpawn | undefined;
+  private attestedRuntimePromise: Promise<AttestedPiRuntime> | undefined;
   private readonly logger: Pick<Console, 'error'>;
   private readonly onChange: () => void;
   private readonly sendCompletionNotification: CompletionNotificationSender;
   private readonly publishTerminalSnapshot: (task: BgTaskSnapshot) => void;
-  private readonly posixProcessGroupKillStates = new WeakMap<
-    BgTask,
-    PosixProcessGroupKillState
-  >();
+  private readonly posixProcessGroupKillStates = new WeakMap<BgTask, PosixProcessGroupKillState>();
   private readonly windowsKillStates = new WeakMap<BgTask, WindowsKillState>();
   private readonly terminalPublicationAbandonSignals = new WeakMap<
     BgTask,
@@ -914,6 +900,14 @@ export class BackgroundTaskRegistry {
     return resolved;
   }
 
+  private loadAttestedRuntime(): Promise<AttestedPiRuntime> {
+    const existing = this.attestedRuntimePromise;
+    if (existing !== undefined) return existing;
+    const loading = import('./attested-pi-run.js');
+    this.attestedRuntimePromise = loading;
+    return loading;
+  }
+
   private static positiveTimeout(
     value: number | undefined,
     fallback: number,
@@ -969,10 +963,7 @@ export class BackgroundTaskRegistry {
     return new BackgroundTaskAdmissionTimeoutError(admission.kind, admission.timeoutMs);
   }
 
-  private surfacedTaskAdmissionError(
-    admission: TaskAdmission,
-    ...details: unknown[]
-  ): Error {
+  private surfacedTaskAdmissionError(admission: TaskAdmission, ...details: unknown[]): Error {
     const primary = this.taskAdmissionError(admission);
     const meaningful = details.filter((detail) => {
       if (detail === undefined || detail === primary) return false;
@@ -1047,8 +1038,7 @@ export class BackgroundTaskRegistry {
     // Publication and admission closure belong to one extension activation and
     // are one-way. Pi session replacement creates a fresh registry; an old
     // registry must not be reopened by a late lifecycle continuation.
-    if (!this.terminalPublicationClosed && !this.taskAdmissionsClosed)
-      this.shuttingDown = false;
+    if (!this.terminalPublicationClosed && !this.taskAdmissionsClosed) this.shuttingDown = false;
   }
 
   closeTerminalPublication(reason: TerminalPublicationClosureReason): void {
@@ -1059,10 +1049,7 @@ export class BackgroundTaskRegistry {
     }
     const effectiveReason = this.terminalPublicationCloseReason ?? reason;
     for (const task of this.tasks.values()) {
-      if (
-        task.terminalPublicationState === 'pending' &&
-        task.terminalEmitInFlight === true
-      ) {
+      if (task.terminalPublicationState === 'pending' && task.terminalEmitInFlight === true) {
         // A synchronous listener can close the service while emit() is still on
         // the stack. Dispose queued work now, but let the emitter's return/throw
         // settle the in-flight attempt exactly once.
@@ -1134,10 +1121,7 @@ export class BackgroundTaskRegistry {
         task.reloadHostDeliveryInFlight = false;
         task.reloadHostDeliverySettled = false;
         task.reloadHostNotificationSettled = false;
-        execution.updateLeaseAudit(
-          claim.generation,
-          (task.reloadSurvival?.handoffCount ?? 0) + 1,
-        );
+        execution.updateLeaseAudit(claim.generation, (task.reloadSurvival?.handoffCount ?? 0) + 1);
         this.tasks.set(task.id, task);
         staged.push(execution);
       }
@@ -1196,9 +1180,7 @@ export class BackgroundTaskRegistry {
     }
   }
 
-  prepareReloadHandoff(
-    lease: ReloadShellActivationLeaseV1,
-  ): readonly BgTask[] {
+  prepareReloadHandoff(lease: ReloadShellActivationLeaseV1): readonly BgTask[] {
     if (this.reloadShellOwner === undefined || this.reloadShellLease !== lease) {
       throw new ReloadSurvivalError(
         'pi_bg_reload_owner_stale_claim',
@@ -1368,8 +1350,7 @@ export class BackgroundTaskRegistry {
 
   private stopOwnedTaskAfterAdmissionCancellation(task: BgTask, error: Error): void {
     if (task.status !== 'running') return;
-    task.killKind =
-      error instanceof BackgroundTaskAdmissionTimeoutError ? 'timeout' : 'shutdown';
+    task.killKind = error instanceof BackgroundTaskAdmissionTimeoutError ? 'timeout' : 'shutdown';
     task.error = error.message;
     try {
       this.requestKill(task, 'SIGTERM');
@@ -1463,10 +1444,7 @@ export class BackgroundTaskRegistry {
     const invocation = shellInvocationForPolicy(normalizedCommand, shellPolicy);
     const dir = await this.awaitTaskAdmissionBoundary(this.ensureRuntimeDir(ctx), admission);
     this.assertTaskAdmissionOpen('a background task', admission);
-    if (
-      this.reloadShellLease !== lease ||
-      !this.reloadShellOwner.isCurrentLease(lease)
-    ) {
+    if (this.reloadShellLease !== lease || !this.reloadShellOwner.isCurrentLease(lease)) {
       throw new ReloadSurvivalError(
         'pi_bg_reload_owner_stale_claim',
         'reload owner activation changed during task preflight',
@@ -1566,10 +1544,7 @@ export class BackgroundTaskRegistry {
         admission,
       );
       this.assertTaskAdmissionOpen('a background task', admission);
-      if (
-        this.reloadShellLease !== lease ||
-        !this.reloadShellOwner.isCurrentLease(lease)
-      ) {
+      if (this.reloadShellLease !== lease || !this.reloadShellOwner.isCurrentLease(lease)) {
         throw new ReloadSurvivalError(
           'pi_bg_reload_owner_stale_claim',
           'reload owner activation changed before admission commit',
@@ -1580,12 +1555,11 @@ export class BackgroundTaskRegistry {
       this.onChange();
       return task;
     } catch (error) {
-      const primary =
-        admission.controller.signal.aborted
-          ? this.taskAdmissionError(admission)
-          : error instanceof Error
-            ? error
-            : new Error(String(error));
+      const primary = admission.controller.signal.aborted
+        ? this.taskAdmissionError(admission)
+        : error instanceof Error
+          ? error
+          : new Error(String(error));
       execution?.failAdmission(primary);
       let cleanupError: unknown;
       if (execution !== undefined) {
@@ -2272,9 +2246,11 @@ export class BackgroundTaskRegistry {
     admission: TaskAdmission,
   ): Promise<BgTask> {
     this.assertTaskAdmissionOpen('an attested Pi task', admission);
+    const attested = await this.awaitTaskAdmissionBoundary(this.loadAttestedRuntime(), admission);
+    this.assertTaskAdmissionOpen('an attested Pi task', admission);
     const attributionExtensionPath =
       request.provider === 'anthropic' ? resolveAnthropicAttributionExtensionPath() : undefined;
-    const argv = buildAttestedPiArgv(request, attributionExtensionPath);
+    const argv = attested.buildAttestedPiArgv(request, attributionExtensionPath);
     const attestedPiLaunch = resolvePiLaunch({ platform: this.platform });
     assertWindowsCommandLineWithinLimit(
       attestedPiLaunch,
@@ -2285,23 +2261,23 @@ export class BackgroundTaskRegistry {
 
     const dir = await this.awaitTaskAdmissionBoundary(this.ensureRuntimeDir(ctx), admission);
     this.assertTaskAdmissionOpen('an attested Pi task', admission);
-    const id = makeAttestedTaskId();
+    const id = attested.makeAttestedTaskId();
     if (!ATTESTED_TASK_ID_PATTERN.test(id))
       throw new Error('Generated attested task id is invalid');
-    const paths = makeAttestedTaskPaths(dir.abs, dir.display, id);
+    const paths = attested.makeAttestedTaskPaths(dir.abs, dir.display, id);
     const promptBytes = Buffer.from(request.prompt, 'utf8');
     const reportAbsPath = await this.awaitTaskAdmissionBoundary(
-      resolveReportPath(ctx.cwd, request.reportPath),
+      attested.resolveReportPath(ctx.cwd, request.reportPath),
       admission,
     );
     this.assertTaskAdmissionOpen('an attested Pi task', admission);
-    const auth = observePiOAuth(ctx, request.provider, request.model);
+    const auth = attested.observePiOAuth(ctx, request.provider, request.model);
     const gitOptions = this.attestedGitOptions(admission);
-    const repoRootRealpath = await gitRepoRoot(ctx.cwd, gitOptions);
+    const repoRootRealpath = await attested.gitRepoRoot(ctx.cwd, gitOptions);
     this.assertTaskAdmissionOpen('an attested Pi task', admission);
     const cwdRealpath = await this.awaitTaskAdmissionBoundary(realpath(ctx.cwd), admission);
     this.assertTaskAdmissionOpen('an attested Pi task', admission);
-    const startAuthority = await gitAuthoritySnapshot(ctx.cwd, gitOptions);
+    const startAuthority = await attested.gitAuthoritySnapshot(ctx.cwd, gitOptions);
     this.assertTaskAdmissionOpen('an attested Pi task', admission);
     if (!startAuthority.clean)
       throw new Error('Attested Pi task requires a clean worktree at start');
@@ -2395,7 +2371,7 @@ export class BackgroundTaskRegistry {
     let unbindAdmissionCancellation = (): void => undefined;
     try {
       this.assertTaskAdmissionOpen('an attested Pi task', admission);
-      const captured = spawnAndCapturePi(
+      const captured = attested.spawnAndCapturePi(
         this.spawn,
         argv,
         {
@@ -2403,7 +2379,7 @@ export class BackgroundTaskRegistry {
           detached: this.platform !== 'win32',
           shell: false,
           stdio: ['ignore', 'pipe', 'pipe'],
-          env: attestedPiChildEnv(this.env),
+          env: attested.attestedPiChildEnv(this.env),
           windowsHide: true,
         },
         this.platform,
@@ -2414,6 +2390,7 @@ export class BackgroundTaskRegistry {
       captured.child.on('error', (error) => {
         void this.finalizeAttestedPiTask(
           task,
+          attested,
           paths,
           argv,
           cwdRealpath,
@@ -2432,8 +2409,7 @@ export class BackgroundTaskRegistry {
       });
 
       captured.child.on('close', (code, signalName) => {
-        let status: TaskStatus =
-          (code ?? 0) === 0 && signalName === null ? 'completed' : 'failed';
+        let status: TaskStatus = (code ?? 0) === 0 && signalName === null ? 'completed' : 'failed';
         let error: string | undefined;
         if (task.killKind === 'timeout') {
           status = 'failed';
@@ -2447,6 +2423,7 @@ export class BackgroundTaskRegistry {
         }
         void this.finalizeAttestedPiTask(
           task,
+          attested,
           paths,
           argv,
           cwdRealpath,
@@ -2465,10 +2442,7 @@ export class BackgroundTaskRegistry {
       });
 
       unbindAdmissionCancellation = this.bindOwnedTaskToAdmission(task, admission);
-      await this.awaitTaskAdmissionBoundary(
-        this.writeMetadata(task, admissionSignal),
-        admission,
-      );
+      await this.awaitTaskAdmissionBoundary(this.writeMetadata(task, admissionSignal), admission);
       this.assertTaskAdmissionOpen('an attested Pi task', admission);
       this.onChange();
 
@@ -2482,6 +2456,7 @@ export class BackgroundTaskRegistry {
           } catch (error) {
             void this.finalizeAttestedPiTask(
               task,
+              attested,
               paths,
               argv,
               cwdRealpath,
@@ -2535,12 +2510,13 @@ export class BackgroundTaskRegistry {
 
   private async finalizeAttestedPiTask(
     task: BgTask,
-    paths: ReturnType<typeof makeAttestedTaskPaths>,
+    attested: AttestedPiRuntime,
+    paths: ReturnType<AttestedPiRuntime['makeAttestedTaskPaths']>,
     argv: string[],
     cwdRealpath: string,
     repoRootRealpath: string,
-    startAuthority: Awaited<ReturnType<typeof gitAuthoritySnapshot>>,
-    auth: ReturnType<typeof observePiOAuth>,
+    startAuthority: Awaited<ReturnType<AttestedPiRuntime['gitAuthoritySnapshot']>>,
+    auth: ReturnType<AttestedPiRuntime['observePiOAuth']>,
     promptBytes: Buffer,
     reportAbsPath: string,
     stdoutChunks: Buffer[],
@@ -2564,10 +2540,7 @@ export class BackgroundTaskRegistry {
     const windowsForceFailure = await this.awaitWindowsForceBeforeTerminal(task);
     if (windowsForceFailure !== undefined) {
       finalStatus = 'failed';
-      finalError = BackgroundTaskRegistry.appendTaskError(
-        finalError,
-        windowsForceFailure.message,
-      );
+      finalError = BackgroundTaskRegistry.appendTaskError(finalError, windowsForceFailure.message);
     }
     task.exitCode = exitCode;
     task.signal = signal;
@@ -2579,10 +2552,10 @@ export class BackgroundTaskRegistry {
     await writeFileFsynced(paths.eventsAbsPath, rawEvents);
     await writeFileFsynced(paths.stderrAbsPath, rawStderr);
 
-    let parsed: ReturnType<typeof parsePiJsonEvents> | undefined;
+    let parsed: ReturnType<AttestedPiRuntime['parsePiJsonEvents']> | undefined;
     if (finalStatus === 'completed') {
       try {
-        parsed = parsePiJsonEvents(rawEvents);
+        parsed = attested.parsePiJsonEvents(rawEvents);
         task.model = parsed.providerScopedModelId;
         task.tokenUsage = {
           input: parsed.tokenUsage.input,
@@ -2612,13 +2585,13 @@ export class BackgroundTaskRegistry {
 
     try {
       if (finalStatus === 'completed' && parsed) {
-        const finishAuthority = await gitAuthoritySnapshot(
+        const finishAuthority = await attested.gitAuthoritySnapshot(
           task.cwd,
           this.attestedGitOptions(),
         );
         const completedSnapshot: BgTaskSnapshot = { ...snapshot(task), status: 'completed' };
         await this.writeMetadataSnapshot(task, completedSnapshot);
-        const attestation = await buildPiTaskAttestation({
+        const attestation = await attested.buildPiTaskAttestation({
           task: completedSnapshot,
           paths,
           sessionDir: dirNameFromDisplay(paths.outputPath),
@@ -2992,10 +2965,7 @@ export class BackgroundTaskRegistry {
     this.writeNotice(task, `${line}\n`);
   }
 
-  private beginPosixProcessGroupKill(
-    task: BgTask,
-    armGrace: boolean,
-  ): PosixProcessGroupKillState {
+  private beginPosixProcessGroupKill(task: BgTask, armGrace: boolean): PosixProcessGroupKillState {
     const existing = this.posixProcessGroupKillStates.get(task);
     if (existing !== undefined) return existing;
     if (task.posixProcessGroupSignalAuthorityReleased === true) {
@@ -3028,10 +2998,13 @@ export class BackgroundTaskRegistry {
     if (armGrace) {
       // Publish the sole force owner before TERM. An injected signal can emit
       // close reentrantly; that close must see and await this exact state.
-      task.killEscalationTimer = setTimeout(() => {
-        task.killEscalationTimer = undefined;
-        this.forceOwnedPosixProcessGroup(task, state);
-      }, Math.min(this.killGraceMs, ownershipMs));
+      task.killEscalationTimer = setTimeout(
+        () => {
+          task.killEscalationTimer = undefined;
+          this.forceOwnedPosixProcessGroup(task, state);
+        },
+        Math.min(this.killGraceMs, ownershipMs),
+      );
       // Unlike ordinary housekeeping timers, this owner stays referenced: a
       // departed leader must not let the host exit and strand its owned group.
     }
@@ -3077,11 +3050,7 @@ export class BackgroundTaskRegistry {
         : new Error(`process-group probe for ${String(state.groupId)} returned false`);
       return false;
     } catch (error) {
-      if (
-        typeof error === 'object' &&
-        error !== null &&
-        Reflect.get(error, 'code') === 'ESRCH'
-      ) {
+      if (typeof error === 'object' && error !== null && Reflect.get(error, 'code') === 'ESRCH') {
         this.finishPosixProcessGroupKill(task, state, true);
         return true;
       }
@@ -3130,17 +3099,17 @@ export class BackgroundTaskRegistry {
       );
       return;
     }
-    state.verificationTimer = setTimeout(() => {
-      state.verificationTimer = undefined;
-      if (this.observeOwnedPosixProcessGroupGone(task, state)) return;
-      this.schedulePosixProcessGroupVerification(task, state);
-    }, Math.min(10, remainingMs));
+    state.verificationTimer = setTimeout(
+      () => {
+        state.verificationTimer = undefined;
+        if (this.observeOwnedPosixProcessGroupGone(task, state)) return;
+        this.schedulePosixProcessGroupVerification(task, state);
+      },
+      Math.min(10, remainingMs),
+    );
   }
 
-  private forceOwnedPosixProcessGroup(
-    task: BgTask,
-    state: PosixProcessGroupKillState,
-  ): void {
+  private forceOwnedPosixProcessGroup(task: BgTask, state: PosixProcessGroupKillState): void {
     if (state.settled || state.forceAttempted) return;
     // Latch before either probe or signal: both are injected boundaries that can
     // reentrantly emit root close, and no continuation may launch a second KILL.
@@ -3161,11 +3130,7 @@ export class BackgroundTaskRegistry {
         return;
       }
     } catch (error) {
-      if (
-        typeof error === 'object' &&
-        error !== null &&
-        Reflect.get(error, 'code') === 'ESRCH'
-      ) {
+      if (typeof error === 'object' && error !== null && Reflect.get(error, 'code') === 'ESRCH') {
         this.finishPosixProcessGroupKill(task, state, true);
         return;
       }
@@ -3201,16 +3166,10 @@ export class BackgroundTaskRegistry {
       killed = this.killProcess(-state.groupId, signal);
       if (!killed) errors.push(`process group ${signal} returned false`);
     } catch (error) {
-      if (
-        typeof error === 'object' &&
-        error !== null &&
-        Reflect.get(error, 'code') === 'ESRCH'
-      ) {
+      if (typeof error === 'object' && error !== null && Reflect.get(error, 'code') === 'ESRCH') {
         this.finishPosixProcessGroupKill(task, state, true);
       } else {
-        errors.push(
-          `process group kill failed: ${BackgroundTaskRegistry.errorMessage(error)}`,
-        );
+        errors.push(`process group kill failed: ${BackgroundTaskRegistry.errorMessage(error)}`);
       }
     }
 
@@ -3231,9 +3190,7 @@ export class BackgroundTaskRegistry {
     }
   }
 
-  private async awaitPosixProcessGroupBeforeTerminal(
-    task: BgTask,
-  ): Promise<Error | undefined> {
+  private async awaitPosixProcessGroupBeforeTerminal(task: BgTask): Promise<Error | undefined> {
     if (this.platform === 'win32') return undefined;
     const state = this.posixProcessGroupKillStates.get(task);
     if (state === undefined) {
@@ -3672,10 +3629,7 @@ export class BackgroundTaskRegistry {
             execution.finishNotification(token, task.notified);
           } catch (error) {
             execution.finishNotification(token, false);
-            this.logger.error(
-              `[background-tasks] notification failed for ${task.id}:`,
-              error,
-            );
+            this.logger.error(`[background-tasks] notification failed for ${task.id}:`, error);
           }
         }
       }
@@ -3862,10 +3816,7 @@ export class BackgroundTaskRegistry {
 
     if (emitFailed) {
       const execution = task.reloadExecution;
-      if (
-        execution !== undefined &&
-        !this.ownsReloadExecution(execution, this.reloadShellLease)
-      ) {
+      if (execution !== undefined && !this.ownsReloadExecution(execution, this.reloadShellLease)) {
         // The emitter synchronously detached this task into a reload handoff
         // before throwing. Attempt 1 is consumed, but only the fresh owner may
         // retry or decide abandonment on the shared publication ledger.
@@ -4032,10 +3983,7 @@ export class BackgroundTaskRegistry {
     const windowsForceFailure = await this.awaitWindowsForceBeforeTerminal(task);
     if (windowsForceFailure !== undefined) {
       finalStatus = 'failed';
-      finalError = BackgroundTaskRegistry.appendTaskError(
-        finalError,
-        windowsForceFailure.message,
-      );
+      finalError = BackgroundTaskRegistry.appendTaskError(finalError, windowsForceFailure.message);
     }
     task.exitCode = exitCode;
     task.signal = signal ?? null;

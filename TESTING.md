@@ -10,6 +10,14 @@ The historical monorepo extension standards are contextual background only; do n
 
 ## Current commands
 
+Compiled runtime build:
+
+```bash
+npm run build:runtime
+```
+
+This produces the published `dist/` JavaScript entrypoints and their complete deferred runtime closure from authoritative TypeScript. SDK/package/smoke/release scripts build it before exercising compiled distribution paths.
+
 Default gate:
 
 ```bash
@@ -82,7 +90,7 @@ npm run pack:dry-run
 npm run test:compat
 ```
 
-Current smoke is `tsx scripts/smoke.ts`. It creates a temporary Pi agent/session directory, sets offline/telemetry-suppression environment variables, and runs the package entrypoint with `/jobs`.
+Current smoke builds the runtime and then runs `tsx scripts/smoke.ts`. It creates a temporary Pi agent/session directory, sets offline/telemetry-suppression environment variables, and runs the compiled package entrypoints with `/jobs`.
 
 `npm run smoke:large-context` is the Fusion context-policy evidence harness. It rebuilds the byte composition of the production failure (696,929 B tool results, 251,508 B tool arguments, 34,959 B user text, 24,733 B assistant text, 10,303 B thinking) as a real `SessionManager` branch, then prints:
 

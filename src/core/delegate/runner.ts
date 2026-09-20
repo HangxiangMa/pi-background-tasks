@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { readFile, rmdir } from 'node:fs/promises';
-import { canonicalJson } from '../attested-pi-run.js';
+import { canonicalJson } from '../canonical-json.js';
 import { replaceFileDurable } from '../durable-fs.js';
 import { resolveAnthropicAttributionExtensionPath } from '../anthropic-attribution-path.js';
 import { dirname, join } from 'node:path';
@@ -14,9 +14,7 @@ import {
   type DelegatePreflightInput,
   type DelegatePreflightResult,
 } from './launch.js';
-import {
-  DELEGATE_INLINE_ANSWER_BYTES,
-} from './budget.js';
+import { DELEGATE_INLINE_ANSWER_BYTES } from './budget.js';
 import { verifyDelegateResultPackage, type VerifiedDelegateResult } from './result-package.js';
 import {
   DelegateError,
@@ -64,7 +62,9 @@ export interface PrepareDelegateLaunchInput extends DelegatePreflightInput {
 const PREPARATION_CLEANUP_ERROR_MAX_CHARS = 320;
 
 function boundedPreparationError(error: unknown): string {
-  const text = (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, ' ').trim();
+  const text = (error instanceof Error ? error.message : String(error))
+    .replace(/\s+/gu, ' ')
+    .trim();
   if (text.length <= PREPARATION_CLEANUP_ERROR_MAX_CHARS) return text;
   return `${text.slice(0, PREPARATION_CLEANUP_ERROR_MAX_CHARS)}…`;
 }
@@ -122,8 +122,7 @@ export async function prepareDelegateLaunch(
   throwIfPreparationAborted(input.signal);
   // Resolve the guard extension before anything is created: a package missing
   // its child guard must refuse rather than spawn an unguarded child.
-  const childExtensionPath =
-    input.childExtensionPath ?? resolveDelegateChildExtensionPath();
+  const childExtensionPath = input.childExtensionPath ?? resolveDelegateChildExtensionPath();
   let attributionExtensionPath: string | undefined;
   if (input.route.provider === 'anthropic') {
     try {
@@ -168,15 +167,12 @@ export async function prepareDelegateLaunch(
     // re-serializes them between here and the child, and the child verifies the
     // hash before its first model call.
     if (seedRef.sha256 !== preflight.seed.sha256) {
-      throw new DelegateError(
-        'delegate seed hash changed between construction and persistence',
-        {
-          code: 'seed_persist_failed',
-          childCreated: false,
-          taskId: preflight.taskId,
-          artifactDir: store.artifactDir,
-        },
-      );
+      throw new DelegateError('delegate seed hash changed between construction and persistence', {
+        code: 'seed_persist_failed',
+        childCreated: false,
+        taskId: preflight.taskId,
+        artifactDir: store.artifactDir,
+      });
     }
     await store.writeLedger(preflight.seed.ledger);
     throwIfPreparationAborted(input.signal);
@@ -318,17 +314,19 @@ async function adjudicateDelegateTerminal(
   const resultPath = join(input.artifactDirAbs, 'result.json');
   const terminalPath = join(input.artifactDirAbs, 'child-terminal.json');
   if (!existsSync(resultPath)) {
-    const recorded = existsSync(terminalPath)
-      ? await readChildTerminal(terminalPath)
-      : undefined;
+    const recorded = existsSync(terminalPath) ? await readChildTerminal(terminalPath) : undefined;
     const cancelled = input.taskStatus === 'killed';
     const code = recorded?.code ?? (cancelled ? 'child_cancelled' : 'child_exited_without_commit');
     const detail =
       recorded?.message ??
       input.taskError ??
       'the delegate child exited without committing a result package';
-    const preserved = ['seed.json', 'budget-plan.json', 'child-terminal.json', 'runtime-budget.json']
-      .filter((name) => existsSync(join(input.artifactDirAbs, name)));
+    const preserved = [
+      'seed.json',
+      'budget-plan.json',
+      'child-terminal.json',
+      'runtime-budget.json',
+    ].filter((name) => existsSync(join(input.artifactDirAbs, name)));
     if (
       input.taskOutputPath !== undefined &&
       input.taskOutputAbsPath !== undefined &&
@@ -337,25 +335,26 @@ async function adjudicateDelegateTerminal(
       preserved.push(input.taskOutputPath);
     }
     const diagnosticTargets = preserved.filter(
-      (name) => name === 'child-terminal.json' || name === 'runtime-budget.json' || name === input.taskOutputPath,
+      (name) =>
+        name === 'child-terminal.json' ||
+        name === 'runtime-budget.json' ||
+        name === input.taskOutputPath,
     );
-    const diagnostic = diagnosticTargets.length === 0
-      ? 'No child terminal record or merged task output exists; inspect the preserved launch artifacts listed above.'
-      : `Inspect the preserved diagnostic evidence: ${diagnosticTargets.join(', ')}.`;
-    const error = new DelegateError(
-      `bg_delegate produced no committed answer: ${detail}`,
-      {
-        code: isDelegateErrorCode(code) ? code : 'child_exited_without_commit',
-        childCreated: true,
-        taskId: input.taskId,
-        artifactDir: input.artifactDirAbs,
-        preserved,
-        remediation: [
-          diagnostic,
-          'No partial answer is returned; nothing was truncated to look like success.',
-        ],
-      },
-    );
+    const diagnostic =
+      diagnosticTargets.length === 0
+        ? 'No child terminal record or merged task output exists; inspect the preserved launch artifacts listed above.'
+        : `Inspect the preserved diagnostic evidence: ${diagnosticTargets.join(', ')}.`;
+    const error = new DelegateError(`bg_delegate produced no committed answer: ${detail}`, {
+      code: isDelegateErrorCode(code) ? code : 'child_exited_without_commit',
+      childCreated: true,
+      taskId: input.taskId,
+      artifactDir: input.artifactDirAbs,
+      preserved,
+      remediation: [
+        diagnostic,
+        'No partial answer is returned; nothing was truncated to look like success.',
+      ],
+    });
     const outcome: DelegateTaskOutcome = {
       status: cancelled ? 'cancelled' : 'failed',
       errorCode: error.code,

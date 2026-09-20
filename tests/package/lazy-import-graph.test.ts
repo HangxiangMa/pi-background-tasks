@@ -30,9 +30,10 @@ function runtimeImportSpecifier(node: ts.ImportDeclaration): string | undefined 
 function resolveSourceImport(fromPath: string, specifier: string): string | undefined {
   if (!specifier.startsWith('.')) return undefined;
   const requested = resolve(dirname(fromPath), specifier);
-  const candidates = extname(requested) === '.js'
-    ? [`${requested.slice(0, -3)}.ts`, requested]
-    : [requested, `${requested}.ts`, join(requested, 'index.ts')];
+  const candidates =
+    extname(requested) === '.js'
+      ? [`${requested.slice(0, -3)}.ts`, requested]
+      : [requested, `${requested}.ts`, join(requested, 'index.ts')];
   return candidates.find((candidate) => existsSync(candidate));
 }
 
@@ -45,7 +46,13 @@ async function runtimeStaticGraph(entry: string): Promise<Set<string>> {
     visited.add(current);
     if (extname(current) !== '.ts') continue;
     const source = await readFile(current, 'utf8');
-    const tree = ts.createSourceFile(current, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const tree = ts.createSourceFile(
+      current,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
     for (const statement of tree.statements) {
       if (!ts.isImportDeclaration(statement)) continue;
       const specifier = runtimeImportSpecifier(statement);
@@ -60,7 +67,13 @@ async function runtimeStaticGraph(entry: string): Promise<Set<string>> {
 async function dynamicImports(path: string): Promise<Set<string>> {
   const absolutePath = sourcePath(path);
   const source = await readFile(absolutePath, 'utf8');
-  const tree = ts.createSourceFile(absolutePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const tree = ts.createSourceFile(
+    absolutePath,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
   const out = new Set<string>();
   const visit = (node: ts.Node): void => {
     const argument = ts.isCallExpression(node) ? node.arguments[0] : undefined;
@@ -134,13 +147,20 @@ void describe('lazy facade runtime import graph', () => {
       for (const specifier of imports) {
         const target = resolveSourceImport(sourcePath(facade), specifier);
         assert.ok(target, `missing deferred payload target ${facade} -> ${specifier}`);
-        assert.match(relativeSource(target), /^src\//u, 'deferred runtime bytes must stay under package src/');
+        assert.match(
+          relativeSource(target),
+          /^src\//u,
+          'deferred runtime bytes must stay under package src/',
+        );
       }
     }
     const manifest = JSON.parse(await readFile(sourcePath('package.json'), 'utf8')) as {
       files?: string[];
     };
-    assert.ok(manifest.files?.includes('src/'), 'package payload must include all deferred src targets');
+    assert.ok(
+      manifest.files?.includes('src/'),
+      'package payload must include all deferred src targets',
+    );
   });
 
   void it('keeps extracted facade constants byte/value equivalent to engine consumers', async () => {
@@ -156,7 +176,11 @@ void describe('lazy facade runtime import graph', () => {
       'DELEGATE_DEFAULT_TIMEOUT_SECONDS',
       'DELEGATE_INLINE_ANSWER_BYTES',
     ] as const) {
-      assert.equal(delegateContract[name], delegateBudget[name], `${name} drifted after extraction`);
+      assert.equal(
+        delegateContract[name],
+        delegateBudget[name],
+        `${name} drifted after extraction`,
+      );
     }
     assert.equal(fusionContract.CURRENT_MODEL_SELECTION, '$current');
     assert.equal(fusionConfig.CURRENT_MODEL_SELECTION, fusionContract.CURRENT_MODEL_SELECTION);
@@ -168,14 +192,51 @@ void describe('lazy facade runtime import graph', () => {
     });
   });
 
-  void it('records the P1a process-only limitation without pretending facades are absent', async () => {
+  void it('keeps disabled facades, dock UI, attribution, and attested execution out of process startup', async () => {
+    const extensionGraph = await runtimeStaticGraph('src/extension.ts');
+    for (const forbidden of [
+      'src/delegate-extension.ts',
+      'src/fusion-extension.ts',
+      'src/ui/background-tasks-manager.ts',
+      'src/core/attested-pi-run.ts',
+    ]) {
+      assert.equal(
+        extensionGraph.has(forbidden),
+        false,
+        `${forbidden} leaked into process startup`,
+      );
+    }
+    const registryGraph = await runtimeStaticGraph('src/core/registry.ts');
+    assert.equal(
+      registryGraph.has('src/core/attested-pi-run.ts'),
+      false,
+      'ordinary registry startup must not load the attested producer',
+    );
+    const attributionGraph = await runtimeStaticGraph('extensions/anthropic-attribution.ts');
+    assert.equal(
+      attributionGraph.has('src/core/anthropic-attribution.ts'),
+      false,
+      'disabled attribution must not load its transport implementation',
+    );
+
+    const extensionImports = await dynamicImports('src/extension.ts');
+    for (const expected of [
+      './delegate-extension.js',
+      './fusion-extension.js',
+      './ui/background-tasks-manager.js',
+    ]) {
+      assert.ok(extensionImports.has(expected), `main extension must defer ${expected}`);
+    }
+    const registryImports = await dynamicImports('src/core/registry.ts');
+    assert.ok(registryImports.has('./attested-pi-run.js'));
+    const attributionImports = await dynamicImports('extensions/anthropic-attribution.ts');
+    assert.ok(attributionImports.has('../src/core/anthropic-attribution.js'));
+
     const extensionSource = await readFile(sourcePath('src/extension.ts'), 'utf8');
-    assert.match(extensionSource, /from ['"]\.\/delegate-extension\.js['"]/u);
-    assert.match(extensionSource, /from ['"]\.\/fusion-extension\.js['"]/u);
     assert.match(
       extensionSource,
-      /if \(config\.features\.delegate\)|if \(config\.features\.fusion\)/u,
-      'facades must still only be instantiated by enabled conditional registrars',
+      /config\.features\.delegate \|\| config\.features\.fusion/u,
+      'delegate/result facade import must follow the feature contract',
     );
     const closeBarrier = extensionSource.indexOf('activationCloseFence.close()');
     const fusionRegistration = extensionSource.indexOf('registerFusionExtension(pi, {');

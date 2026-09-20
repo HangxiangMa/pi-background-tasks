@@ -5,11 +5,11 @@ mode: authored
 review_policy: behavioral
 stability: evolving
 covers_surfaces: []
-covers_sources: [src/core/durable-fs.ts, src/core/pi-launch.ts]
+covers_sources: [src/core/canonical-json.ts, src/core/durable-fs.ts, src/core/pi-launch.ts, src/core/task-durable.ts]
 ---
 # Child launch, durability, and safety
 
-Primary sources: `src/core/pi-launch.ts` and `src/core/durable-fs.ts`.
+Primary sources: `src/core/pi-launch.ts`, `src/core/durable-fs.ts`, `src/core/task-durable.ts`, and `src/core/canonical-json.ts`.
 
 ## Pi launch resolution
 
@@ -55,6 +55,8 @@ Invariant: a pathname is never reopened merely to fsync it. Sync failures are fa
 Cancellation is cooperative between filesystem phases, not a claim that Node can interrupt every in-flight kernel syscall. Once a handle is opened, cancellation waits for the current operation and handle close. Before rename it removes the owned temp and never commits it. If cancellation overlaps a successful rename, directory sync still completes before `DurableFileCancellationError` reports `renameCompleted: true`; the caller therefore knows the replacement may already be visible and can perform its owning cleanup.
 
 Temp ownership matters: if exclusive temp creation collides, the caller does not delete the other writer's file. A successful rename is the commit point; if a post-rename directory sync fails, the error marks `renameCompleted: true` because the replacement may already be visible.
+
+`task-durable.ts` is the lightweight task-facing wrapper for durable files, atomic JSON, and output-stream closure. Keeping it separate prevents ordinary process startup from importing the opt-in attested producer. `canonical-json.ts` owns stable key ordering and SHA-256 byte labels shared by delegate, Fusion, and attested artifacts; the attested module re-exports those helpers for API compatibility.
 
 ## POSIX directory sync limitation
 

@@ -43,37 +43,19 @@ import {
   readPackageInfo,
   type FetchLatestVersionOptions,
 } from './core/update-check.js';
-import {
-  BackgroundTaskRegistry,
-  type BackgroundTaskContext,
-} from './core/registry.js';
+import { BackgroundTaskRegistry, type BackgroundTaskContext } from './core/registry.js';
 import {
   getProcessReloadShellOwnerV1,
   makeReloadShellIdentity,
 } from './core/reload-shell-owner.js';
-import {
-  createShellPolicyGuidanceHandler,
-  initializeShellPolicy,
-} from './core/shell-policy.js';
+import { createShellPolicyGuidanceHandler, initializeShellPolicy } from './core/shell-policy.js';
 import {
   installBackgroundTaskExtensionApi,
   type BackgroundTaskExtensionService,
 } from './core/extension-api.js';
-import {
-  BackgroundTasksManager,
-  type BackgroundTaskForUi,
-  type TaskManagerResult,
-} from './ui/background-tasks-manager.js';
-import { registerFusionExtension } from './fusion-extension.js';
-import {
-  registerBackgroundResultExtension,
-  registerDelegateExtension,
-} from './delegate-extension.js';
-import {
-  dockShortcutFooterHint,
-  parseBackgroundTasksConfig,
-} from './core/config.js';
-import { SynchronousActivationCloseFence } from './core/lazy-module.js';
+import type { BackgroundTaskForUi, TaskManagerResult } from './ui/background-tasks-manager.js';
+import { dockShortcutFooterHint, parseBackgroundTasksConfig } from './core/config.js';
+import { LazyModule, SynchronousActivationCloseFence } from './core/lazy-module.js';
 
 /**
  * Project-local Pi background task manager.
@@ -237,7 +219,7 @@ function renderPlainResult(result: TextToolResult, options: ToolRenderResultOpti
   return new Text(text, 0, 0);
 }
 
-export default function backgroundTasksExtension(pi: ExtensionAPI): void {
+export default async function backgroundTasksExtension(pi: ExtensionAPI): Promise<void> {
   const config = parseBackgroundTasksConfig();
   const dockEntryHint = dockShortcutFooterHint(config.dockShortcut);
   const shellPolicy = initializeShellPolicy();
@@ -258,6 +240,10 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   let reloadHandoffFailed = false;
   let shutdownReason = 'shutdown';
   const activationCloseFence = new SynchronousActivationCloseFence();
+  const taskManagerLoader = new LazyModule(
+    'background-task-manager',
+    () => import('./ui/background-tasks-manager.js'),
+  );
 
   const registryContext = (ctx: ExtensionContext): BackgroundTaskContext => ({
     cwd: ctx.cwd,
@@ -338,6 +324,9 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   activationCloseFence.add(() => {
     beginSessionShutdown(shutdownReason);
   });
+  activationCloseFence.add(() => {
+    taskManagerLoader.close('session shutdown');
+  });
   pi.on('session_shutdown', (event) => {
     shutdownReason = event.reason;
     activationCloseFence.close();
@@ -415,6 +404,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   });
 
   if (config.features.fusion) {
+    const { registerFusionExtension } = await import('./fusion-extension.js');
     registerFusionExtension(pi, {
       startManagedTask: async (ctx, options) => {
         currentCtx = ctx;
@@ -429,6 +419,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   }
 
   if (config.features.delegate) {
+    const { registerDelegateExtension } = await import('./delegate-extension.js');
     registerDelegateExtension(pi, {
       startDelegateTask: async (ctx, options) => {
         currentCtx = ctx;
@@ -444,6 +435,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   }
 
   if (config.features.delegate || config.features.fusion) {
+    const { registerBackgroundResultExtension } = await import('./delegate-extension.js');
     registerBackgroundResultExtension(pi, {
       resolveTask: (idOrPrefix) => registry.resolveTask(idOrPrefix),
       claimFusionUsage: (task) => registry.claimFusionUsage(task),
@@ -555,6 +547,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       );
       return;
     }
+    const { BackgroundTasksManager } = await taskManagerLoader.run((runtime) => runtime);
     dockOpen = true;
     updateUi(ctx);
     try {
@@ -738,14 +731,14 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       }
     } finally {
       eventService.close();
-      if (
-        (event.reason !== 'reload' || reloadHandoffFailed) &&
-        activationLease !== undefined
-      ) {
+      if ((event.reason !== 'reload' || reloadHandoffFailed) && activationLease !== undefined) {
         try {
           await registry.waitForReloadHostSettlement();
         } catch (error) {
-          console.error('[background-tasks] reload owner host settlement failed during shutdown:', error);
+          console.error(
+            '[background-tasks] reload owner host settlement failed during shutdown:',
+            error,
+          );
         }
         registry.releaseReloadActivation(activationLease);
         activationLease = undefined;
@@ -1045,7 +1038,8 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       label: 'Attested Pi Run',
       description:
         'Opt-in evidence-oriented direct Pi spawn. Launches exactly one `pi --mode json` child, records raw Pi events/stderr, hashes prompt/report/output, observes OAuth through ModelRegistry, and emits a strict attestation sidecar only after successful completion.',
-      promptSnippet: 'Start an attested direct Pi agent task and return its task ID plus output path',
+      promptSnippet:
+        'Start an attested direct Pi agent task and return its task ID plus output path',
       promptGuidelines: [
         'Use only when the user explicitly asks for an attested Pi evidence-producing task; ordinary background work should use bg_run unchanged.',
         'Provide provider/model as structured fields and a relative reportPath that the child Pi prompt will write before exit.',

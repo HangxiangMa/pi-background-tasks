@@ -12,9 +12,11 @@ function parseArgs(argv) {
     if (key === '--root' && value) out.root = resolve(value);
     else if (key === '--scenario' && value) out.scenario = value;
     else if (key === '--sample-root' && value) out.sampleRoot = resolve(value);
+    else if (key === '--runtime' && (value === 'source' || value === 'compiled')) out.runtime = value;
     else throw new Error(`unknown or incomplete argument: ${key ?? '(missing)'}`);
   }
   if (!out.root || !out.scenario || !out.sampleRoot) throw new Error('worker requires --root, --scenario, and --sample-root');
+  out.runtime ??= 'source';
   return out;
 }
 
@@ -42,9 +44,12 @@ function emit(metrics, facts = {}) {
   console.log(JSON.stringify({ scenario: args.scenario, metrics, facts }));
 }
 
+const runtimePath = (sourcePath, compiledPath) =>
+  args.runtime === 'compiled' ? compiledPath : sourcePath;
+
 if (args.scenario === 'delegate-facade-import') {
   const start = performance.now();
-  const module = await import(url('src/delegate-extension.ts'));
+  const module = await import(url(runtimePath('src/delegate-extension.ts', 'dist/src/delegate-extension.js')));
   emit({ facade_import_ms: elapsed(start) }, {
     exported_registrars: ['registerDelegateExtension', 'registerBackgroundResultExtension'].filter((name) => typeof module[name] === 'function'),
   });
@@ -53,7 +58,7 @@ if (args.scenario === 'delegate-facade-import') {
 
 if (args.scenario === 'fusion-facade-import') {
   const start = performance.now();
-  const module = await import(url('src/fusion-extension.ts'));
+  const module = await import(url(runtimePath('src/fusion-extension.ts', 'dist/src/fusion-extension.js')));
   emit({ facade_import_ms: elapsed(start) }, {
     exported_registrar: typeof module.registerFusionExtension === 'function',
   });
@@ -73,8 +78,14 @@ const {
   SettingsManager,
 } = sdk;
 
-const backgroundPath = join(args.root, 'extensions/background-tasks.ts');
-const attributionPath = join(args.root, 'extensions/anthropic-attribution.ts');
+const backgroundPath = join(
+  args.root,
+  runtimePath('extensions/background-tasks.ts', 'dist/extensions/background-tasks.js'),
+);
+const attributionPath = join(
+  args.root,
+  runtimePath('extensions/anthropic-attribution.ts', 'dist/extensions/anthropic-attribution.js'),
+);
 
 async function makeLoader(paths) {
   const settingsManager = SettingsManager.inMemory({

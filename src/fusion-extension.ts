@@ -21,7 +21,7 @@ import {
 } from './core/fusion/workflows.js';
 import type { BuiltFusionCleanTaskCanonicalInput } from './core/fusion/clean-context.js';
 import { canonicalizeFusionPublicUrl } from './core/fusion/source-policy.js';
-import { canonicalJson } from './core/attested-pi-run.js';
+import { canonicalJson } from './core/canonical-json.js';
 import type {
   BgTask,
   BgTaskSnapshot,
@@ -41,15 +41,9 @@ import {
   type FusionResultDetails,
   type FusionRunResult,
 } from './core/fusion/types.js';
-import type {
-  FusionModelChoice,
-  FusionModelSelectorResult,
-} from './ui/fusion-model-selector.js';
+import type { FusionModelChoice, FusionModelSelectorResult } from './ui/fusion-model-selector.js';
 import { CURRENT_MODEL_SELECTION } from './core/fusion/facade-contract.js';
-import {
-  LazyModule,
-  SynchronousActivationCloseFence,
-} from './core/lazy-module.js';
+import { LazyModule, SynchronousActivationCloseFence } from './core/lazy-module.js';
 
 const FUSION_RESULT_MESSAGE_TYPE = 'fusion-result';
 const FUSION_PROGRESS_SCHEMA_VERSION = 'pi-background-tasks.fusion-progress.v1';

@@ -1,7 +1,7 @@
 import { spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, readFile, realpath, stat } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { readFile, realpath, stat } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import type {
   BackgroundTaskChildProcess,
@@ -9,7 +9,20 @@ import type {
   BackgroundTaskSpawn,
 } from './registry.js';
 import { isJsonObject, parseJsonText, type BgTaskSnapshot, type JsonObject } from './common.js';
-import { replaceFileDurable, writeFileDurable } from './durable-fs.js';
+import { canonicalJson, sha256Buffer } from './canonical-json.js';
+import {
+  ATTESTED_GIT_KILL_GRACE_MS,
+  ATTESTED_GIT_MAX_OUTPUT_BYTES,
+  ATTESTED_GIT_TIMEOUT_MS,
+} from './attested-pi-contract.js';
+export { canonicalJson, sha256Buffer } from './canonical-json.js';
+export {
+  ATTESTED_GIT_KILL_GRACE_MS,
+  ATTESTED_GIT_MAX_OUTPUT_BYTES,
+  ATTESTED_GIT_TIMEOUT_MS,
+  ATTESTED_TASK_ID_PATTERN,
+} from './attested-pi-contract.js';
+export { closeAndFsyncOutputStream, writeFileFsynced, writeJsonAtomic } from './task-durable.js';
 import {
   runWindowsTaskkill,
   type TaskkillOutcome,
@@ -24,10 +37,6 @@ import {
 } from './pi-launch.js';
 
 export const PI_TASK_ATTESTATION_SCHEMA_VERSION = 'phase2.pi_task_attestation.v1';
-export const ATTESTED_TASK_ID_PATTERN = /^b[0-9a-f]{32}$/;
-export const ATTESTED_GIT_TIMEOUT_MS = 30_000;
-export const ATTESTED_GIT_KILL_GRACE_MS = 250;
-export const ATTESTED_GIT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 export interface StructuredPiLaunchRequest {
   name: string;
@@ -89,10 +98,7 @@ export type AttestedGitSpawn = (
   options: SpawnOptions,
 ) => AttestedGitChildProcess;
 
-export type AttestedGitKillProcess = (
-  pid: number,
-  signal?: NodeJS.Signals | number,
-) => boolean;
+export type AttestedGitKillProcess = (pid: number, signal?: NodeJS.Signals | number) => boolean;
 
 export type AttestedGitKillTree = (
   pid: number,
@@ -139,7 +145,9 @@ export class AttestedGitOutputLimitError extends Error {
   readonly code = 'attested_git_output_limit';
 
   constructor(args: readonly string[], maxBytes: number) {
-    super(`git ${args.join(' ')} output exceeded the explicit ${String(maxBytes)} bytes per-stream limit`);
+    super(
+      `git ${args.join(' ')} output exceeded the explicit ${String(maxBytes)} bytes per-stream limit`,
+    );
     this.name = 'AttestedGitOutputLimitError';
   }
 }
@@ -308,7 +316,9 @@ function errorMessage(error: unknown): string {
 function signalError(signal: AbortSignal): Error {
   return signal.reason instanceof Error
     ? signal.reason
-    : new Error(`Attested Git preflight cancelled${signal.reason === undefined ? '' : `: ${String(signal.reason)}`}`);
+    : new Error(
+        `Attested Git preflight cancelled${signal.reason === undefined ? '' : `: ${String(signal.reason)}`}`,
+      );
 }
 
 function gitDeadline(options: GitCommandOptions): number {
@@ -452,7 +462,8 @@ async function terminateGitProcessTree(
 
   try {
     const forceOutcome = await options.killTree(pid, 'force');
-    if (!windowsTaskkillSucceeded(forceOutcome)) errors.push(describeTaskkill('force', forceOutcome));
+    if (!windowsTaskkillSucceeded(forceOutcome))
+      errors.push(describeTaskkill('force', forceOutcome));
   } catch (error) {
     errors.push(`taskkill force failed: ${errorMessage(error)}`);
   }
@@ -538,10 +549,12 @@ export async function runGitCommand(
     );
   };
   const stdoutListener = (data: Buffer | string): void => {
-    if (stdout.append(data)) requestTermination(new AttestedGitOutputLimitError(args, maxOutputBytes));
+    if (stdout.append(data))
+      requestTermination(new AttestedGitOutputLimitError(args, maxOutputBytes));
   };
   const stderrListener = (data: Buffer | string): void => {
-    if (stderr.append(data)) requestTermination(new AttestedGitOutputLimitError(args, maxOutputBytes));
+    if (stderr.append(data))
+      requestTermination(new AttestedGitOutputLimitError(args, maxOutputBytes));
   };
   const errorListener = (error: Error): void => {
     processError = error;
@@ -632,10 +645,7 @@ export async function gitAuthoritySnapshot(
   return { commit, tree, clean: status.length === 0 };
 }
 
-export async function gitRepoRoot(
-  cwd: string,
-  options: GitCommandOptions = {},
-): Promise<string> {
+export async function gitRepoRoot(cwd: string, options: GitCommandOptions = {}): Promise<string> {
   const bounded = withDefaultGitDeadline(options);
   const root = await runGitCommand(cwd, ['rev-parse', '--show-toplevel'], bounded);
   assertGitBoundary(bounded, ['rev-parse', '--show-toplevel']);
@@ -837,82 +847,9 @@ export function parsePiJsonEvents(raw: Buffer): ParsedPiEvents {
   };
 }
 
-export function sha256Buffer(buffer: Buffer): string {
-  return `sha256:${createHash('sha256').update(buffer).digest('hex')}`;
-}
-
 export async function sha256File(path: string): Promise<{ byteLength: number; sha256: string }> {
   const bytes = await readFile(path);
   return { byteLength: bytes.length, sha256: sha256Buffer(bytes) };
-}
-
-export function canonicalJson(value: unknown): string {
-  return JSON.stringify(sortJson(value));
-}
-
-function sortJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJson);
-  if (!isJsonObject(value)) return value;
-  return Object.fromEntries(
-    Object.keys(value)
-      .sort()
-      .map((key) => [key, sortJson(value[key])]),
-  );
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted === true) throw signalError(signal);
-}
-
-export async function writeFileFsynced(
-  path: string,
-  data: Buffer | string,
-  signal?: AbortSignal,
-): Promise<void> {
-  throwIfAborted(signal);
-  await mkdir(dirname(path), { recursive: true });
-  throwIfAborted(signal);
-  await writeFileDurable(path, data, signal === undefined ? {} : { signal });
-}
-
-export async function writeJsonAtomic(
-  path: string,
-  value: unknown,
-  signal?: AbortSignal,
-): Promise<void> {
-  throwIfAborted(signal);
-  await replaceFileDurable(
-    path,
-    `${JSON.stringify(value, null, 2)}\n`,
-    signal === undefined ? {} : { signal },
-  );
-}
-
-export async function closeAndFsyncOutputStream(
-  stream: NodeJS.WritableStream | undefined,
-): Promise<void> {
-  if (!stream) return;
-  await new Promise<void>((resolvePromise, reject) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      stream.off('error', fail);
-      stream.off('close', finish);
-      stream.off('finish', finish);
-      resolvePromise();
-    };
-    const fail = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      stream.off('close', finish);
-      reject(error);
-    };
-    stream.once('close', finish);
-    stream.once('finish', finish);
-    stream.once('error', fail);
-    stream.end();
-  });
 }
 
 export function spawnAndCapturePi(
