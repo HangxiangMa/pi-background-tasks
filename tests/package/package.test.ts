@@ -1,12 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { spawn, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { parseJsonText } from '../../src/core/common.js';
+import { startInstalledDependencyRegistry } from '../helpers/offline-npm-registry.js';
+import { findFileUrlPathnameViolations } from '../helpers/typescript-source-guards.js';
 import {
   FusionInvestigateParams,
   FusionReasonParams,
@@ -37,16 +39,47 @@ function resolveNpmCli(): string {
 
 const npmCli = resolveNpmCli();
 
+interface CommandResult {
+  readonly status: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
 function runNpm(
   args: readonly string[],
   options: { cwd: string; env: NodeJS.ProcessEnv },
-): { status: number | null; stdout: string; stderr: string } {
+): CommandResult {
   const result = spawnSync(process.execPath, [npmCli, ...args], {
     cwd: options.cwd,
     encoding: 'utf8',
     env: options.env,
   });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+function runNpmAsync(
+  args: readonly string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+): Promise<CommandResult> {
+  return new Promise((resolveResult, reject) => {
+    const child = spawn(process.execPath, [npmCli, ...args], {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    child.once('error', reject);
+    child.once('close', (status) => {
+      resolveResult({
+        status,
+        stdout: Buffer.concat(stdout).toString('utf8'),
+        stderr: Buffer.concat(stderr).toString('utf8'),
+      });
+    });
+  });
 }
 
 interface PackageJson {
@@ -334,16 +367,10 @@ function isolatedNpmEnv(rootDir: string): NodeJS.ProcessEnv {
   };
 }
 
-function offlineNpmEnv(rootDir: string): NodeJS.ProcessEnv {
+function localRegistryNpmEnv(rootDir: string, registry: string): NodeJS.ProcessEnv {
   const env = isolatedNpmEnv(rootDir);
-  const home = process.env['HOME'] ?? process.env['USERPROFILE'];
-  const cache =
-    process.env['NPM_CONFIG_CACHE'] ?? (home === undefined ? undefined : join(home, '.npm'));
-  if (cache === undefined)
-    throw new Error('npm cache path is required for offline package install');
-  env['NPM_CONFIG_CACHE'] = cache;
-  env['npm_config_cache'] = cache;
-  env['NPM_CONFIG_REGISTRY'] = 'https://registry.npmjs.org/';
+  env['NPM_CONFIG_REGISTRY'] = registry;
+  env['npm_config_registry'] = registry;
   return env;
 }
 
@@ -1266,10 +1293,58 @@ void describe('package', () => {
     assert.equal(violations.length, 0, formatSourceViolations(violations));
   });
 
+  void it('file URL pathname guard distinguishes native-path conversions from URL validation', () => {
+    const fileUrlAntipatterns = [
+      "import { URL as NodeURL, pathToFileURL as toFileUrl } from 'node:url';",
+      "const inline = new URL('./child', import.meta.url).pathname;",
+      'const meta = import.meta;',
+      'const moduleHref = meta.url;',
+      "const variable = new NodeURL('../', moduleHref);",
+      'const alias = variable;',
+      "const variablePath = alias['pathname'];",
+      "const { pathname: drivePath } = new URL('file:///C:/Users/Test/repo/file.ts');",
+      "const uncPath = new URL('file://server/share/repo/file.ts').pathname;",
+      "const fromNative = toFileUrl('C:\\\\repo\\\\file.ts').pathname;",
+      'const URLAlias = NodeURL;',
+      "const constructorAlias = new URLAlias('file:///D:/work/pkg/index.ts').pathname;",
+      'let assigned;',
+      "assigned = new URL('./assigned', import.meta.url);",
+      'const assignedPath = assigned.pathname;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('file-url-antipatterns.ts', fileUrlAntipatterns).map(
+        (violation) => violation.line,
+      ),
+      [2, 7, 8, 9, 10, 12, 15],
+    );
+
+    const legitimateUrlPaths = [
+      'function validate(configured: string): string {',
+      '  const parsed = new URL(configured);',
+      "  if (parsed.origin !== 'https://api.anthropic.com' || parsed.pathname !== '/') throw new Error();",
+      '  return parsed.pathname;',
+      '}',
+      "const inlineHttps = new URL('https://example.com/a/b').pathname;",
+      "const basedHttps = new URL('/v1/messages', 'https://api.anthropic.com').pathname;",
+      "const absoluteOverride = new URL('https://example.com/a', import.meta.url).pathname;",
+      "const nativePath = fileURLToPath(new URL('./module.ts', import.meta.url));",
+      'function requestPath(url: URL): string {',
+      '  return `${url.pathname}${url.search}`;',
+      '}',
+      '// Ordinary prose mentions new URL(...).pathname and file:///C:/repo.',
+      'const quoted = "new URL(\\"file:///C:/repo\\").pathname";',
+      'const pattern = /file:\\/\\/\\/C:\\/repo|\\.pathname/u;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('legitimate-url-paths.ts', legitimateUrlPaths),
+      [],
+    );
+  });
+
   void it('converts file URLs to native paths instead of using URL.pathname', async () => {
-    // On Windows `new URL(...).pathname` yields `/D:/a/repo/`, and joining that
-    // produces `D:\D:\a\repo\...`, which fails with ENOENT. CI proved this.
-    // `fileURLToPath` is the only correct conversion.
+    // A file URL pathname such as `/D:/a/repo/` is not a Windows native path.
+    // Follow only compiler-proven file URL provenance so HTTPS path validation
+    // remains legitimate while inline, indirect, and aliased conversions fail.
     const roots = ['src', 'extensions', 'scripts', 'tests'];
     const offenders: string[] = [];
     for (const rootDir of roots) {
@@ -1277,29 +1352,15 @@ void describe('package', () => {
       if (!existsSync(dir)) continue;
       for (const file of await walkSourceTree(dir)) {
         const source = await readFile(file, 'utf8');
-        const stripped = source
-          .replace(/\/\*[\s\S]*?\*\//g, '')
-          .split('\n')
-          .filter((line) => !line.trim().startsWith('//'))
-          .join('\n');
-        // Matches both the inline form new URL(...).pathname and the indirect
-        // form where the URL is bound to a variable and read later. The indirect
-        // form previously escaped this guard and reached Windows CI.
-        const inlinePathname = /new URL\([^)]*\)\s*\.pathname/.test(stripped);
-        const urlBindings = [...stripped.matchAll(/\b(\w+)\s*=\s*new URL\(/g)].map(
-          (match) => match[1],
-        );
-        const indirectPathname = urlBindings.some(
-          (binding) =>
-            binding !== undefined && new RegExp(`\\b${binding}\\s*\\.pathname\\b`).test(stripped),
-        );
-        if (inlinePathname || indirectPathname) offenders.push(file);
+        for (const violation of findFileUrlPathnameViolations(file, source)) {
+          offenders.push(`${violation.file}:${String(violation.line)} ${violation.text}`);
+        }
       }
     }
     assert.deepEqual(
       offenders,
       [],
-      'use fileURLToPath(new URL(...)) so Windows paths resolve correctly',
+      'use fileURLToPath(fileUrl) instead of fileUrl.pathname for native paths',
     );
   });
 
@@ -1418,9 +1479,13 @@ void describe('package', () => {
   void it('local tarball installs with the expected package files', async () => {
     const temp = await mkdtemp(join(tmpdir(), 'pi-bg-pack-'));
     let tarball: URL | undefined;
+    let registry: Awaited<ReturnType<typeof startInstalledDependencyRegistry>> | undefined;
     const packEnvRoot = makeIsolatedEnvRoot('pi-bg-pack-env-');
+    const missingEnvRoot = makeIsolatedEnvRoot('pi-bg-missing-env-');
     const installEnvRoot = makeIsolatedEnvRoot('pi-bg-install-env-');
     try {
+      const packageJson = await pkg();
+      assert.deepEqual(packageJson.dependencies, { turndown: '7.2.4' });
       const pack = runNpm(['pack', '--json'], {
         cwd: fileURLToPath(root),
         env: isolatedNpmEnv(packEnvRoot),
@@ -1432,11 +1497,109 @@ void describe('package', () => {
       // fileURLToPath, never pathname: on Windows pathname yields a leading-slash
       // form such as /D:/... which is not a usable native path.
       const tarballPath = fileURLToPath(tarball);
-      const init = runNpm(['init', '-y'], {
-        cwd: temp,
-        env: isolatedNpmEnv(installEnvRoot),
+
+      const missingConsumer = join(temp, 'missing-consumer');
+      const seedConsumer = join(temp, 'dependency-seed');
+      const installedConsumer = join(temp, 'installed-consumer');
+      for (const directory of [missingConsumer, seedConsumer, installedConsumer]) {
+        mkdirSync(directory, { recursive: true });
+      }
+      const emptyConsumerManifest = (name: string): string =>
+        `${JSON.stringify({ name, private: true, version: '1.0.0' }, null, 2)}\n`;
+      await writeFile(
+        join(missingConsumer, 'package.json'),
+        emptyConsumerManifest('missing-input-control'),
+      );
+      await writeFile(
+        join(installedConsumer, 'package.json'),
+        emptyConsumerManifest('offline-packed-consumer'),
+      );
+
+      assert.deepEqual(await readdir(join(missingEnvRoot, 'cache')), []);
+      const missingInstall = runNpm(
+        [
+          'install',
+          '--legacy-peer-deps',
+          '--offline',
+          '--ignore-scripts',
+          '--no-audit',
+          '--no-fund',
+          '--package-lock=false',
+          tarballPath,
+        ],
+        { cwd: missingConsumer, env: isolatedNpmEnv(missingEnvRoot) },
+      );
+      assert.notEqual(missingInstall.status, 0, 'an empty cache must not fake offline success');
+      assert.match(`${missingInstall.stderr}\n${missingInstall.stdout}`, /ENOTCACHED/u);
+      assert.match(`${missingInstall.stderr}\n${missingInstall.stdout}`, /turndown/u);
+      assert.equal(existsSync(join(missingConsumer, 'node_modules', 'turndown')), false);
+
+      assert.deepEqual(await readdir(join(installEnvRoot, 'cache')), []);
+      registry = await startInstalledDependencyRegistry({
+        dependencySpecs: packageJson.dependencies,
+        npmCli,
+        npmEnv: isolatedNpmEnv(packEnvRoot),
+        packageRoot: fileURLToPath(root),
+        scratchDir: join(temp, 'dependency-registry'),
       });
-      assert.equal(init.status, 0, init.stderr);
+      assert.deepEqual(registry.packageVersions, [
+        '@mixmark-io/domino@2.2.0',
+        'turndown@7.2.4',
+      ]);
+      await writeFile(
+        join(seedConsumer, 'package.json'),
+        `${JSON.stringify(
+          {
+            name: 'offline-cache-seed',
+            private: true,
+            version: '1.0.0',
+            dependencies: packageJson.dependencies,
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      const registryOrigin = registry.origin;
+      const preparation = await runNpmAsync(
+        [
+          'install',
+          '--legacy-peer-deps',
+          '--ignore-scripts',
+          '--no-audit',
+          '--no-fund',
+          '--package-lock=false',
+        ],
+        {
+          cwd: seedConsumer,
+          env: localRegistryNpmEnv(installEnvRoot, registryOrigin),
+        },
+      );
+      assert.equal(preparation.status, 0, preparation.stderr);
+      assert.ok(existsSync(join(seedConsumer, 'node_modules', 'turndown', 'package.json')));
+      assert.ok(
+        existsSync(join(seedConsumer, 'node_modules', '@mixmark-io', 'domino', 'package.json')),
+      );
+      assert.ok(registry.requests.length >= 4, 'cache preparation must read registry inputs');
+      assert.deepEqual(
+        registry.requests.filter((request) => request.status !== 200),
+        [],
+        'the deterministic registry must contain the complete production closure',
+      );
+      for (const requestPath of [
+        '/turndown',
+        '/@mixmark-io/domino',
+        '/tarballs/turndown@7.2.4',
+        '/tarballs/@mixmark-io/domino@2.2.0',
+      ]) {
+        assert.ok(
+          registry.requests.some((request) => request.path === requestPath),
+          `cache preparation did not request ${requestPath}`,
+        );
+      }
+      await registry.close();
+      registry = undefined;
+      assert.notDeepEqual(await readdir(join(installEnvRoot, 'cache')), []);
+
       const install = runNpm(
         [
           'install',
@@ -1445,23 +1608,64 @@ void describe('package', () => {
           '--ignore-scripts',
           '--no-audit',
           '--no-fund',
+          '--package-lock=false',
           tarballPath,
         ],
         {
-          cwd: temp,
-          env: offlineNpmEnv(installEnvRoot),
+          cwd: installedConsumer,
+          // The loopback registry is closed. `--offline` must satisfy every
+          // registry/tarball read from the explicitly prepared isolated cache.
+          env: localRegistryNpmEnv(installEnvRoot, registryOrigin),
         },
       );
       assert.equal(install.status, 0, install.stderr);
       assert.equal(
-        existsSync(join(temp, 'node_modules', '@ravshansbox', 'pi-anthropic-sps')),
+        existsSync(
+          join(installedConsumer, 'node_modules', '@ravshansbox', 'pi-anthropic-sps'),
+        ),
         false,
         'packed consumers must not install the retired URL-based sanitizer dependency',
       );
-      assert.ok(
-        existsSync(join(temp, 'node_modules', 'turndown', 'package.json')),
-        'packed consumers must install the markdown extraction production dependency',
+
+      const turndownManifest = parseJsonValue(
+        await readFile(
+          join(installedConsumer, 'node_modules', 'turndown', 'package.json'),
+          'utf8',
+        ),
       );
+      const dominoManifest = parseJsonValue(
+        await readFile(
+          join(installedConsumer, 'node_modules', '@mixmark-io', 'domino', 'package.json'),
+          'utf8',
+        ),
+      );
+      assert.ok(isObject(turndownManifest));
+      assert.ok(isObject(dominoManifest));
+      assert.equal(field(turndownManifest, 'version'), '7.2.4');
+      assert.equal(field(dominoManifest, 'version'), '2.2.0');
+      const turndownDependencies = field(turndownManifest, 'dependencies');
+      assert.ok(isObject(turndownDependencies));
+      assert.equal(field(turndownDependencies, '@mixmark-io/domino'), '^2.2.0');
+
+      const load = spawnSync(
+        process.execPath,
+        [
+          '-e',
+          [
+            "const TurndownService = require('turndown');",
+            "const domino = require('@mixmark-io/domino');",
+            "if (typeof domino.createWindow !== 'function') throw new Error('domino did not load');",
+            "const markdown = new TurndownService().turndown('<h1>Offline</h1><p>closure loaded</p>');",
+            "if (!markdown.includes('Offline') || !markdown.includes('closure loaded')) throw new Error(markdown);",
+            'process.stdout.write(markdown);',
+          ].join('\n'),
+        ],
+        { cwd: installedConsumer, encoding: 'utf8', env: isolatedNpmEnv(installEnvRoot) },
+      );
+      assert.equal(load.status, 0, load.stderr);
+      assert.match(load.stdout, /Offline/u);
+      assert.match(load.stdout, /closure loaded/u);
+
       for (const f of [
         'package.json',
         'BACKGROUND-TASKS-INSTRUCTIONS.md',
@@ -1494,11 +1698,16 @@ void describe('package', () => {
         'src/ui/background-tasks-manager.ts',
         'src/ui/fusion-model-selector.ts',
       ]) {
-        assert.ok(existsSync(join(temp, 'node_modules', 'pi-background-tasks', f)), f);
+        assert.ok(
+          existsSync(join(installedConsumer, 'node_modules', 'pi-background-tasks', f)),
+          f,
+        );
       }
     } finally {
+      if (registry !== undefined) await registry.close();
       await rm(temp, { recursive: true, force: true });
       removeIsolatedEnvRoot(packEnvRoot);
+      removeIsolatedEnvRoot(missingEnvRoot);
       removeIsolatedEnvRoot(installEnvRoot);
       if (tarball) await rm(tarball, { force: true });
     }

@@ -24,6 +24,14 @@ CI=1
 
 Never point tests at the user's real `~/.pi/agent`.
 
+## Trustworthy package-verification controls
+
+Package source guards are compiler-driven rather than text-only:
+
+- `test:type-safety` parses TypeScript syntax trees to reject explicit `any` types, nested/double assertions, and production non-null expressions while ignoring inert words in comments, strings, templates, and regular expressions. TypeScript-recognized `@ts-ignore`, `@ts-expect-error`, and `@ts-nocheck` comments remain forbidden.
+- `test:package` follows statically proven file-URL provenance before rejecting `.pathname`. File URLs derived from `import.meta.url`, `file:` literals, `pathToFileURL`, or their aliases must use `fileURLToPath`; ordinary HTTP(S) origin/path validation remains allowed.
+- The packed-consumer test starts with a separate empty-cache negative control. It then repacks the real installed production dependency closure with lifecycle scripts disabled, exposes only those inputs through a loopback fixture registry, and seeds a fresh task-owned npm cache. The registry is stopped before the tarball is installed with `--offline`; the test loads Turndown and its Domino transitive dependency. It never reads the user's npm cache, and absent closure inputs fail loudly.
+
 ## Current package scripts
 
 From current `package.json`:
