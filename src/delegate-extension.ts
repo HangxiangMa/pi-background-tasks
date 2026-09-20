@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -8,15 +9,17 @@ import type {
 } from '@earendil-works/pi-coding-agent';
 import { Text } from '@earendil-works/pi-tui';
 import { Type, type Static } from 'typebox';
-import type { BgTask, BgTaskSnapshot, StartDelegateTaskOptions } from './core/common.js';
+import type {
+  BgTask,
+  BgTaskSnapshot,
+  DelegateTaskFacts,
+  StartDelegateTaskOptions,
+} from './core/common.js';
 import { truncateChars } from './core/common.js';
-import { sha256Buffer } from './core/attested-pi-run.js';
-import { readFusionCommittedResult, readFusionFailureResult } from './core/fusion/result-package.js';
-import {
-  cloneFusionUsage,
-  type FusionFailureResultView,
-  type FusionUsage,
-  type FusionWorkflowId,
+import type {
+  FusionFailureResultView,
+  FusionUsage,
+  FusionWorkflowId,
 } from './core/fusion/types.js';
 import {
   DELEGATE_AUTO_DELIVER_MODES,
@@ -32,21 +35,14 @@ import {
   type DelegateExtensionMode,
   type DelegateRoute,
 } from './core/delegate/types.js';
+import type { DelegateHookContractEvidence } from './core/delegate/hook-contract.js';
 import {
-  DELEGATE_INLINE_ANSWER_BYTES,
   DELEGATE_DEFAULT_MAX_TOOL_CALLS,
   DELEGATE_DEFAULT_MAX_TURNS,
   DELEGATE_DEFAULT_TIMEOUT_SECONDS,
-} from './core/delegate/budget.js';
-import { resolveDelegateRoute } from './core/delegate/launch.js';
-import {
-  decideDelegateDelivery,
-  evaluateDelegateTerminal,
-  inlineTooLarge,
-  prepareDelegateLaunch,
-} from './core/delegate/runner.js';
-import { loadDelegateHookContractEvidence } from './core/delegate/launch.js';
-import type { DelegateHookContractEvidence } from './core/delegate/hook-contract.js';
+  DELEGATE_INLINE_ANSWER_BYTES,
+} from './core/delegate/facade-contract.js';
+import { LazyModule } from './core/lazy-module.js';
 
 /**
  * `bg_delegate` and `bg_result` registration.
@@ -224,6 +220,29 @@ function textContent(text: string) {
   return [{ type: 'text' as const, text }];
 }
 
+function sha256Buffer(buffer: Buffer): string {
+  return `sha256:${createHash('sha256').update(buffer).digest('hex')}`;
+}
+
+function cloneFusionUsage(usage: FusionUsage): FusionUsage {
+  return {
+    input: usage.input,
+    output: usage.output,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+    ...(usage.cacheWrite1h === undefined ? {} : { cacheWrite1h: usage.cacheWrite1h }),
+    ...(usage.reasoning === undefined ? {} : { reasoning: usage.reasoning }),
+    totalTokens: usage.totalTokens,
+    cost: {
+      input: usage.cost.input,
+      output: usage.cost.output,
+      cacheRead: usage.cost.cacheRead,
+      cacheWrite: usage.cost.cacheWrite,
+      total: usage.cost.total,
+    },
+  };
+}
+
 function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -302,19 +321,94 @@ function optionalPositiveInteger(value: unknown, label: string): number | undefi
   return value;
 }
 
+export interface DelegatePreparedLaunch {
+  preflight: {
+    childSessionId: string;
+    seed: { serialized: string };
+    limits: { max_turns: number; max_tool_calls: number; timeout_seconds: number };
+    plan: {
+      child_prompt_utf8_bytes: number;
+      launch_input_tokens_upper_bound: number;
+      route: { allowed_input_tokens: number };
+      retained_growth_budget_tokens: number;
+    };
+  };
+  argv: readonly string[];
+  stdinBytes: Buffer;
+  env: NodeJS.ProcessEnv;
+  facts: DelegateTaskFacts;
+}
+
+export interface DelegateExtensionRuntime {
+  loadDelegateHookContractEvidence: (
+    raw: string,
+  ) => DelegateHookContractEvidence;
+  resolveDelegateRoute: typeof import('./core/delegate/launch.js').resolveDelegateRoute;
+  prepareDelegateLaunch: (
+    input: Parameters<typeof import('./core/delegate/runner.js').prepareDelegateLaunch>[0],
+  ) => Promise<DelegatePreparedLaunch>;
+}
+
+interface DelegateResultRuntime {
+  decideDelegateDelivery: typeof import('./core/delegate/runner.js').decideDelegateDelivery;
+  evaluateDelegateTerminal: typeof import('./core/delegate/runner.js').evaluateDelegateTerminal;
+  inlineTooLarge: typeof import('./core/delegate/runner.js').inlineTooLarge;
+}
+
+interface FusionResultRuntime {
+  readFusionCommittedResult: typeof import('./core/fusion/result-package.js').readFusionCommittedResult;
+  readFusionFailureResult: typeof import('./core/fusion/result-package.js').readFusionFailureResult;
+}
+
+async function importDelegateExtensionRuntime(): Promise<DelegateExtensionRuntime> {
+  const [launch, runner] = await Promise.all([
+    import('./core/delegate/launch.js'),
+    import('./core/delegate/runner.js'),
+  ]);
+  return {
+    loadDelegateHookContractEvidence: launch.loadDelegateHookContractEvidence,
+    resolveDelegateRoute: launch.resolveDelegateRoute,
+    prepareDelegateLaunch: runner.prepareDelegateLaunch,
+  };
+}
+
+async function importDelegateResultRuntime(): Promise<DelegateResultRuntime> {
+  const runner = await import('./core/delegate/runner.js');
+  return {
+    decideDelegateDelivery: runner.decideDelegateDelivery,
+    evaluateDelegateTerminal: runner.evaluateDelegateTerminal,
+    inlineTooLarge: runner.inlineTooLarge,
+  };
+}
+
+async function importFusionResultRuntime(): Promise<FusionResultRuntime> {
+  const resultPackage = await import('./core/fusion/result-package.js');
+  return {
+    readFusionCommittedResult: resultPackage.readFusionCommittedResult,
+    readFusionFailureResult: resultPackage.readFusionFailureResult,
+  };
+}
+
 export interface DelegateExtensionDependencies {
   startDelegateTask: (ctx: ExtensionContext, options: StartDelegateTaskOptions) => Promise<BgTask>;
   snapshot: (task: BgTask) => BgTaskSnapshot;
   /** Overridable so tests can supply observed evidence without touching disk. */
   loadHookEvidence?: (() => Promise<DelegateHookContractEvidence>) | undefined;
+  /** Internal deterministic deferred-import seam. */
+  loadRuntime?: (() => Promise<DelegateExtensionRuntime>) | undefined;
 }
 
 export interface BackgroundResultExtensionDependencies {
   resolveTask: (idOrPrefix: string) => BgTask;
   claimFusionUsage: (task: BgTask) => Promise<boolean>;
+  /** Internal deterministic deferred-import seams. */
+  loadDelegateResultRuntime?: (() => Promise<DelegateResultRuntime>) | undefined;
+  loadFusionResultRuntime?: (() => Promise<FusionResultRuntime>) | undefined;
 }
 
-async function defaultHookEvidence(): Promise<DelegateHookContractEvidence> {
+async function defaultHookEvidence(
+  runtime: LazyModule<DelegateExtensionRuntime>,
+): Promise<DelegateHookContractEvidence> {
   let raw: string;
   try {
     raw = await readFile(HOOK_EVIDENCE_PATH, 'utf8');
@@ -331,14 +425,22 @@ async function defaultHookEvidence(): Promise<DelegateHookContractEvidence> {
       },
     );
   }
-  return loadDelegateHookContractEvidence(raw);
+  return runtime.run((loaded) => loaded.loadDelegateHookContractEvidence(raw));
 }
 
 export function registerDelegateExtension(
   pi: ExtensionAPI,
   deps: DelegateExtensionDependencies,
 ): void {
-  const loadEvidence = deps.loadHookEvidence ?? defaultHookEvidence;
+  const runtime = new LazyModule(
+    'delegate-producer',
+    deps.loadRuntime ?? importDelegateExtensionRuntime,
+  );
+  const loadEvidence = deps.loadHookEvidence ?? (() => defaultHookEvidence(runtime));
+
+  pi.on('session_shutdown', () => {
+    runtime.close('Pi session shutdown');
+  });
 
   pi.registerTool<typeof DelegateParams, DelegateLaunchDetails>({
     name: DELEGATE_TOOL_NAME,
@@ -404,100 +506,106 @@ export function registerDelegateExtension(
       const capability = requireCapability(params.capability);
       const extensionMode = requireExtensionMode(params.extensionMode);
       const autoDeliver = requireAutoDeliver(params.autoDeliver);
-      const hookEvidence = await loadEvidence();
-      const route = resolveDelegateRoute({
-        requested: params.route,
-        currentModel:
-          ctx.model === undefined
-            ? undefined
-            : {
-                provider: ctx.model.provider,
-                id: ctx.model.id,
-                contextWindow: ctx.model.contextWindow,
-              },
-        availableModels: ctx.modelRegistry.getAll().map((model) => ({
-          provider: model.provider,
-          id: model.id,
-          contextWindow: model.contextWindow,
-        })),
-        thinkingLevel: pi.getThinkingLevel(),
-      });
+      return runtime.run(async (loaded) => {
+        const hookEvidence = await loadEvidence();
+        runtime.assertOpen();
+        const route = loaded.resolveDelegateRoute({
+          requested: params.route,
+          currentModel:
+            ctx.model === undefined
+              ? undefined
+              : {
+                  provider: ctx.model.provider,
+                  id: ctx.model.id,
+                  contextWindow: ctx.model.contextWindow,
+                },
+          availableModels: ctx.modelRegistry.getAll().map((model) => ({
+            provider: model.provider,
+            id: model.id,
+            contextWindow: model.contextWindow,
+          })),
+          thinkingLevel: pi.getThinkingLevel(),
+        });
 
-      const prepared = await prepareDelegateLaunch({
-        ctx: {
+        runtime.assertOpen();
+        const prepared = await loaded.prepareDelegateLaunch({
+          ctx: {
+            cwd: ctx.cwd,
+            sessionManager: ctx.sessionManager,
+            getSystemPrompt: () => ctx.getSystemPrompt(),
+          },
+          toolCallId,
+          prompt: params.prompt,
+          capability,
+          extensionMode,
+          route,
+          limitOverrides: {
+            maxTurns: params.maxTurns,
+            maxToolCalls: params.maxToolCalls,
+            timeoutSeconds: params.timeoutSeconds,
+          },
+          hookEvidence,
           cwd: ctx.cwd,
-          sessionManager: ctx.sessionManager,
-          getSystemPrompt: () => ctx.getSystemPrompt(),
-        },
-        toolCallId,
-        prompt: params.prompt,
-        capability,
-        extensionMode,
-        route,
-        limitOverrides: {
-          maxTurns: params.maxTurns,
-          maxToolCalls: params.maxToolCalls,
-          timeoutSeconds: params.timeoutSeconds,
-        },
-        hookEvidence,
-        cwd: ctx.cwd,
-        sessionId: ctx.sessionManager.getSessionId(),
-        autoDeliver,
+          sessionId: ctx.sessionManager.getSessionId(),
+          autoDeliver,
+        });
+
+        runtime.assertOpen();
+        const launchOptions: StartDelegateTaskOptions = {
+          name: params.name,
+          argv: prepared.argv,
+          stdinBytes: prepared.stdinBytes,
+          env: prepared.env,
+          facts: prepared.facts,
+          notifyOnCompletion: params.notifyOnCompletion ?? true,
+          triggerOnCompletion: params.triggerOnCompletion ?? true,
+          timeoutSeconds: prepared.preflight.limits.timeout_seconds,
+        };
+        const task = await deps.startDelegateTask(ctx, launchOptions);
+        runtime.assertOpen();
+
+        const details: DelegateLaunchDetails = {
+          schema_version: 'pi-background-tasks.delegate-launch.v1',
+          task: deps.snapshot(task),
+          route: {
+            provider: route.provider,
+            model: route.model,
+            qualified_id: route.qualified_id,
+            origin: route.origin,
+          },
+          child_session_id: prepared.preflight.childSessionId,
+          artifact_dir: prepared.facts.artifactDir,
+          seed_sha256: prepared.facts.seedSha256,
+          seed_utf8_bytes: Buffer.byteLength(prepared.preflight.seed.serialized, 'utf8'),
+          budget: prepared.facts.budget,
+          extension_mode: extensionMode,
+          auto_deliver: autoDeliver,
+          notify_on_completion: launchOptions.notifyOnCompletion,
+          trigger_on_completion: launchOptions.triggerOnCompletion,
+        };
+        return {
+          content: textContent(
+            [
+              `Started delegate ${params.name} (${task.id})`,
+              `Route pinned: ${route.qualified_id} (${route.origin}); it is never substituted.`,
+              `Child session: ${prepared.preflight.childSessionId} (separate from this session)`,
+              `Artifacts: ${prepared.facts.artifactDir}`,
+              `Seed: ${String(Buffer.byteLength(prepared.preflight.seed.serialized, 'utf8'))} bytes, sha256 ${prepared.facts.seedSha256}`,
+              `Child prompt: ${String(prepared.preflight.plan.child_prompt_utf8_bytes)} bytes; launch estimate ${String(prepared.preflight.plan.launch_input_tokens_upper_bound)} / ${String(prepared.preflight.plan.route.allowed_input_tokens)} allowed input tokens; protected retained-growth runway ${String(prepared.preflight.plan.retained_growth_budget_tokens)} tokens.`,
+              `Estimator: family ${prepared.facts.budget.family}, source ${prepared.facts.budget.rate_source.source}, rate ${String(prepared.facts.budget.rate_source.effective_rate_bytes_per_token_x100)}/100 B/tok + ${String(prepared.facts.budget.rate_source.affine_f_tokens)} tokens${prepared.facts.budget.rate_source.warning === null ? '' : `; warning: ${prepared.facts.budget.rate_source.warning}`}`,
+              `Capability: ${capability} (read/search/list only)`,
+              `Extension mode: ${extensionMode}${extensionMode === 'ambient' ? ' — WARNING: arbitrary discovered extension code executes in the child; the tool allowlist does not sandbox it, so inspect-only process isolation is weakened.' : ' (ambient extension discovery disabled)'}`,
+              `Limits: ${String(prepared.preflight.limits.max_turns)} turns, ${String(prepared.preflight.limits.max_tool_calls)} tool calls, ${String(prepared.preflight.limits.timeout_seconds)}s`,
+              `Auto-deliver: ${autoDeliver}`,
+              launchOptions.notifyOnCompletion
+                ? `Terminal notification: enabled.${launchOptions.triggerOnCompletion ? ' It will start a follow-up turn.' : ' It will not start a turn.'}`
+                : 'Terminal notification: disabled.',
+              `Retrieve the verified answer with ${DELEGATE_RESULT_TOOL_NAME}({taskId:"${task.id}"}). Do not poll.`,
+            ].join('\n'),
+          ),
+          details,
+        };
       });
-
-      const launchOptions: StartDelegateTaskOptions = {
-        name: params.name,
-        argv: prepared.argv,
-        stdinBytes: prepared.stdinBytes,
-        env: prepared.env,
-        facts: prepared.facts,
-        notifyOnCompletion: params.notifyOnCompletion ?? true,
-        triggerOnCompletion: params.triggerOnCompletion ?? true,
-        timeoutSeconds: prepared.preflight.limits.timeout_seconds,
-      };
-      const task = await deps.startDelegateTask(ctx, launchOptions);
-
-      const details: DelegateLaunchDetails = {
-        schema_version: 'pi-background-tasks.delegate-launch.v1',
-        task: deps.snapshot(task),
-        route: {
-          provider: route.provider,
-          model: route.model,
-          qualified_id: route.qualified_id,
-          origin: route.origin,
-        },
-        child_session_id: prepared.preflight.childSessionId,
-        artifact_dir: prepared.facts.artifactDir,
-        seed_sha256: prepared.facts.seedSha256,
-        seed_utf8_bytes: Buffer.byteLength(prepared.preflight.seed.serialized, 'utf8'),
-        budget: prepared.facts.budget,
-        extension_mode: extensionMode,
-        auto_deliver: autoDeliver,
-        notify_on_completion: launchOptions.notifyOnCompletion,
-        trigger_on_completion: launchOptions.triggerOnCompletion,
-      };
-      return {
-        content: textContent(
-          [
-            `Started delegate ${params.name} (${task.id})`,
-            `Route pinned: ${route.qualified_id} (${route.origin}); it is never substituted.`,
-            `Child session: ${prepared.preflight.childSessionId} (separate from this session)`,
-            `Artifacts: ${prepared.facts.artifactDir}`,
-            `Seed: ${String(Buffer.byteLength(prepared.preflight.seed.serialized, 'utf8'))} bytes, sha256 ${prepared.facts.seedSha256}`,
-            `Child prompt: ${String(prepared.preflight.plan.child_prompt_utf8_bytes)} bytes; launch estimate ${String(prepared.preflight.plan.launch_input_tokens_upper_bound)} / ${String(prepared.preflight.plan.route.allowed_input_tokens)} allowed input tokens; protected retained-growth runway ${String(prepared.preflight.plan.retained_growth_budget_tokens)} tokens.`,
-            `Estimator: family ${prepared.facts.budget.family}, source ${prepared.facts.budget.rate_source.source}, rate ${String(prepared.facts.budget.rate_source.effective_rate_bytes_per_token_x100)}/100 B/tok + ${String(prepared.facts.budget.rate_source.affine_f_tokens)} tokens${prepared.facts.budget.rate_source.warning === null ? '' : `; warning: ${prepared.facts.budget.rate_source.warning}`}`,
-            `Capability: ${capability} (read/search/list only)`,
-            `Extension mode: ${extensionMode}${extensionMode === 'ambient' ? ' — WARNING: arbitrary discovered extension code executes in the child; the tool allowlist does not sandbox it, so inspect-only process isolation is weakened.' : ' (ambient extension discovery disabled)'}`,
-            `Limits: ${String(prepared.preflight.limits.max_turns)} turns, ${String(prepared.preflight.limits.max_tool_calls)} tool calls, ${String(prepared.preflight.limits.timeout_seconds)}s`,
-            `Auto-deliver: ${autoDeliver}`,
-            launchOptions.notifyOnCompletion
-              ? `Terminal notification: enabled.${launchOptions.triggerOnCompletion ? ' It will start a follow-up turn.' : ' It will not start a turn.'}`
-              : 'Terminal notification: disabled.',
-            `Retrieve the verified answer with ${DELEGATE_RESULT_TOOL_NAME}({taskId:"${task.id}"}). Do not poll.`,
-          ].join('\n'),
-        ),
-        details,
-      };
     },
     renderCall(args, theme) {
       return new Text(
@@ -527,6 +635,27 @@ export function registerBackgroundResultExtension(
   pi: ExtensionAPI,
   deps: BackgroundResultExtensionDependencies,
 ): void {
+  const delegateResultRuntime = new LazyModule(
+    'delegate-result-verifier',
+    deps.loadDelegateResultRuntime ?? importDelegateResultRuntime,
+  );
+  const fusionResultRuntime = new LazyModule(
+    'fusion-result-verifier',
+    deps.loadFusionResultRuntime ?? importFusionResultRuntime,
+  );
+  let resultClosedError: Error | undefined;
+  const assertResultActive = (): void => {
+    if (resultClosedError !== undefined) throw resultClosedError;
+  };
+
+  pi.on('session_shutdown', () => {
+    resultClosedError ??= new Error(
+      'lazy_module_closed: background-result facade belongs to a closed activation (Pi session shutdown)',
+    );
+    delegateResultRuntime.close('Pi session shutdown');
+    fusionResultRuntime.close('Pi session shutdown');
+  });
+
   pi.registerTool<typeof ResultParams, BackgroundResultDetails>({
     name: DELEGATE_RESULT_TOOL_NAME,
     label: 'Background Result',
@@ -556,6 +685,8 @@ export function registerBackgroundResultExtension(
       return prepared;
     },
     async execute(_toolCallId, params) {
+      // Reject stale tools before touching the activation-local registry API.
+      assertResultActive();
       let task: BgTask;
       try {
         task = deps.resolveTask(params.taskId);
@@ -585,12 +716,15 @@ export function registerBackgroundResultExtension(
           };
         }
         if (task.status !== 'completed' || fusion.outcome?.status !== 'committed') {
-          const terminal = await readFusionFailureResult({
-            artifactDirAbs: fusion.artifactDirAbs,
-            artifactDir: fusion.artifactDir,
-            runId: fusion.runId,
-            workflow: fusion.workflow,
-          });
+          const terminal = await fusionResultRuntime.run((loaded) =>
+            loaded.readFusionFailureResult({
+              artifactDirAbs: fusion.artifactDirAbs,
+              artifactDir: fusion.artifactDir,
+              runId: fusion.runId,
+              workflow: fusion.workflow,
+            }),
+          );
+          fusionResultRuntime.assertOpen();
           const state =
             fusion.outcome?.status === 'cancelled' || task.status === 'killed'
               ? 'cancelled'
@@ -628,12 +762,15 @@ export function registerBackgroundResultExtension(
             details,
           };
         }
-        const verified = await readFusionCommittedResult({
-          artifactDirAbs: fusion.artifactDirAbs,
-          artifactDir: fusion.artifactDir,
-          runId: fusion.runId,
-          workflow: fusion.workflow,
-        });
+        const verified = await fusionResultRuntime.run((loaded) =>
+          loaded.readFusionCommittedResult({
+            artifactDirAbs: fusion.artifactDirAbs,
+            artifactDir: fusion.artifactDir,
+            runId: fusion.runId,
+            workflow: fusion.workflow,
+          }),
+        );
+        fusionResultRuntime.assertOpen();
         const answerBytes = Buffer.byteLength(verified.mergedText, 'utf8');
         const answerSha256 = sha256Buffer(Buffer.from(verified.mergedText, 'utf8'));
         const useArtifact =
@@ -644,7 +781,9 @@ export function registerBackgroundResultExtension(
             `Fusion result ${task.id} is ${String(answerBytes)} bytes, above the ${String(DELEGATE_INLINE_ANSWER_BYTES)}-byte inline limit. Use delivery:"artifact"; nothing was truncated.`,
           );
         }
+        fusionResultRuntime.assertOpen();
         const usageDelivered = await deps.claimFusionUsage(task);
+        fusionResultRuntime.assertOpen();
         const details: FusionBackgroundResultDetails = {
           schema_version: 'pi-background-tasks.fusion-result-view.v1',
           task_id: task.id,
@@ -687,7 +826,8 @@ export function registerBackgroundResultExtension(
           { code: 'task_unknown', childCreated: false },
         );
       }
-      if (task.status === 'running') {
+      const delegateTaskStatus = task.status;
+      if (delegateTaskStatus === 'running') {
         const details: DelegateResultDetails = {
           schema_version: 'pi-background-tasks.delegate-result-view.v1',
           task_id: task.id,
@@ -705,17 +845,23 @@ export function registerBackgroundResultExtension(
         };
       }
 
-      const terminal = await evaluateDelegateTerminal({
-        artifactDirAbs: facts.artifactDirAbs,
-        taskId: facts.taskId,
-        launchNonce: facts.launchNonce,
-        seedSha256: facts.seedSha256,
-        route: { provider: facts.route.provider, model: facts.route.model },
-        taskStatus: task.status === 'completed' ? 'completed' : task.status,
-        taskError: task.error,
-        taskOutputPath: task.outputPath,
-        taskOutputAbsPath: task.outputAbsPath,
-      });
+      const evaluation = await delegateResultRuntime.run(async (loaded) => ({
+        loaded,
+        terminal: await loaded.evaluateDelegateTerminal({
+          artifactDirAbs: facts.artifactDirAbs,
+          taskId: facts.taskId,
+          launchNonce: facts.launchNonce,
+          seedSha256: facts.seedSha256,
+          route: { provider: facts.route.provider, model: facts.route.model },
+          taskStatus:
+            delegateTaskStatus === 'completed' ? 'completed' : delegateTaskStatus,
+          taskError: task.error,
+          taskOutputPath: task.outputPath,
+          taskOutputAbsPath: task.outputAbsPath,
+        }),
+      }));
+      delegateResultRuntime.assertOpen();
+      const { loaded: verifier, terminal } = evaluation;
 
       if (terminal.error !== undefined || terminal.result === undefined) {
         const failure =
@@ -731,12 +877,12 @@ export function registerBackgroundResultExtension(
 
       const verified = terminal.result;
       const requestedDelivery = requireDelivery(params.delivery);
-      const decision = decideDelegateDelivery(
+      const decision = verifier.decideDelegateDelivery(
         verified.package.answer.byte_length,
         requestedDelivery,
       );
       if (requestedDelivery === 'inline' && decision.mode === 'artifact') {
-        const failure = inlineTooLarge(
+        const failure = verifier.inlineTooLarge(
           task.id,
           facts.artifactDir,
           verified.package.answer.byte_length,

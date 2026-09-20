@@ -1185,9 +1185,9 @@ void describe('package', () => {
     assert.match(resultPackage, /sha256Buffer\(mergedFile\.bytes\)/);
     assert.match(resultPackage, /TextDecoder\('utf-8', \{ fatal: true \}\)/);
     assert.doesNotMatch(resultPackage, /\.slice\(|\.substring\(/);
-    assert.match(resultExtension, /await readFusionFailureResult/);
+    assert.match(resultExtension, /loaded\.readFusionFailureResult/);
     assert.match(resultExtension, /delivery: 'none'/);
-    assert.match(resultExtension, /await readFusionCommittedResult/);
+    assert.match(resultExtension, /loaded\.readFusionCommittedResult/);
     assert.match(resultExtension, /await deps\.claimFusionUsage\(task\)/);
     const orchestrator = await text('src/core/fusion/orchestrator.ts');
     assert.ok(
@@ -1201,12 +1201,12 @@ void describe('package', () => {
       'summary persistence must have exactly one orchestrator call site',
     );
     assert.ok(
-      resultExtension.indexOf('await readFusionFailureResult') <
+      resultExtension.indexOf('loaded.readFusionFailureResult') <
         resultExtension.indexOf('await deps.claimFusionUsage(task)'),
       'failed retrieval must return before committed-result usage can be claimed',
     );
     assert.ok(
-      resultExtension.indexOf('await readFusionCommittedResult') <
+      resultExtension.indexOf('loaded.readFusionCommittedResult') <
         resultExtension.indexOf('await deps.claimFusionUsage(task)'),
       'verification must finish before the once-only usage claim',
     );

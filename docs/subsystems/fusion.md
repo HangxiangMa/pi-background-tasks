@@ -5,7 +5,7 @@ mode: mixed
 review_policy: behavioral
 stability: stable
 covers_surfaces: [renderer:fusion-result, workflow:investigate, workflow:reason, workflow:research, workflow:validate]
-covers_sources: [extensions/fusion-child.ts, src/core/fusion/artifacts.ts, src/core/fusion/budget.ts, src/core/fusion/child-protocol.ts, src/core/fusion/claude-cache.ts, src/core/fusion/clean-context.ts, src/core/fusion/config.ts, src/core/fusion/context.ts, src/core/fusion/evaluation.ts, src/core/fusion/orchestrator.ts, src/core/fusion/output-contract.ts, src/core/fusion/pi-child.ts, src/core/fusion/prompts.ts, src/core/fusion/result-package.ts, src/core/fusion/source-policy.ts, src/core/fusion/types.ts, src/core/fusion/web-fetch.ts, src/core/fusion/workflows.ts, src/fusion-child-extension.ts, src/fusion-extension.ts, src/ui/fusion-model-selector.ts]
+covers_sources: [extensions/fusion-child.ts, src/core/fusion/artifacts.ts, src/core/fusion/budget.ts, src/core/fusion/child-protocol.ts, src/core/fusion/claude-cache.ts, src/core/fusion/clean-context.ts, src/core/fusion/config.ts, src/core/fusion/context.ts, src/core/fusion/evaluation.ts, src/core/fusion/facade-contract.ts, src/core/fusion/orchestrator.ts, src/core/fusion/output-contract.ts, src/core/fusion/pi-child.ts, src/core/fusion/prompts.ts, src/core/fusion/result-package.ts, src/core/fusion/source-policy.ts, src/core/fusion/types.ts, src/core/fusion/web-fetch.ts, src/core/fusion/workflows.ts, src/fusion-child-extension.ts, src/fusion-extension.ts, src/ui/fusion-model-selector.ts]
 ---
 
 # Fusion subsystem
@@ -33,6 +33,10 @@ When `PI_BG_FEATURES` includes `fusion`, Fusion v1 exposes exactly two commands 
 - `fusion_validate({objective, background, changeSummary, scope, acceptanceCriteria, verification, knownLimitations?, exclusions?})`.
 
 Every public tool schema is closed and has no public capability/mode switch. The retired `fusion_brainstorm` surface is never registered; session start removes it from active tools while preserving rendering of historical completed v4 result messages.
+
+Fusion's facade registers those schemas, commands, fixed workflow metadata, and the `fusion-result` renderer immediately. Context projection, clean-context construction, model configuration/resolution, and the orchestrator are loaded as one activation-local single-flight module on the first workflow invocation. `/fusion-models` has a separate config/selector loader, so opening the selector does not preload the orchestrator, and cancelling an empty `/fusion` editor does not load either lane. Concurrent cold calls share module loading only; every workflow keeps its own controller, readiness gate, managed task, and orchestrator run.
+
+A deferred import failure is bounded, names the failed lane, and is retained for that activation. Session shutdown closes both lanes synchronously before awaiting active-run cleanup and rejects stale calls; a late import cannot open UI, register a task, create a run artifact, or call an old host context. A real reload creates fresh loaders rather than reviving the old instance. The shared state-machine details and the P1a process-only/source-TypeScript limitation are documented in [Delegation](delegation.md#lazy-facade-activation).
 
 ## Commands
 
