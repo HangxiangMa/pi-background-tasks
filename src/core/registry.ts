@@ -1541,7 +1541,7 @@ export class BackgroundTaskRegistry {
         killGraceMs: this.killGraceMs,
         stopWaitMs: this.stopWaitMs,
         now: this.now,
-        logger: console,
+        logger: this.logger,
       });
       this.reloadShellOwner.registerExecution(lease, execution);
       registered = true;
@@ -3861,6 +3861,16 @@ export class BackgroundTaskRegistry {
     task.terminalPublishInFlight = false;
 
     if (emitFailed) {
+      const execution = task.reloadExecution;
+      if (
+        execution !== undefined &&
+        !this.ownsReloadExecution(execution, this.reloadShellLease)
+      ) {
+        // The emitter synchronously detached this task into a reload handoff
+        // before throwing. Attempt 1 is consumed, but only the fresh owner may
+        // retry or decide abandonment on the shared publication ledger.
+        return;
+      }
       this.handleTerminalPublishFailure(task, emitError);
     } else {
       this.markTerminalPublicationDelivered(task);

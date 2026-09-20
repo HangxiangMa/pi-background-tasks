@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import {
   chmod,
@@ -645,6 +645,101 @@ void describe('BackgroundTaskRegistry', () => {
     }
   });
 
+  void it('retains a real failed-admission child owner until natural terminal settlement', async () => {
+    if (process.platform === 'win32') return;
+    const hub = createReloadShellOwnerHubForTests({ handoffTimeoutMs: 1000 });
+    let projectCwd = '';
+    let child: ReturnType<typeof spawn> | undefined;
+    const signals: string[] = [];
+    const h = await createHarness({
+      reloadShellOwner: hub,
+      stopWaitMs: 80,
+      killGraceMs: 20,
+      spawn: (command, args, options) => {
+        rmSync(join(projectCwd, '.pi'), { recursive: true, force: true });
+        child = spawn(command, args, options);
+        return child;
+      },
+      killProcess: (_pid, signal) => {
+        signals.push(String(signal));
+        return true;
+      },
+    });
+    projectCwd = h.cwd;
+    const identity = makeReloadShellIdentity(h.ctx.sessionId ?? '', realpathSync(h.cwd));
+    const claim = hub.beginActivation(identity, 'startup', '1'.repeat(32));
+    const lease = hub.commitActivation(claim, await h.registry.stageReloadActivation(claim));
+    let execution = inspectReloadShellOwnerForTests(hub, identity).executions[0];
+    let passingAssertionsCompleted = false;
+    try {
+      const launch = h.registry.startTask(
+        h.ctx,
+        `node -e ${JSON.stringify('setTimeout(() => process.exit(0), 260)')}`,
+        {
+          name: 'Failed admission owner retention',
+          isAgent: false,
+          surviveReload: true,
+          notifyOnCompletion: false,
+          triggerOnCompletion: false,
+        },
+      );
+      await waitFor(() => {
+        execution = inspectReloadShellOwnerForTests(hub, identity).executions[0];
+        return execution !== undefined;
+      }, 'failed-admission execution registration');
+      await assert.rejects(launch, /cleanup also failed|Failed to start background task/u);
+
+      const pid = child?.pid;
+      assert.equal(typeof pid, 'number');
+      assert.ok(execution);
+      assert.equal(pidExists(pid as number), true, 'real child must still be live at rejection');
+      assert.equal(h.registry.allTasks().length, 0, 'rejected launch must leave no registry task');
+      assert.equal(inspectReloadShellOwnerForTests(hub, identity).executions.length, 1);
+      assert.equal(execution.child, child, 'owner must retain the only live child handle');
+      assert.notEqual(execution.phase, 'released');
+      assert.notEqual(execution.task.status, 'completed', 'admission failure cannot fake success');
+      assert.ok(signals.includes('SIGTERM'));
+      assert.ok(signals.includes('SIGKILL'));
+
+      h.registry.releaseReloadActivation(lease);
+      const hostless = inspectReloadShellOwnerForTests(hub, identity);
+      assert.equal(hostless.phase, 'releasing');
+      assert.equal(hostless.hasAdapter, false);
+      assert.equal(hostless.executions[0], execution, 'cleanup must not require a host adapter');
+      assert.equal(execution.child, child);
+
+      await waitFor(() => !pidExists(pid as number), 'failed-admission child natural exit', 2000);
+      await waitFor(
+        () => inspectReloadShellOwnerForTests(hub, identity).executions.length === 0,
+        'failed-admission owner terminal release',
+        2000,
+      );
+      assert.equal(execution.phase, 'released');
+      assert.equal(execution.child, undefined);
+      assert.equal(execution.task.status, 'failed');
+      passingAssertionsCompleted = true;
+    } finally {
+      const pid = child?.pid;
+      if (!passingAssertionsCompleted && pid !== undefined && pidExists(pid)) {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            // Failure-only rescue; passing assertions require natural settlement.
+          }
+        }
+        await waitFor(() => !pidExists(pid), 'failed-admission failure-only cleanup', 2000).catch(
+          () => undefined,
+        );
+      }
+      h.registry.releaseReloadActivation(lease);
+      h.registry.setShuttingDown(true);
+      await cleanup(h.root);
+    }
+  });
+
   void it('carries the R1 publication ledger across handoff with one cumulative three-attempt budget', async () => {
     const hub = createReloadShellOwnerHubForTests({ handoffTimeoutMs: 1000 });
     let oldAttempts = 0;
@@ -697,6 +792,82 @@ void describe('BackgroundTaskRegistry', () => {
       assert.equal(task.terminalPublished, true);
       assert.equal(freshPublications.filter((entry) => entry.id === task.id).length, 1);
       await waitFor(() => task.reloadExecution === undefined, 'published owner release');
+    } finally {
+      if (fresh !== undefined && freshLease !== undefined) {
+        fresh.releaseReloadActivation(freshLease);
+        fresh.setShuttingDown(true);
+      }
+      h.registry.setShuttingDown(true);
+      await cleanup(h.root);
+    }
+  });
+
+  void it('leaves a reentrant reload throw pending for cumulative fresh attempt two', async () => {
+    const hub = createReloadShellOwnerHubForTests({ handoffTimeoutMs: 1000 });
+    let oldLease: ReloadShellActivationLeaseV1 | undefined;
+    let detached = false;
+    let oldAttempts = 0;
+    const h = await createHarness({
+      reloadShellOwner: hub,
+      publishTerminal: () => {
+        oldAttempts += 1;
+        const lease = oldLease;
+        if (lease === undefined) throw new Error('old lease was not initialized');
+        if (!detached) {
+          detached = true;
+          h.registry.prepareReloadHandoff(lease);
+          h.registry.closeTerminalPublication('publisher_closed');
+        }
+        throw new Error('synthetic listener failure after reentrant reload detach');
+      },
+    });
+    const identity = makeReloadShellIdentity(h.ctx.sessionId ?? '', realpathSync(h.cwd));
+    const firstClaim = hub.beginActivation(identity, 'startup', '2'.repeat(32));
+    oldLease = hub.commitActivation(firstClaim, await h.registry.stageReloadActivation(firstClaim));
+    let fresh: BackgroundTaskRegistry | undefined;
+    let freshLease: ReloadShellActivationLeaseV1 | undefined;
+    try {
+      const task = await h.registry.startTask(h.ctx, 'node reentrant-publication.js', {
+        name: 'Reentrant publication handoff',
+        isAgent: false,
+        surviveReload: true,
+        notifyOnCompletion: false,
+        triggerOnCompletion: false,
+      });
+      lastSpawn(h).child.close(0, null);
+      await waitFor(() => detached, 'reentrant publication detach');
+      await waitFor(() => task.status === 'completed', 'reentrant publication terminal');
+
+      const stateAfterThrow = task.terminalPublicationState;
+      const reasonAfterThrow = task.terminalPublicationAbandonReason;
+      const attemptsAfterThrow = task.terminalPublishAttempts;
+      const retryAfterThrow = task.terminalPublishRetryHandle;
+      const oldErrorCount = h.errors.length;
+
+      const freshPublications: BgTaskSnapshot[] = [];
+      fresh = new BackgroundTaskRegistry({
+        reloadShellOwner: hub,
+        sendCompletionNotification() {},
+        publishTerminal: (terminal) => freshPublications.push(terminal),
+        spawn: () => {
+          throw new Error('fresh registry must not respawn a terminal execution');
+        },
+      });
+      const claim = hub.beginActivation(identity, 'reload', '3'.repeat(32));
+      freshLease = hub.commitActivation(claim, await fresh.stageReloadActivation(claim));
+      await waitFor(() => task.reloadExecution === undefined, 'reentrant owner release');
+
+      assert.equal(stateAfterThrow, 'pending');
+      assert.equal(reasonAfterThrow, undefined);
+      assert.equal(attemptsAfterThrow, 1);
+      assert.equal(retryAfterThrow, undefined, 'old registry must not schedule a retry');
+      assert.equal(oldErrorCount, 0, 'transferred throw must not log old-host abandonment');
+      assert.equal(oldAttempts, 1);
+      assert.equal(task.terminalPublicationState, 'delivered');
+      assert.equal(task.terminalPublicationAbandonReason, undefined);
+      assert.equal(task.terminalPublishAttempts, 2);
+      assert.equal(freshPublications.filter((entry) => entry.id === task.id).length, 1);
+      assert.deepEqual(inspectReloadShellOwnerForTests(hub, identity).executions, []);
     } finally {
       if (fresh !== undefined && freshLease !== undefined) {
         fresh.releaseReloadActivation(freshLease);
@@ -931,6 +1102,83 @@ void describe('BackgroundTaskRegistry', () => {
           // Failure-only rescue; passing assertions above require this to be unnecessary.
         }
       }
+      h.registry.setShuttingDown(true);
+      await cleanup(h.root);
+    }
+  });
+
+  void it('releases a real late-closing child after handoff deadline stop timeout', async () => {
+    if (process.platform === 'win32') return;
+    const logs: string[] = [];
+    const hub = createReloadShellOwnerHubForTests({
+      handoffTimeoutMs: 20,
+      logger: { error: (...args: unknown[]) => logs.push(args.map(String).join(' ')) },
+    });
+    let child: ReturnType<typeof spawn> | undefined;
+    const h = await createHarness({
+      reloadShellOwner: hub,
+      stopWaitMs: 100,
+      killGraceMs: 25,
+      spawn: (command, args, options) => {
+        child = spawn(command, args, options);
+        return child;
+      },
+      killProcess: () => true,
+    });
+    const identity = makeReloadShellIdentity(h.ctx.sessionId ?? '', realpathSync(h.cwd));
+    const claim = hub.beginActivation(identity, 'startup', '4'.repeat(32));
+    const lease = hub.commitActivation(claim, await h.registry.stageReloadActivation(claim));
+    let replacementLease: ReloadShellActivationLeaseV1 | undefined;
+    let passingAssertionsCompleted = false;
+    try {
+      const task = await h.registry.startTask(
+        h.ctx,
+        `node -e ${JSON.stringify('setTimeout(() => process.exit(0), 260)')}`,
+        {
+          name: 'Deadline late close',
+          isAgent: false,
+          surviveReload: true,
+          notifyOnCompletion: false,
+          triggerOnCompletion: false,
+        },
+      );
+      const pid = child?.pid;
+      const execution = task.reloadExecution;
+      assert.equal(typeof pid, 'number');
+      assert.ok(execution);
+      h.registry.prepareReloadHandoff(lease);
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      assert.equal(pidExists(pid as number), false);
+      assert.equal(task.status, 'failed');
+      assert.match(task.error ?? '', /pi_bg_reload_handoff_expired/u);
+      assert.equal(execution.phase, 'released');
+      assert.equal(execution.child, undefined);
+      assert.deepEqual(inspectReloadShellOwnerForTests(hub, identity).executions, []);
+      assert.match(logs.join('\n'), /reload handoff expiry could not settle/u);
+
+      const replacement = hub.beginActivation(identity, 'startup', '5'.repeat(32));
+      replacementLease = hub.commitActivation(replacement, await h.registry.stageReloadActivation(replacement));
+      assert.equal(hub.isCurrentLease(replacementLease), true);
+      passingAssertionsCompleted = true;
+    } finally {
+      const pid = child?.pid;
+      if (!passingAssertionsCompleted && pid !== undefined && pidExists(pid)) {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            // Failure-only rescue; passing assertions require the natural close.
+          }
+        }
+        await waitFor(() => !pidExists(pid), 'deadline late-close failure-only cleanup', 2000).catch(
+          () => undefined,
+        );
+      }
+      if (replacementLease !== undefined) h.registry.releaseReloadActivation(replacementLease);
       h.registry.setShuttingDown(true);
       await cleanup(h.root);
     }
