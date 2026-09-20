@@ -6,7 +6,8 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseJsonText } from '../../src/core/common.js';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { parseJsonText, type StartDelegateTaskOptions } from '../../src/core/common.js';
 import {
   BackgroundTaskRegistry,
   WIN32_CMD_PI_TELEMETRY_UNAVAILABLE_REASON,
@@ -20,6 +21,15 @@ import type { Api, Model } from '@earendil-works/pi-ai';
 import type { BgTask, BgTaskSnapshot } from '../../src/core/common.js';
 import type { TaskkillOutcome, WindowsKillPhase } from '../../src/core/windows-taskkill.js';
 import { BackgroundTaskExtensionServiceClosedError } from '../../src/core/extension-api.js';
+import { registerDelegateExtension } from '../../src/delegate-extension.js';
+import { FusionArtifactStore } from '../../src/core/fusion/artifacts.js';
+import { defaultFusionModelConfig } from '../../src/core/fusion/config.js';
+import {
+  FUSION_RESULT_SCHEMA_VERSION,
+  type FusionResultDetails,
+  type ResolvedFusionModel,
+  type ResolvedFusionModels,
+} from '../../src/core/fusion/types.js';
 
 type JsonObject = Record<PropertyKey, unknown>;
 
@@ -349,7 +359,176 @@ async function startFakeTask(
   return { task, child: lastSpawn(h).child };
 }
 
+function resolvedFusionModel(qualifiedId: string): ResolvedFusionModel {
+  const slash = qualifiedId.indexOf('/');
+  return {
+    selection: '$current',
+    source: 'current',
+    provider: qualifiedId.slice(0, slash),
+    model: qualifiedId.slice(slash + 1),
+    qualifiedId,
+    thinkingLevel: 'medium',
+    contextWindow: 1000,
+    maxOutputTokens: 128,
+  };
+}
+
+function resolvedFusionModels(): ResolvedFusionModels {
+  return {
+    candidates: [
+      resolvedFusionModel('test/candidate-a'),
+      resolvedFusionModel('test/candidate-b'),
+      resolvedFusionModel('test/candidate-c'),
+    ],
+    evaluator: resolvedFusionModel('test/evaluator'),
+    merger: resolvedFusionModel('test/merger'),
+  };
+}
+
+async function createCommittedFusionResult(
+  cwd: string,
+  runId: string,
+): Promise<{ store: FusionArtifactStore; details: FusionResultDetails }> {
+  const store = await FusionArtifactStore.create({
+    cwd,
+    runId,
+    source: 'tool',
+    config: defaultFusionModelConfig(),
+    models: resolvedFusionModels(),
+  });
+  await store.transition('candidates_running');
+  await store.transition('candidates_complete');
+  await store.transition('evaluating');
+  await store.transition('evaluation_complete');
+  await store.transition('merging');
+  const merged = await store.writeMerged('retained fusion answer');
+  const details: FusionResultDetails = {
+    schema_version: FUSION_RESULT_SCHEMA_VERSION,
+    run_id: runId,
+    workflow: 'reason',
+    source: 'tool',
+    status: 'completed',
+    context: { kind: 'session_projection', policy_id: 'retention-test' },
+    tool_policy: { candidate_tools: [], evaluation_tools: [], merge_tools: [] },
+    artifact_dir: store.artifactDir,
+    models: store.snapshot().models,
+    evaluator_attempts: 1,
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 2,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    budget: {
+      policy_id: 'retention-test',
+      calibration_version: 'test',
+      route_table: [],
+      rate_sources: [],
+      unknown_provider_warnings: [],
+      calibration_warnings: [],
+    },
+  };
+  await store.writeCommittedResult(merged, details);
+  await store.transition('completed');
+  return { store, details };
+}
+
 void describe('BackgroundTaskRegistry', () => {
+  void it('closes and drains every starter admission before late insertion or spawn', async () => {
+    const h = await createHarness({ modelRegistry: oauthRegistry() });
+    const releaseEnsure = deferred<void>();
+    const allEnteredEnsure = deferred<void>();
+    const managedCompletion = deferred<void>();
+    const originalEnsureRuntimeDir = h.registry.ensureRuntimeDir.bind(h.registry);
+    let ensureEntries = 0;
+    let managedCancels = 0;
+    h.registry.ensureRuntimeDir = async (ctx) => {
+      ensureEntries += 1;
+      if (ensureEntries === 4) allEnteredEnsure.resolve(undefined);
+      await releaseEnsure.promise;
+      return originalEnsureRuntimeDir(ctx);
+    };
+    try {
+      await initCleanGit(h.cwd);
+      const delegateRequest: StartDelegateTaskOptions = Object.assign(Object.create(null), {
+        name: 'admission delegate',
+        argv: [],
+        stdinBytes: Buffer.from('seed', 'utf8'),
+        env: {},
+        facts: {
+          taskId: 'delegate-admission-test',
+          route: { qualifiedId: 'test/delegate-model' },
+        },
+        notifyOnCompletion: false,
+        triggerOnCompletion: false,
+      });
+      const starts = [
+        h.registry.startTask(h.ctx, 'node ordinary-admission.js', {
+          name: 'ordinary admission',
+          notifyOnCompletion: false,
+        }),
+        h.registry.startManagedTask(h.ctx, {
+          id: 'reason-admissionmanaged0000000000000000',
+          name: 'managed admission',
+          command: 'fusion_reason',
+          isAgent: true,
+          completion: managedCompletion.promise,
+          cancel: () => {
+            managedCancels += 1;
+            managedCompletion.resolve(undefined);
+          },
+          notifyOnCompletion: false,
+          triggerOnCompletion: false,
+          fusion: {
+            runId: 'reason-admissionmanaged0000000000000000',
+            workflow: 'reason',
+            artifactDir: '.pi/fusion/admission-managed',
+            artifactDirAbs: join(h.cwd, '.pi', 'fusion', 'admission-managed'),
+            state: 'initializing',
+            usageDelivered: false,
+          },
+        }),
+        h.registry.startDelegateTask(h.ctx, delegateRequest),
+        h.registry.startAttestedPiTask(h.ctx, {
+          name: 'attested admission',
+          provider: 'openai-codex',
+          model: 'gpt-5.5',
+          prompt: 'write report.md',
+          reportPath: 'report.md',
+        }),
+      ];
+      await allEnteredEnsure.promise;
+
+      h.registry.setShuttingDown(true);
+      const waitForAdmissions = Reflect.get(h.registry, 'waitForTaskAdmissions');
+      const admissionsDrained =
+        typeof waitForAdmissions === 'function'
+          ? Promise.resolve(Reflect.apply(waitForAdmissions, h.registry, []))
+          : Promise.resolve();
+      releaseEnsure.resolve(undefined);
+      const results = await Promise.allSettled(starts);
+      await admissionsDrained;
+
+      assert.deepEqual(
+        results.map((result) => result.status),
+        ['rejected', 'rejected', 'rejected', 'rejected'],
+        'ordinary, managed, delegate, and attested starters must all reject after closure',
+      );
+      assert.equal(h.children.length, 0, 'no starter may spawn after admission closure');
+      assert.equal(h.registry.allTasks().length, 0, 'late preflight must not insert tasks');
+      assert.equal(managedCancels, 1, 'managed preflight cancellation must not leak its workflow');
+    } finally {
+      releaseEnsure.resolve(undefined);
+      managedCompletion.resolve(undefined);
+      h.registry.ensureRuntimeDir = originalEnsureRuntimeDir;
+      h.registry.setShuttingDown(true);
+      for (const { child } of h.children) child.close(null, 'SIGTERM');
+      await cleanup(h.root);
+    }
+  });
+
   void it('preserves full shell command bytes except surrounding whitespace', async () => {
     const h = await createHarness({ platform: 'linux' });
     try {
@@ -1742,6 +1921,103 @@ void describe('BackgroundTaskRegistry', () => {
       assert.equal(cancelledTask.status, 'killed');
       assert.equal(cancelledTask.managedCancelRequested, true);
     } finally {
+      await cleanup(h.root);
+    }
+  });
+
+  void it('abandons an oldest pending publication so the newest managed result remains retrievable by bg_result', async () => {
+    const gate = deferred<void>();
+    const h = await createHarness({ maxRecentTasks: 1 });
+    const runId = 'reason-dddddddddddddddddddddddddddddddd';
+    try {
+      const blocked = await h.registry.startTask(h.ctx, 'node blocked-publication.js', {
+        name: 'old pending publication',
+        notifyOnCompletion: false,
+        terminalPublicationGate: gate.promise,
+      });
+      lastSpawn(h).child.close(0, null);
+      await waitFor(() => blocked.status === 'completed', 'old pending completion');
+      assert.equal(blocked.terminalPublicationState, 'pending');
+
+      const { store, details } = await createCommittedFusionResult(h.cwd, runId);
+      const managed = await h.registry.startManagedTask(h.ctx, {
+        id: runId,
+        name: 'new retained fusion result',
+        command: 'fusion_reason',
+        isAgent: true,
+        completion: Promise.resolve(),
+        cancel: () => undefined,
+        notifyOnCompletion: true,
+        triggerOnCompletion: true,
+        fusion: {
+          runId,
+          workflow: 'reason',
+          artifactDir: store.artifactDir,
+          artifactDirAbs: store.artifactDirAbs,
+          state: 'completed',
+          outcome: { status: 'committed', resultDetails: details, usage: details.usage },
+          usageDelivered: false,
+        },
+      });
+      await waitFor(
+        () => managed.status === 'completed' && managed.terminalPublicationState === 'delivered',
+        'managed result completion',
+      );
+      await waitFor(() => h.notifications.length === 1, 'managed result notification');
+
+      const registeredTools = new Map<string, unknown>();
+      const pi: ExtensionAPI = Object.assign(Object.create(null), {
+        registerTool(definition: unknown) {
+          if (isJsonObject(definition) && typeof definition['name'] === 'string') {
+            registeredTools.set(definition['name'], definition);
+          }
+        },
+        on() {
+          return () => undefined;
+        },
+        getActiveTools() {
+          return [];
+        },
+        setActiveTools() {},
+      });
+      registerDelegateExtension(pi, {
+        startDelegateTask: async () => {
+          throw new Error('bg_delegate is not used by this retention regression');
+        },
+        snapshot: (task) => h.registry.snapshot(task),
+        resolveTask: (idOrPrefix) => h.registry.resolveTask(idOrPrefix),
+        claimFusionUsage: (task) => h.registry.claimFusionUsage(task),
+      });
+      const resultDefinition = requiredJsonObject(
+        registeredTools.get('bg_result'),
+        'bg_result must be registered',
+      );
+      const execute = resultDefinition['execute'];
+      if (typeof execute !== 'function') assert.fail('bg_result execute must be callable');
+      const result = requiredJsonObject(
+        await Reflect.apply(execute, resultDefinition, [
+          'retention-bg-result',
+          { taskId: runId, delivery: 'inline' },
+        ]),
+        'bg_result must return an object',
+      );
+      const content = result['content'];
+      assert.ok(Array.isArray(content));
+      const firstContent = requiredJsonObject(content[0], 'bg_result content item');
+
+      assert.deepEqual(h.registry.allTasks().map((task) => task.id), [runId]);
+      assert.equal(blocked.terminalPublicationState, 'abandoned');
+      assert.equal(blocked.terminalPublicationAbandonReason, 'retention_limit');
+      assert.equal(managed.notified, true);
+      assert.match(String(firstContent['text']), /retained fusion answer/);
+      const resultDetails = requiredJsonObject(result['details'], 'bg_result details');
+      assert.equal(resultDetails['task_id'], runId);
+      assert.equal(resultDetails['state'], 'committed');
+      assert.equal(resultDetails['delivery'], 'inline');
+    } finally {
+      gate.resolve(undefined);
+      h.registry.setShuttingDown(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
       await cleanup(h.root);
     }
   });

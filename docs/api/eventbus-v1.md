@@ -90,7 +90,7 @@ Closed by construction through the exported union:
 }
 ```
 
-Duplicate `request_id` values are rejected. The service rejects requests before `session_start` and while shutting down. The installed service exposes typed state `open | closed`. Calling `close()` is idempotent, transitions it permanently to `closed`, unsubscribes the request listener, and disposes registry publication, so later requests are not handled and receive no service response. Direct publication after close throws `BackgroundTaskExtensionServiceClosedError` with code `pi_background_tasks_eventbus_closed`; callers must not infer closure from message text.
+Duplicate `request_id` values are rejected. The service rejects requests before `session_start` and while shutting down. The installed service exposes typed state `open | closed`. Calling `close()` is idempotent, transitions it permanently to `closed`, unsubscribes the request listener, and disposes registry publication, so requests first emitted after close are not handled and receive no service response. A request already accepted before close may receive one error response, but never a post-close success. Direct publication after close throws `BackgroundTaskExtensionServiceClosedError` with code `pi_background_tasks_eventbus_closed`; callers must not infer closure from message text.
 
 ## Capabilities
 
@@ -130,11 +130,13 @@ The registry publishes terminal snapshots only after the output stream has finis
 
 If `EventBus.emit` throws, the registry retries after 100 ms for at most three total emit attempts. Persistent failure then becomes `abandoned` with bounded diagnostics. Because one listener may have received a frame before a later listener threw, delivery is **at least once under emission failure** and the same task can be observed up to the attempt bound. Consumers must deduplicate by `task.id`.
 
-Shutdown, service disposal, a rejected publication gate, or retry exhaustion can abandon the terminal frame without changing durable task metadata, waiter completion, or notification truth. Shutdown/service disposal clears pending retry timers and races any gate wait against one-way activation closure. After either gate resolution or rejection, lifecycle is checked again, so a late gate cannot emit or re-arm an old activation. Tasks made terminal by session shutdown intentionally do not publish onto the disposed activation's EventBus.
+Shutdown, service disposal, a rejected publication gate, retry exhaustion, or retention-limit eviction can abandon the terminal frame without changing durable task metadata, waiter completion, or notification truth. Shutdown/service disposal clears pending retry timers and races any gate wait against one-way activation closure. Retention eviction abandons and releases an oldest pending publication before deleting that old task, so a newer notified result remains retrievable and finished-task retention stays bounded. After either gate resolution or rejection, lifecycle is checked again, so a late gate cannot emit or re-arm an old activation. Tasks made terminal by session shutdown intentionally do not publish onto the disposed activation's EventBus.
+
+If a synchronous terminal listener calls `close()` while emission is on the stack, queued publication work is disposed but that emission settles only when the emitter returns or throws. A normal return is delivered without an abandonment diagnostic; a throw is abandoned once with truthful diagnostics. Closure never records both outcomes.
 
 ## Operations
 
-- `run` starts a background task through the registry and returns a `BgTaskSnapshot`.
+- `run` starts a background task through the registry and returns a `BgTaskSnapshot`. Task admission is one-way closed at shutdown; asynchronous preflight rechecks closure before insertion/spawn, and a request crossing closure cannot return success.
 - `status` returns `{ tasks }`; with `taskId`, the array has one resolved task or errors loudly.
 - `logs` returns bounded log details plus `text`; full bytes stay in `.pi/tasks/...output`.
 - `kill` stops a running task and returns `{ task, message }` after the stop path.

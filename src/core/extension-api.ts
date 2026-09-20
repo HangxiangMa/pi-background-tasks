@@ -436,6 +436,10 @@ class InstalledBackgroundTaskExtensionService implements BackgroundTaskExtension
     return this.serviceState;
   }
 
+  private isClosed(): boolean {
+    return this.serviceState === 'closed';
+  }
+
   publishTerminal(task: BgTaskSnapshot): void {
     if (this.serviceState === 'closed') throw new BackgroundTaskExtensionServiceClosedError();
     const terminal: BackgroundTaskExtensionTerminal = {
@@ -485,10 +489,16 @@ class InstalledBackgroundTaskExtensionService implements BackgroundTaskExtension
       if (ctx === undefined) {
         throw new Error('pi-background-tasks EventBus service is unavailable before session_start');
       }
-      this.emitResponse(
-        successResponse(request, await this.execute(ctx, request, terminalGate?.promise)),
-      );
+      const result = await this.execute(ctx, request, terminalGate?.promise);
+      if (this.isClosed()) return;
+      if (this.isShuttingDown() || this.registry.isShuttingDown()) {
+        throw new Error('pi-background-tasks EventBus service is shutting down');
+      }
+      this.emitResponse(successResponse(request, result));
     } catch (error) {
+      // A request accepted before close may report failure, but it must never
+      // report post-close success. Requests first emitted after close remain
+      // unhandled because the listener has already been removed.
       this.emitResponse(errorResponse(request.request_id, request.operation, error));
     } finally {
       await terminalGate?.releaseAfterResponse();

@@ -17,8 +17,12 @@ The runtime owns task identity, shell invocation, process lifecycle, bounded log
 - Terminal statuses are exactly `completed`, `failed`, and `killed`.
 - Runtime directory: `.pi/tasks/<session-id>-<pid>/` under the project cwd.
 - Per task: `<task-id>.output` and `<task-id>.json`; some agent modes may add wrapper or attestation files.
-- In-memory recent retention prunes oldest finished tasks over the limit while preserving running tasks.
+- In-memory recent retention prunes oldest finished tasks over the limit while preserving running tasks and newest-result recency. If the oldest finished task still owns pending publication, pruning first abandons and disposes that publication as `retention_limit`; pending gates cannot force eviction of a newer result or grow retained finished tasks without bound.
 - `resolveTask` accepts exact ids or unambiguous prefixes and fails loudly for empty, unknown, or ambiguous ids.
+
+## Task admission
+
+Every registry starter (ordinary, managed, delegate, and attested Pi) holds a counted admission lease. Session shutdown closes admissions one way before cleanup. Runtime-directory preflight races the closure signal, every later asynchronous preflight boundary rechecks admission, and insertion plus spawn have immediate checks with no yielding gap between them. Shutdown drains accepted admissions before taking its running-task snapshot. Therefore a preflight paused across closure cannot insert or spawn, while a child that spawned before closure was already inserted and is owned by shutdown cleanup. Interrupted managed preflight invokes its cancellation callback; interrupted file preflight closes streams and removes its partial task files.
 
 ## Starting managed tasks
 
@@ -60,13 +64,15 @@ During finalization, the runtime flushes wrapped-agent output, ends and waits fo
 
 Terminal EventBus publication has separate `pending`, `delivered`, and `abandoned` truth. The legacy internal `terminalPublished` latch means delivered only; abandonment never sets it. A genuine synchronous emitter failure is retried after 100 ms, up to three total emit attempts. Exhaustion abandons publication with bounded diagnostics. Since an earlier listener can receive before a later listener throws, retries are at-least-once and consumers deduplicate by task id.
 
-Publication gates race the activation's one-way closure signal. Gate resolution is followed by a lifecycle re-check; gate rejection abandons publication; shutdown or publisher disposal clears gate references and retry timers. A late gate cannot emit or re-arm an old registry. These outcomes do not rewrite durable task status, waiter completion, or notification receipt state.
+Publication gates race both activation closure and task-local abandonment. Gate resolution is followed by a lifecycle re-check; gate rejection abandons publication; shutdown, publisher disposal, or retention pruning clears gate references and retry timers. A late gate cannot emit or re-arm an old registry, and pruning an old gate releases its waiting continuation. These outcomes do not rewrite durable task status, waiter completion, or notification receipt state.
+
+Synchronous emission has its own in-flight settlement phase. Reentrant shutdown/service close clears queued work but does not log abandonment or prune that task while its emitter is on the stack. A normal emitter return settles delivered; a throw settles abandonment/retry policy once, with the thrown failure in the diagnostic. This prevents contradictory abandoned-then-delivered outcomes.
 
 ## Stopping tasks
 
 Only `running` tasks can be stopped. Managed tasks invoke their task-owned cancellation callback and wait for workflow settlement; process tasks use the platform paths below.
 
-Session shutdown closes terminal publication before managed-workflow cleanup starts, then applies the normal stop paths. Pending publication is abandoned, not reported as delivered. Registry publication closure is one-way: session replacement receives a fresh registry, while the old registry cannot be reopened by late lifecycle or gate continuations.
+Session shutdown atomically closes task admission and terminal publication before managed-workflow cleanup starts, drains admission leases, then applies the normal stop paths. Pending publication is abandoned, not reported as delivered. Registry admission/publication closure is one-way: session replacement receives a fresh registry, while the old registry cannot be reopened by late lifecycle, admission, or gate continuations.
 
 POSIX stop path:
 

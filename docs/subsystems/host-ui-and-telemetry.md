@@ -67,9 +67,9 @@ The host UI displays telemetry only from task snapshots: context, model, token t
 
 ## Shutdown
 
-On session shutdown, an early synchronous lifecycle barrier permanently closes the activation's registry publication path and EventBus service, clears pending publication retry/status timers, and suppresses completion notifications. This barrier is registered before managed-workflow shutdown handlers so Fusion settlement cannot publish from the old activation while cleanup is in progress. The later cleanup handler kills running tasks with reason `Killed during Pi session shutdown/reload` and reports cleanup failures through the UI when possible.
+On session shutdown, an early synchronous lifecycle barrier permanently closes the activation's task admissions, registry publication path, and EventBus service, clears pending publication retry/status timers, and suppresses completion notifications. This barrier is registered before managed-workflow shutdown handlers so Fusion settlement cannot publish from the old activation while cleanup is in progress. The later cleanup handler drains admission leases, kills every registry-owned running task with reason `Killed during Pi session shutdown/reload`, and reports cleanup failures through the UI when possible. Preflight that crosses closure cannot insert/spawn or return EventBus success.
 
-Shutdown terminal metadata and task waiters remain truthful even though old-activation EventBus publication is abandoned. Shutdown is idempotent, and a late `session_start` cannot revive the disposed instance; Pi session replacement binds a fresh extension registry/service. Kill-on-reload remains the default.
+Shutdown terminal metadata and task waiters remain truthful even though old-activation EventBus publication is abandoned. Shutdown is idempotent, including handle cleanup on repeated calls. `session_start` rechecks activation after runtime-directory setup and before status interval/update-check creation, so an overlapping late continuation cannot recreate old resources. Pi `AgentSession.reload()` replaces the extension runner, while `AgentSessionRuntime` new/switch/dispose flows bind or dispose distinct session runtimes; each replacement receives a fresh registry/service and stale runners remain invalid. Kill-on-reload remains the default.
 
 ## Related docs
 

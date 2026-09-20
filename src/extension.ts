@@ -232,10 +232,13 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   });
 
   const beginSessionShutdown = (): void => {
-    if (disposed) return;
-    disposed = true;
-    registry.setShuttingDown(true);
-    eventService.close();
+    if (!disposed) {
+      disposed = true;
+      registry.setShuttingDown(true);
+      eventService.close();
+    }
+    // Teardown remains active on repeated calls so even a handle assigned by a
+    // racing continuation is still disposed rather than hidden by idempotence.
     currentCtx = undefined;
     if (statusInterval !== undefined) {
       clearInterval(statusInterval);
@@ -470,7 +473,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   );
 
   async function scheduleUpdateCheck(ctx: ExtensionContext): Promise<void> {
-    if (updateCheckStarted) return;
+    if (disposed || updateCheckStarted) return;
     updateCheckStarted = true;
     const env = process.env;
     if (env['PI_BG_DISABLE_UPDATE_CHECK'] === '1') return;
@@ -485,6 +488,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     const registryUrl = env['PI_BG_REGISTRY_URL'];
     if (registryUrl) options.registryUrl = registryUrl;
     const latest = await fetchLatestVersion(options);
+    if (disposed) return;
     if (latest && isNewerVersion(latest, PACKAGE_VERSION)) {
       latestKnownVersion = latest;
       updateUi(ctx);
@@ -498,13 +502,21 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     registry.setShuttingDown(false);
     currentCtx = ctx;
     await registry.ensureRuntimeDir(ctx);
+    if (disposed) return;
     updateUi(ctx);
-    if (statusInterval) clearInterval(statusInterval);
-    statusInterval = setInterval(() => {
+    if (disposed) return;
+    if (statusInterval !== undefined) clearInterval(statusInterval);
+    if (disposed) return;
+    const nextStatusInterval = setInterval(() => {
       updateUi();
     }, STATUS_INTERVAL_MS);
+    if (disposed) {
+      clearInterval(nextStatusInterval);
+      return;
+    }
+    statusInterval = nextStatusInterval;
     // One-shot, non-blocking: never awaited on the session-start path or the status tick.
-    void scheduleUpdateCheck(ctx);
+    if (!disposed) void scheduleUpdateCheck(ctx);
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {
@@ -512,6 +524,10 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     if (shutdownCleanupStarted) return;
     shutdownCleanupStarted = true;
     try {
+      // Admission closure races asynchronous preflight, so this drain cannot be
+      // held open by a late ensureRuntimeDir continuation. Any admitted child is
+      // already inserted synchronously before spawn and is visible below.
+      await registry.waitForTaskAdmissions();
       const running = registry.allTasks().filter((task) => task.status === 'running');
       if (running.length === 0) return;
 

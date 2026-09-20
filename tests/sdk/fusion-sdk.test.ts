@@ -375,7 +375,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   assert.equal(session.model?.provider, 'pi-bg-fusion');
   assert.equal(session.model?.id, 'current-model');
   session.setThinkingLevel('low');
-  await session.extensionRunner.emit({ type: 'session_start', reason: 'startup' });
+  await session.bindExtensions({ onError: () => undefined });
   return { session, cwd, root, agentDir, fakeLogPath: fake.logPath, eventBus };
 }
 
@@ -1070,6 +1070,77 @@ void describe('fusion SDK integration', { concurrency: false }, () => {
     } finally {
       unsubscribeTerminal();
       if (!disposed) await disposeHarness(h);
+    }
+  });
+
+  void it('uses AgentSession.reload() to cancel managed Fusion and bind a fresh ordinary publisher', async (t) => {
+    if (skipWin32FusionChildPathFixture(t)) return;
+    const h = await harness({ fakeDelayMs: 10000 });
+    const terminalTaskIds: string[] = [];
+    const unsubscribeTerminal = h.eventBus.on(BG_TERMINAL_CHANNEL, (value) => {
+      if (!isRecord(value) || value['schema_version'] !== BG_TERMINAL_SCHEMA) return;
+      const task = value['task'];
+      if (isRecord(task) && typeof task['id'] === 'string') terminalTaskIds.push(task['id']);
+    });
+    try {
+      const oldRunner = h.session.extensionRunner;
+      const oldContext = oldRunner.createContext();
+      const fusionTool = h.session.getToolDefinition('fusion_reason');
+      assert.ok(fusionTool, 'fusion_reason tool should be registered');
+      const launch = await fusionTool.execute(
+        'call-real-reload',
+        { prompt: 'cancel this managed run through a real AgentSession reload' },
+        undefined,
+        undefined,
+        oldContext,
+      );
+      assert.ok(isFusionLaunchDetails(launch.details));
+      const task = launch.details['task'];
+      assert.ok(isRecord(task));
+      const managedTaskId = stringField(task, 'id');
+      await waitForInvocationCount(h.fakeLogPath, 3);
+
+      await h.session.reload();
+      assert.notEqual(h.session.extensionRunner, oldRunner, 'reload must replace the extension runner');
+      assert.throws(() => oldContext.cwd, /stale after session replacement or reload/u);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+      assert.equal(
+        terminalTaskIds.filter((taskId) => taskId === managedTaskId).length,
+        0,
+        'the reload-cancelled managed task must not publish from the old activation',
+      );
+
+      const bgRun = h.session.getToolDefinition('bg_run');
+      assert.ok(bgRun, 'fresh reload activation must register bg_run');
+      const ordinary = await bgRun.execute(
+        'call-after-real-reload',
+        {
+          name: 'fresh ordinary after managed reload',
+          command: 'echo fresh-after-managed-reload',
+          isAgent: false,
+          notifyOnCompletion: false,
+          triggerOnCompletion: false,
+        },
+        undefined,
+        undefined,
+        h.session.extensionRunner.createContext(),
+      );
+      assert.ok(isRecord(ordinary.details));
+      const ordinaryTask = ordinary.details['task'];
+      assert.ok(isRecord(ordinaryTask));
+      const ordinaryTaskId = stringField(ordinaryTask, 'id');
+      const deadline = Date.now() + 3000;
+      while (!terminalTaskIds.includes(ordinaryTaskId) && Date.now() < deadline) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+      }
+      assert.equal(
+        terminalTaskIds.filter((taskId) => taskId === ordinaryTaskId).length,
+        1,
+        'the freshly bound activation must publish one ordinary terminal',
+      );
+    } finally {
+      unsubscribeTerminal();
+      await disposeHarness(h);
     }
   });
 

@@ -1,7 +1,7 @@
 import { spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createWriteStream, existsSync } from 'node:fs';
-import { mkdir, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -85,7 +85,21 @@ export type TerminalPublicationClosureReason = Extract<
 type TerminalPublicationGateOutcome =
   | { readonly kind: 'released' }
   | { readonly kind: 'rejected'; readonly error: unknown }
-  | { readonly kind: 'closed'; readonly reason: TerminalPublicationClosureReason };
+  | { readonly kind: 'closed'; readonly reason: TerminalPublicationAbandonReason };
+
+interface TerminalPublicationAbandonSignal {
+  readonly promise: Promise<TerminalPublicationAbandonReason>;
+  readonly resolve: (reason: TerminalPublicationAbandonReason) => void;
+}
+
+export class BackgroundTaskAdmissionClosedError extends Error {
+  readonly code = 'pi_background_tasks_admission_closed';
+
+  constructor(kind: string) {
+    super(`Cannot start ${kind} after background task admissions have closed`);
+    this.name = 'BackgroundTaskAdmissionClosedError';
+  }
+}
 export const WIN32_CMD_PI_TELEMETRY_UNAVAILABLE_REASON =
   'win32-cmd-cannot-safely-intercept-pi-argv';
 
@@ -734,6 +748,11 @@ export class BackgroundTaskRegistry {
   private readonly tasks = new Map<string, BgTask>();
   private runtimeDir: RuntimeDir | undefined;
   private shuttingDown = false;
+  private taskAdmissionsClosed = false;
+  private activeTaskAdmissions = 0;
+  private readonly taskAdmissionDrainWaiters = new Set<() => void>();
+  private readonly taskAdmissionsClosedSignal: Promise<void>;
+  private resolveTaskAdmissionsClosedSignal: () => void = () => {};
   private terminalPublicationClosed = false;
   private terminalPublicationCloseReason: TerminalPublicationClosureReason | undefined;
   private readonly terminalPublicationClosedSignal: Promise<TerminalPublicationClosureReason>;
@@ -756,8 +775,15 @@ export class BackgroundTaskRegistry {
   private readonly sendCompletionNotification: CompletionNotificationSender;
   private readonly publishTerminalSnapshot: (task: BgTaskSnapshot) => void;
   private readonly windowsKillStates = new WeakMap<BgTask, WindowsKillState>();
+  private readonly terminalPublicationAbandonSignals = new WeakMap<
+    BgTask,
+    TerminalPublicationAbandonSignal
+  >();
 
   constructor(options: BackgroundTaskRegistryOptions) {
+    this.taskAdmissionsClosedSignal = new Promise((resolve) => {
+      this.resolveTaskAdmissionsClosedSignal = resolve;
+    });
     this.terminalPublicationClosedSignal = new Promise((resolve) => {
       this.resolveTerminalPublicationClosedSignal = resolve;
     });
@@ -789,16 +815,63 @@ export class BackgroundTaskRegistry {
     return this.shuttingDown;
   }
 
+  private beginTaskAdmission(kind: string): () => void {
+    this.assertTaskAdmissionOpen(kind);
+    this.activeTaskAdmissions += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.activeTaskAdmissions -= 1;
+      if (this.activeTaskAdmissions !== 0) return;
+      for (const resolve of this.taskAdmissionDrainWaiters) resolve();
+      this.taskAdmissionDrainWaiters.clear();
+    };
+  }
+
+  private assertTaskAdmissionOpen(kind: string): void {
+    if (this.shuttingDown || this.taskAdmissionsClosed) {
+      throw new BackgroundTaskAdmissionClosedError(kind);
+    }
+  }
+
+  private async awaitTaskAdmissionBoundary<T>(promise: Promise<T>, kind: string): Promise<T> {
+    const operation = promise.then(
+      (value) => ({ kind: 'value' as const, value }),
+      (error: unknown) => ({ kind: 'error' as const, error }),
+    );
+    const closed = this.taskAdmissionsClosedSignal.then(() => ({ kind: 'closed' as const }));
+    const outcome = await Promise.race([operation, closed]);
+    if (outcome.kind === 'closed') throw new BackgroundTaskAdmissionClosedError(kind);
+    if (outcome.kind === 'error') throw outcome.error;
+    return outcome.value;
+  }
+
+  closeTaskAdmissions(): void {
+    if (this.taskAdmissionsClosed) return;
+    this.taskAdmissionsClosed = true;
+    this.resolveTaskAdmissionsClosedSignal();
+  }
+
+  waitForTaskAdmissions(): Promise<void> {
+    if (this.activeTaskAdmissions === 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.taskAdmissionDrainWaiters.add(resolve);
+    });
+  }
+
   setShuttingDown(value: boolean): void {
     if (value) {
       this.shuttingDown = true;
+      this.closeTaskAdmissions();
       this.closeTerminalPublication('registry_shutdown');
       return;
     }
-    // Publication closure belongs to one extension activation and is one-way.
-    // Pi session replacement creates a fresh registry; an old registry must not
-    // be reopened by a late session_start or retained gate continuation.
-    if (!this.terminalPublicationClosed) this.shuttingDown = false;
+    // Publication and admission closure belong to one extension activation and
+    // are one-way. Pi session replacement creates a fresh registry; an old
+    // registry must not be reopened by a late lifecycle continuation.
+    if (!this.terminalPublicationClosed && !this.taskAdmissionsClosed)
+      this.shuttingDown = false;
   }
 
   closeTerminalPublication(reason: TerminalPublicationClosureReason): void {
@@ -809,12 +882,25 @@ export class BackgroundTaskRegistry {
     }
     const effectiveReason = this.terminalPublicationCloseReason ?? reason;
     for (const task of this.tasks.values()) {
+      if (
+        task.terminalPublicationState === 'pending' &&
+        task.terminalEmitInFlight === true
+      ) {
+        // A synchronous listener can close the service while emit() is still on
+        // the stack. Dispose queued work now, but let the emitter's return/throw
+        // settle the in-flight attempt exactly once.
+        if (task.terminalPublishRetryHandle !== undefined) {
+          clearTimeout(task.terminalPublishRetryHandle);
+          task.terminalPublishRetryHandle = undefined;
+        }
+        task.terminalPublicationGate = undefined;
+        continue;
+      }
       const shouldLog =
         task.terminalPublicationState === 'pending' &&
         task.status !== 'running' &&
         (task.terminalPublishAttempts > 0 ||
           task.terminalPublishRetryHandle !== undefined ||
-          task.terminalPublishInFlight === true ||
           task.terminalPublicationGate !== undefined);
       this.abandonTerminalPublication(task, effectiveReason, undefined, shouldLog);
     }
@@ -840,15 +926,62 @@ export class BackgroundTaskRegistry {
     return this.runtimeDir;
   }
 
+  private async discardUnspawnedTask(task: BgTask, paths: readonly string[]): Promise<void> {
+    this.tasks.delete(task.id);
+    task.finalized = true;
+    task.status = 'failed';
+    if (task.timeoutHandle !== undefined) clearTimeout(task.timeoutHandle);
+    if (task.killEscalationTimer !== undefined) clearTimeout(task.killEscalationTimer);
+    if (task.stream !== undefined && !task.stream.destroyed) task.stream.destroy();
+    await Promise.all(
+      paths.map(async (path) => {
+        try {
+          await rm(path, { force: true });
+        } catch (error) {
+          this.logger.error(
+            `[background-tasks] failed to remove interrupted admission artifact ${path}:`,
+            error,
+          );
+        }
+      }),
+    );
+  }
+
+  private stopOwnedTaskAfterAdmissionClosure(task: BgTask, error: Error): void {
+    if (task.status !== 'running') return;
+    task.killKind = 'shutdown';
+    task.error = error.message;
+    try {
+      this.requestKill(task, 'SIGTERM');
+    } catch (killError) {
+      this.logger.error(
+        `[background-tasks] failed to stop ${task.id} after admission closure:`,
+        killError,
+      );
+    }
+  }
+
   async startTask(
     ctx: BackgroundTaskContext,
     command: string,
     options: StartTaskOptions = {},
   ): Promise<BgTask> {
+    const releaseAdmission = this.beginTaskAdmission('a background task');
+    try {
+      return await this.startTaskAdmitted(ctx, command, options);
+    } finally {
+      releaseAdmission();
+    }
+  }
+
+  private async startTaskAdmitted(
+    ctx: BackgroundTaskContext,
+    command: string,
+    options: StartTaskOptions,
+  ): Promise<BgTask> {
     const normalizedCommand = command.trim();
     if (!normalizedCommand) throw new Error('Background command is empty');
-    if (this.shuttingDown)
-      throw new Error('Cannot start a background task while Pi is shutting down');
+    this.assertTaskAdmissionOpen('a background task');
 
     const isAgent = options.isAgent ?? false;
     const baseInvocation = shellInvocation(normalizedCommand, this.platform, this.env);
@@ -858,11 +991,38 @@ export class BackgroundTaskRegistry {
         ? resolvePiLaunch({ platform: this.platform })
         : undefined;
 
-    const dir = await this.ensureRuntimeDir(ctx);
+    const dir = await this.awaitTaskAdmissionBoundary(
+      this.ensureRuntimeDir(ctx),
+      'a background task',
+    );
+    this.assertTaskAdmissionOpen('a background task');
     const id = this.makeTaskIdFn();
     const outputAbsPath = join(dir.abs, `${id}.output`);
     const metadataAbsPath = join(dir.abs, `${id}.json`);
     const outputPath = join(dir.display, `${id}.output`);
+    let commandToSpawn = normalizedCommand;
+    let wrapperAbsPath: string | undefined;
+    try {
+      if (piTelemetryRequested && baseInvocation.dialect === 'posix') {
+        if (piTelemetryLaunch === undefined)
+          throw new Error('Pi telemetry launch spec was not resolved');
+        wrapperAbsPath = join(dir.abs, `${id}.pi-telemetry-wrapper.cjs`);
+        await writeFile(
+          wrapperAbsPath,
+          createPiTelemetryWrapperSource(buildModelWindowIndex(ctx), piTelemetryLaunch),
+          'utf8',
+        );
+        this.assertTaskAdmissionOpen('a background task');
+        commandToSpawn = `pi() { ${shellQuote(process.execPath)} ${shellQuote(wrapperAbsPath)} "$@"; }\n${normalizedCommand}`;
+      }
+    } catch (error) {
+      if (wrapperAbsPath !== undefined) await rm(wrapperAbsPath, { force: true });
+      throw error;
+    }
+    const invocation =
+      commandToSpawn === normalizedCommand
+        ? baseInvocation
+        : shellInvocation(commandToSpawn, this.platform, this.env);
     const timeoutSeconds =
       typeof options.timeoutSeconds === 'number' &&
       Number.isFinite(options.timeoutSeconds) &&
@@ -902,6 +1062,10 @@ export class BackgroundTaskRegistry {
       terminalPublicationGate: options.terminalPublicationGate,
       waiters: [],
     };
+    if (commandToSpawn !== normalizedCommand) task.telemetryWrapped = true;
+    if (piTelemetryRequested && baseInvocation.dialect !== 'posix')
+      task.telemetryUnavailableReason = WIN32_CMD_PI_TELEMETRY_UNAVAILABLE_REASON;
+    this.assertTaskAdmissionOpen('a background task');
     this.tasks.set(id, task);
 
     const stream = createWriteStream(outputAbsPath, { flags: 'a', encoding: 'utf8' });
@@ -925,27 +1089,7 @@ export class BackgroundTaskRegistry {
     });
 
     try {
-      let commandToSpawn = normalizedCommand;
-      if (piTelemetryRequested) {
-        if (baseInvocation.dialect === 'posix') {
-          if (piTelemetryLaunch === undefined)
-            throw new Error('Pi telemetry launch spec was not resolved');
-          const wrapperAbsPath = join(dir.abs, `${id}.pi-telemetry-wrapper.cjs`);
-          await writeFile(
-            wrapperAbsPath,
-            createPiTelemetryWrapperSource(buildModelWindowIndex(ctx), piTelemetryLaunch),
-            'utf8',
-          );
-          commandToSpawn = `pi() { ${shellQuote(process.execPath)} ${shellQuote(wrapperAbsPath)} "$@"; }\n${normalizedCommand}`;
-          task.telemetryWrapped = true;
-        } else {
-          task.telemetryUnavailableReason = WIN32_CMD_PI_TELEMETRY_UNAVAILABLE_REASON;
-        }
-      }
-      const invocation =
-        commandToSpawn === normalizedCommand
-          ? baseInvocation
-          : shellInvocation(commandToSpawn, this.platform, this.env);
+      this.assertTaskAdmissionOpen('a background task');
       const child = this.spawn(invocation.shell, invocation.args, {
         cwd: ctx.cwd,
         detached: this.platform !== 'win32',
@@ -1011,10 +1155,26 @@ export class BackgroundTaskRegistry {
         }, timeoutSeconds * 1000);
       }
 
-      await this.writeMetadata(task);
+      await this.awaitTaskAdmissionBoundary(
+        this.writeMetadata(task),
+        'a background task',
+      );
+      this.assertTaskAdmissionOpen('a background task');
       this.onChange();
       return task;
     } catch (error) {
+      if (error instanceof BackgroundTaskAdmissionClosedError) {
+        if (task.child === undefined) {
+          await this.discardUnspawnedTask(task, [
+            outputAbsPath,
+            metadataAbsPath,
+            ...(wrapperAbsPath === undefined ? [] : [wrapperAbsPath]),
+          ]);
+        } else {
+          this.stopOwnedTaskAfterAdmissionClosure(task, error);
+        }
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
       this.writeNotice(task, `\n[background task spawn exception: ${message}]\n`);
       await this.finalizeTask(task, 'failed', null, undefined, message);
@@ -1032,14 +1192,49 @@ export class BackgroundTaskRegistry {
     ctx: BackgroundTaskContext,
     request: StartManagedTaskOptions,
   ): Promise<BgTask> {
-    if (this.shuttingDown)
-      throw new Error('Cannot start a managed background task while Pi is shutting down');
+    let releaseAdmission: (() => void) | undefined;
+    try {
+      releaseAdmission = this.beginTaskAdmission('a managed background task');
+      return await this.startManagedTaskAdmitted(ctx, request);
+    } catch (error) {
+      if (error instanceof BackgroundTaskAdmissionClosedError) {
+        const task =
+          releaseAdmission === undefined ? undefined : this.tasks.get(request.id);
+        if (task === undefined) {
+          try {
+            request.cancel();
+          } catch (cancelError) {
+            this.logger.error(
+              `[background-tasks] managed preflight cancellation failed for ${request.id}:`,
+              cancelError,
+            );
+          }
+          void request.completion.catch(() => undefined);
+        } else {
+          this.stopOwnedTaskAfterAdmissionClosure(task, error);
+        }
+      }
+      throw error;
+    } finally {
+      releaseAdmission?.();
+    }
+  }
+
+  private async startManagedTaskAdmitted(
+    ctx: BackgroundTaskContext,
+    request: StartManagedTaskOptions,
+  ): Promise<BgTask> {
+    this.assertTaskAdmissionOpen('a managed background task');
     if (!/^[a-zA-Z0-9_.-]+$/u.test(request.id))
       throw new Error(`Managed background task id is invalid: ${request.id}`);
     if (this.tasks.has(request.id))
       throw new Error(`Background task id already exists: ${request.id}`);
 
-    const dir = await this.ensureRuntimeDir(ctx);
+    const dir = await this.awaitTaskAdmissionBoundary(
+      this.ensureRuntimeDir(ctx),
+      'a managed background task',
+    );
+    this.assertTaskAdmissionOpen('a managed background task');
     const outputAbsPath = join(dir.abs, `${request.id}.output`);
     const metadataAbsPath = join(dir.abs, `${request.id}.json`);
     const outputPath = join(dir.display, `${request.id}.output`);
@@ -1070,6 +1265,7 @@ export class BackgroundTaskRegistry {
       terminalPublicationGate: request.terminalPublicationGate,
       waiters: [],
     };
+    this.assertTaskAdmissionOpen('a managed background task');
     this.tasks.set(task.id, task);
     const stream = createWriteStream(outputAbsPath, { flags: 'a', encoding: 'utf8' });
     task.stream = stream;
@@ -1085,10 +1281,43 @@ export class BackgroundTaskRegistry {
       }
     });
 
+    let completionAttached = false;
+    const attachCompletion = (): void => {
+      if (completionAttached) return;
+      completionAttached = true;
+      void request.completion
+        .then(
+          () => {
+            const killed = task.killKind === 'user' || task.killKind === 'shutdown';
+            return this.finalizeTask(task, killed ? 'killed' : 'completed', killed ? null : 0);
+          },
+          (error: unknown) => {
+            const message = BackgroundTaskRegistry.errorMessage(error);
+            const killed = task.killKind === 'user' || task.killKind === 'shutdown';
+            return this.finalizeTask(task, killed ? 'killed' : 'failed', null, undefined, message);
+          },
+        )
+        .catch((error: unknown) => {
+          this.logger.error(
+            `[background-tasks] managed task finalization failed for ${task.id}:`,
+            error,
+          );
+        });
+    };
+
     try {
-      await this.writeMetadata(task);
+      await this.awaitTaskAdmissionBoundary(
+        this.writeMetadata(task),
+        'a managed background task',
+      );
+      attachCompletion();
+      this.assertTaskAdmissionOpen('a managed background task');
       this.onChange();
     } catch (error) {
+      if (error instanceof BackgroundTaskAdmissionClosedError) {
+        attachCompletion();
+        throw error;
+      }
       this.tasks.delete(task.id);
       if (!stream.destroyed) stream.destroy();
       try {
@@ -1099,26 +1328,12 @@ export class BackgroundTaskRegistry {
           cancelError,
         );
       }
+      void request.completion.catch(() => undefined);
       throw new Error(
         `Failed to register managed background task: ${BackgroundTaskRegistry.errorMessage(error)}`,
       );
     }
 
-    void request.completion
-      .then(
-        () => this.finalizeTask(task, 'completed', 0),
-        (error: unknown) => {
-          const message = BackgroundTaskRegistry.errorMessage(error);
-          const killed = task.killKind === 'user' || task.killKind === 'shutdown';
-          return this.finalizeTask(task, killed ? 'killed' : 'failed', null, undefined, message);
-        },
-      )
-      .catch((error: unknown) => {
-        this.logger.error(
-          `[background-tasks] managed task finalization failed for ${task.id}:`,
-          error,
-        );
-      });
     return task;
   }
 
@@ -1159,13 +1374,27 @@ export class BackgroundTaskRegistry {
     ctx: BackgroundTaskContext,
     request: StartDelegateTaskOptions,
   ): Promise<BgTask> {
-    if (this.shuttingDown)
-      throw new Error('Cannot start a delegate task while Pi is shutting down');
+    const releaseAdmission = this.beginTaskAdmission('a delegate task');
+    try {
+      return await this.startDelegateTaskAdmitted(ctx, request);
+    } finally {
+      releaseAdmission();
+    }
+  }
 
+  private async startDelegateTaskAdmitted(
+    ctx: BackgroundTaskContext,
+    request: StartDelegateTaskOptions,
+  ): Promise<BgTask> {
+    this.assertTaskAdmissionOpen('a delegate task');
     const launch = resolvePiLaunch({ platform: this.platform });
     assertWindowsCommandLineWithinLimit(launch, request.argv, this.platform, 'bg-delegate');
 
-    const dir = await this.ensureRuntimeDir(ctx);
+    const dir = await this.awaitTaskAdmissionBoundary(
+      this.ensureRuntimeDir(ctx),
+      'a delegate task',
+    );
+    this.assertTaskAdmissionOpen('a delegate task');
     const id = request.facts.taskId;
     const outputAbsPath = join(dir.abs, `${id}.output`);
     const metadataAbsPath = join(dir.abs, `${id}.json`);
@@ -1196,6 +1425,7 @@ export class BackgroundTaskRegistry {
       terminalPublishAttempts: 0,
       waiters: [],
     };
+    this.assertTaskAdmissionOpen('a delegate task');
     this.tasks.set(id, task);
 
     const stream = createWriteStream(outputAbsPath, { flags: 'a', encoding: 'utf8' });
@@ -1205,6 +1435,7 @@ export class BackgroundTaskRegistry {
     });
 
     try {
+      this.assertTaskAdmissionOpen('a delegate task');
       const child = this.spawn(launch.executable, piLaunchArgv(launch, [...request.argv]), {
         cwd: ctx.cwd,
         detached: this.platform !== 'win32',
@@ -1278,10 +1509,19 @@ export class BackgroundTaskRegistry {
         }, request.timeoutSeconds * 1000);
       }
 
-      await this.writeMetadata(task);
+      await this.awaitTaskAdmissionBoundary(this.writeMetadata(task), 'a delegate task');
+      this.assertTaskAdmissionOpen('a delegate task');
       this.onChange();
       return task;
     } catch (error) {
+      if (error instanceof BackgroundTaskAdmissionClosedError) {
+        if (task.child === undefined) {
+          await this.discardUnspawnedTask(task, [outputAbsPath, metadataAbsPath]);
+        } else {
+          this.stopOwnedTaskAfterAdmissionClosure(task, error);
+        }
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
       this.writeNotice(task, `\n[delegate spawn exception: ${message}]\n`);
       await this.finalizeTask(task, 'failed', null, undefined, message);
@@ -1293,9 +1533,19 @@ export class BackgroundTaskRegistry {
     ctx: BackgroundTaskContext,
     request: StartAttestedPiTaskOptions,
   ): Promise<BgTask> {
-    if (this.shuttingDown)
-      throw new Error('Cannot start an attested Pi task while Pi is shutting down');
+    const releaseAdmission = this.beginTaskAdmission('an attested Pi task');
+    try {
+      return await this.startAttestedPiTaskAdmitted(ctx, request);
+    } finally {
+      releaseAdmission();
+    }
+  }
 
+  private async startAttestedPiTaskAdmitted(
+    ctx: BackgroundTaskContext,
+    request: StartAttestedPiTaskOptions,
+  ): Promise<BgTask> {
+    this.assertTaskAdmissionOpen('an attested Pi task');
     const attributionExtensionPath =
       request.provider === 'anthropic' ? resolveAnthropicAttributionExtensionPath() : undefined;
     const argv = buildAttestedPiArgv(request, attributionExtensionPath);
@@ -1307,17 +1557,25 @@ export class BackgroundTaskRegistry {
       'attested-pi-run',
     );
 
-    const dir = await this.ensureRuntimeDir(ctx);
+    const dir = await this.awaitTaskAdmissionBoundary(
+      this.ensureRuntimeDir(ctx),
+      'an attested Pi task',
+    );
+    this.assertTaskAdmissionOpen('an attested Pi task');
     const id = makeAttestedTaskId();
     if (!ATTESTED_TASK_ID_PATTERN.test(id))
       throw new Error('Generated attested task id is invalid');
     const paths = makeAttestedTaskPaths(dir.abs, dir.display, id);
     const promptBytes = Buffer.from(request.prompt, 'utf8');
     const reportAbsPath = await resolveReportPath(ctx.cwd, request.reportPath);
+    this.assertTaskAdmissionOpen('an attested Pi task');
     const auth = observePiOAuth(ctx, request.provider, request.model);
     const repoRootRealpath = await gitRepoRoot(ctx.cwd);
+    this.assertTaskAdmissionOpen('an attested Pi task');
     const cwdRealpath = await realpath(ctx.cwd);
+    this.assertTaskAdmissionOpen('an attested Pi task');
     const startAuthority = await gitAuthoritySnapshot(ctx.cwd);
+    this.assertTaskAdmissionOpen('an attested Pi task');
     if (!startAuthority.clean)
       throw new Error('Attested Pi task requires a clean worktree at start');
     const timeoutSeconds =
@@ -1361,118 +1619,153 @@ export class BackgroundTaskRegistry {
       terminalPublishAttempts: 0,
       waiters: [],
     };
-    this.tasks.set(id, task);
-
-    await writeFileFsynced(paths.outputAbsPath, '');
-    await writeFileFsynced(paths.eventsAbsPath, '');
-    await writeFileFsynced(paths.stderrAbsPath, '');
-    await writeFileFsynced(
+    const admissionArtifacts = [
+      paths.outputAbsPath,
+      paths.eventsAbsPath,
+      paths.stderrAbsPath,
       paths.wrapperAbsPath,
-      'direct-spawn attested Pi task; no shell telemetry wrapper is used\n',
-    );
-    await this.writeMetadata(task);
-
-    const captured = spawnAndCapturePi(
-      this.spawn,
-      argv,
-      {
-        cwd: ctx.cwd,
-        detached: this.platform !== 'win32',
-        shell: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: attestedPiChildEnv(this.env),
-        windowsHide: true,
-      },
-      this.platform,
-      attestedPiLaunch,
-    );
-    task.child = captured.child;
-    task.pid = captured.child.pid;
-    await this.writeMetadata(task);
-    this.onChange();
-
-    captured.child.on('error', (error) => {
-      void this.finalizeAttestedPiTask(
-        task,
-        paths,
-        argv,
-        cwdRealpath,
-        repoRootRealpath,
-        startAuthority,
-        auth,
-        promptBytes,
-        reportAbsPath,
-        captured.stdoutChunks,
-        captured.stderrChunks,
-        'failed',
-        null,
-        null,
-        error.message,
+      paths.metadataAbsPath,
+      paths.attestationAbsPath,
+    ];
+    try {
+      await writeFileFsynced(paths.outputAbsPath, '');
+      this.assertTaskAdmissionOpen('an attested Pi task');
+      await writeFileFsynced(paths.eventsAbsPath, '');
+      this.assertTaskAdmissionOpen('an attested Pi task');
+      await writeFileFsynced(paths.stderrAbsPath, '');
+      this.assertTaskAdmissionOpen('an attested Pi task');
+      await writeFileFsynced(
+        paths.wrapperAbsPath,
+        'direct-spawn attested Pi task; no shell telemetry wrapper is used\n',
       );
-    });
-
-    captured.child.on('close', (code, signalName) => {
-      let status: TaskStatus = (code ?? 0) === 0 && signalName === null ? 'completed' : 'failed';
-      let error: string | undefined;
-      if (task.killKind === 'timeout') {
-        status = 'failed';
-        error = task.error ?? `Timed out after ${String(timeoutSeconds)}s`;
-      } else if (task.killKind === 'user' || task.killKind === 'shutdown') {
-        status = 'killed';
-        error = task.error;
-      } else if (status === 'failed') {
-        const exitCode = code === null ? 'null' : String(code);
-        error = `Exited with code ${exitCode}${signalName ? ` (${signalName})` : ''}`;
-      }
-      void this.finalizeAttestedPiTask(
-        task,
-        paths,
-        argv,
-        cwdRealpath,
-        repoRootRealpath,
-        startAuthority,
-        auth,
-        promptBytes,
-        reportAbsPath,
-        captured.stdoutChunks,
-        captured.stderrChunks,
-        status,
-        code,
-        signalName,
-        error,
-      );
-    });
-
-    if (timeoutSeconds !== undefined) {
-      task.timeoutHandle = setTimeout(() => {
-        if (task.status !== 'running') return;
-        task.killKind = 'timeout';
-        task.error = `Timed out after ${String(timeoutSeconds)}s`;
-        try {
-          this.requestKill(task, 'SIGTERM');
-        } catch (error) {
-          void this.finalizeAttestedPiTask(
-            task,
-            paths,
-            argv,
-            cwdRealpath,
-            repoRootRealpath,
-            startAuthority,
-            auth,
-            promptBytes,
-            reportAbsPath,
-            captured.stdoutChunks,
-            captured.stderrChunks,
-            'failed',
-            null,
-            null,
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-      }, timeoutSeconds * 1000);
+      this.assertTaskAdmissionOpen('an attested Pi task');
+      await this.writeMetadata(task);
+      this.assertTaskAdmissionOpen('an attested Pi task');
+    } catch (error) {
+      await this.discardUnspawnedTask(task, admissionArtifacts);
+      throw error;
     }
 
-    return task;
+    this.assertTaskAdmissionOpen('an attested Pi task');
+    this.tasks.set(id, task);
+    try {
+      this.assertTaskAdmissionOpen('an attested Pi task');
+      const captured = spawnAndCapturePi(
+        this.spawn,
+        argv,
+        {
+          cwd: ctx.cwd,
+          detached: this.platform !== 'win32',
+          shell: false,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: attestedPiChildEnv(this.env),
+          windowsHide: true,
+        },
+        this.platform,
+        attestedPiLaunch,
+      );
+      task.child = captured.child;
+      task.pid = captured.child.pid;
+
+      captured.child.on('error', (error) => {
+        void this.finalizeAttestedPiTask(
+          task,
+          paths,
+          argv,
+          cwdRealpath,
+          repoRootRealpath,
+          startAuthority,
+          auth,
+          promptBytes,
+          reportAbsPath,
+          captured.stdoutChunks,
+          captured.stderrChunks,
+          'failed',
+          null,
+          null,
+          error.message,
+        );
+      });
+
+      captured.child.on('close', (code, signalName) => {
+        let status: TaskStatus =
+          (code ?? 0) === 0 && signalName === null ? 'completed' : 'failed';
+        let error: string | undefined;
+        if (task.killKind === 'timeout') {
+          status = 'failed';
+          error = task.error ?? `Timed out after ${String(timeoutSeconds)}s`;
+        } else if (task.killKind === 'user' || task.killKind === 'shutdown') {
+          status = 'killed';
+          error = task.error;
+        } else if (status === 'failed') {
+          const exitCode = code === null ? 'null' : String(code);
+          error = `Exited with code ${exitCode}${signalName ? ` (${signalName})` : ''}`;
+        }
+        void this.finalizeAttestedPiTask(
+          task,
+          paths,
+          argv,
+          cwdRealpath,
+          repoRootRealpath,
+          startAuthority,
+          auth,
+          promptBytes,
+          reportAbsPath,
+          captured.stdoutChunks,
+          captured.stderrChunks,
+          status,
+          code,
+          signalName,
+          error,
+        );
+      });
+
+      await this.awaitTaskAdmissionBoundary(
+        this.writeMetadata(task),
+        'an attested Pi task',
+      );
+      this.assertTaskAdmissionOpen('an attested Pi task');
+      this.onChange();
+
+      if (timeoutSeconds !== undefined) {
+        task.timeoutHandle = setTimeout(() => {
+          if (task.status !== 'running') return;
+          task.killKind = 'timeout';
+          task.error = `Timed out after ${String(timeoutSeconds)}s`;
+          try {
+            this.requestKill(task, 'SIGTERM');
+          } catch (error) {
+            void this.finalizeAttestedPiTask(
+              task,
+              paths,
+              argv,
+              cwdRealpath,
+              repoRootRealpath,
+              startAuthority,
+              auth,
+              promptBytes,
+              reportAbsPath,
+              captured.stdoutChunks,
+              captured.stderrChunks,
+              'failed',
+              null,
+              null,
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        }, timeoutSeconds * 1000);
+      }
+
+      return task;
+    } catch (error) {
+      if (task.child === undefined) {
+        await this.discardUnspawnedTask(task, admissionArtifacts);
+      } else {
+        const taskError = error instanceof Error ? error : new Error(String(error));
+        this.stopOwnedTaskAfterAdmissionClosure(task, taskError);
+      }
+      throw error;
+    }
   }
 
   private async finalizeAttestedPiTask(
@@ -2303,6 +2596,18 @@ export class BackgroundTaskRegistry {
     return state.forceFailure;
   }
 
+  private terminalPublicationAbandonSignal(task: BgTask): TerminalPublicationAbandonSignal {
+    const existing = this.terminalPublicationAbandonSignals.get(task);
+    if (existing !== undefined) return existing;
+    let resolveSignal: (reason: TerminalPublicationAbandonReason) => void = () => {};
+    const promise = new Promise<TerminalPublicationAbandonReason>((resolve) => {
+      resolveSignal = resolve;
+    });
+    const signal = { promise, resolve: resolveSignal };
+    this.terminalPublicationAbandonSignals.set(task, signal);
+    return signal;
+  }
+
   private publishTerminal(task: BgTask): void {
     if (task.terminalPublicationState !== 'pending' || task.terminalPublishInFlight) return;
     if (this.terminalPublicationClosed) {
@@ -2352,11 +2657,14 @@ export class BackgroundTaskRegistry {
         reason: this.terminalPublicationCloseReason ?? 'registry_shutdown',
       };
     }
-    if (
-      task.terminalPublicationState === 'abandoned' &&
-      task.terminalPublicationAbandonReason === 'gate_rejected'
-    ) {
-      return { kind: 'rejected', error: new Error('terminal publication gate rejected') };
+    if (task.terminalPublicationState === 'abandoned') {
+      if (task.terminalPublicationAbandonReason === 'gate_rejected') {
+        return { kind: 'rejected', error: new Error('terminal publication gate rejected') };
+      }
+      return {
+        kind: 'closed',
+        reason: task.terminalPublicationAbandonReason ?? 'registry_shutdown',
+      };
     }
     const gate = task.terminalPublicationGate;
     if (gate === undefined) return { kind: 'released' };
@@ -2367,7 +2675,12 @@ export class BackgroundTaskRegistry {
     );
     const closureOutcome: Promise<TerminalPublicationGateOutcome> =
       this.terminalPublicationClosedSignal.then((reason) => ({ kind: 'closed', reason }));
-    const outcome = await Promise.race([gateOutcome, closureOutcome]);
+    const abandonmentOutcome: Promise<TerminalPublicationGateOutcome> =
+      this.terminalPublicationAbandonSignal(task).promise.then((reason) => ({
+        kind: 'closed',
+        reason,
+      }));
+    const outcome = await Promise.race([gateOutcome, closureOutcome, abandonmentOutcome]);
 
     // Closure wins if it happened before this continuation resumed, regardless
     // of which promise queued its reaction first.
@@ -2381,24 +2694,39 @@ export class BackgroundTaskRegistry {
   }
 
   private tryPublishTerminalNow(task: BgTask): void {
-    try {
-      if (task.terminalPublicationState !== 'pending') return;
-      if (this.terminalPublicationClosed) {
-        this.abandonTerminalPublication(
-          task,
-          this.terminalPublicationCloseReason ?? 'registry_shutdown',
-        );
-        return;
-      }
-      task.terminalPublishAttempts += 1;
-      this.publishTerminalSnapshot(snapshot(task));
-      this.markTerminalPublicationDelivered(task);
-      this.pruneOldTasks();
-    } catch (error) {
-      this.handleTerminalPublishFailure(task, error);
-    } finally {
+    if (task.terminalPublicationState !== 'pending') {
       task.terminalPublishInFlight = false;
+      return;
     }
+    if (this.terminalPublicationClosed) {
+      task.terminalPublishInFlight = false;
+      this.abandonTerminalPublication(
+        task,
+        this.terminalPublicationCloseReason ?? 'registry_shutdown',
+      );
+      this.pruneOldTasks();
+      return;
+    }
+
+    task.terminalPublishAttempts += 1;
+    task.terminalEmitInFlight = true;
+    let emitFailed = false;
+    let emitError: unknown;
+    try {
+      this.publishTerminalSnapshot(snapshot(task));
+    } catch (error) {
+      emitFailed = true;
+      emitError = error;
+    }
+    task.terminalEmitInFlight = false;
+    task.terminalPublishInFlight = false;
+
+    if (emitFailed) {
+      this.handleTerminalPublishFailure(task, emitError);
+    } else {
+      this.markTerminalPublicationDelivered(task);
+    }
+    this.pruneOldTasks();
   }
 
   private markTerminalPublicationDelivered(task: BgTask): void {
@@ -2407,6 +2735,8 @@ export class BackgroundTaskRegistry {
       task.terminalPublishRetryHandle = undefined;
     }
     task.terminalPublicationGate = undefined;
+    task.terminalEmitInFlight = false;
+    task.terminalPublishInFlight = false;
     task.terminalPublicationState = 'delivered';
     delete task.terminalPublicationAbandonReason;
     task.terminalPublished = true;
@@ -2423,13 +2753,14 @@ export class BackgroundTaskRegistry {
       task.terminalPublishRetryHandle = undefined;
     }
     task.terminalPublicationGate = undefined;
-    task.terminalPublishInFlight = false;
+    if (task.terminalEmitInFlight !== true) task.terminalPublishInFlight = false;
     if (task.terminalPublicationState === 'delivered') return;
     if (task.terminalPublicationState === 'abandoned') return;
 
     task.terminalPublicationState = 'abandoned';
     task.terminalPublicationAbandonReason = reason;
     task.terminalPublished = false;
+    this.terminalPublicationAbandonSignal(task).resolve(reason);
     if (log) {
       const detail = error === undefined ? '' : `: ${this.terminalPublicationError(error)}`;
       this.logger.error(
@@ -2627,13 +2958,15 @@ export class BackgroundTaskRegistry {
   private pruneOldTasks(): void {
     if (this.tasks.size <= this.maxRecentTasks) return;
     const removable = [...this.tasks.values()]
-      .filter(
-        (task) => task.status !== 'running' && task.terminalPublicationState !== 'pending',
-      )
+      .filter((task) => task.status !== 'running' && task.terminalEmitInFlight !== true)
       .sort((a, b) => (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime));
     while (this.tasks.size > this.maxRecentTasks && removable.length > 0) {
       const task = removable.shift();
-      if (task) this.tasks.delete(task.id);
+      if (task === undefined) continue;
+      if (task.terminalPublicationState === 'pending') {
+        this.abandonTerminalPublication(task, 'retention_limit');
+      }
+      this.tasks.delete(task.id);
     }
   }
 }

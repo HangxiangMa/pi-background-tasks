@@ -51,7 +51,7 @@ If either completion flag was intentionally disabled, manual inspection is allow
 
 ## Failures and suppression
 
-Completion notification receipt and terminal EventBus publication are independent facts. EventBus publication can be pending, delivered, or abandoned without changing durable task status or `notified`. If the EventBus service alone is disposed, an otherwise enabled notification may still be sent; during Pi session shutdown/reload, notifications are suppressed while running tasks are killed and old-activation EventBus publication is abandoned.
+Completion notification receipt and terminal EventBus publication are independent facts. EventBus publication can be pending, delivered, or abandoned without changing durable task status or `notified`. At the retention boundary, an oldest pending publication is abandoned and disposed before that old task is pruned; it cannot evict a newer notified Fusion result before `bg_result` retrieval. If the EventBus service alone is disposed, an otherwise enabled notification may still be sent; during Pi session shutdown/reload, notifications are suppressed while running tasks are killed and old-activation EventBus publication is abandoned.
 
 If notification send fails, the task resets `notified:false` and logs the error; it does not silently pretend delivery happened. Likewise, EventBus abandonment is never recorded as successful publication.
 

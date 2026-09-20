@@ -18,7 +18,8 @@ export type TerminalPublicationAbandonReason =
   | 'registry_shutdown'
   | 'publisher_closed'
   | 'gate_rejected'
-  | 'retry_exhausted';
+  | 'retry_exhausted'
+  | 'retention_limit';
 
 export type JsonObject = Readonly<Record<PropertyKey, unknown>>;
 
@@ -150,6 +151,8 @@ export interface BgTask extends Omit<BgTaskSnapshot, 'name'> {
   terminalPublicationAbandonReason?: TerminalPublicationAbandonReason | undefined;
   terminalPublishAttempts: number;
   terminalPublishInFlight?: boolean | undefined;
+  /** True only while the synchronous terminal emitter itself is on the stack. */
+  terminalEmitInFlight?: boolean | undefined;
   terminalPublishRetryHandle?: NodeJS.Timeout | undefined;
   /** Optional protocol barrier used by EventBus run requests so early child exits cannot publish before the run response is observable. */
   terminalPublicationGate?: Promise<void> | undefined;
