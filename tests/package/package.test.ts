@@ -1391,6 +1391,412 @@ void describe('package', () => {
     );
   });
 
+  void it('file URL guard follows WHATWG preprocessing for static inputs', () => {
+    const fileCases = [
+      "const host = 'server';",
+      "const leadingControls = new URL('\\u0000\\u001f file:///C:/work/file.ts', 'https://example.com/base').pathname;",
+      "const normalizedTabs = new URL('fi\\tle:///D:/work/file.ts', 'https://example.com/base').pathname;",
+      "const normalizedCarriageReturn = new URL('fi\\rle:///E:/work/file.ts', 'https://example.com/base').pathname;",
+      "const normalizedTemplate = new URL(`\\r\\nfi\\tle://${host}/share/file.ts`, 'https://example.com/base').pathname;",
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('whatwg-file-preprocessing.ts', fileCases).map(
+        (violation) => violation.line,
+      ),
+      [2, 3, 4, 5],
+    );
+
+    const httpsCases = [
+      "const host = 'example.com';",
+      "const leadingControls = new URL('\\u0000 \\t\\r\\nhttps://example.com/request/path', import.meta.url).pathname;",
+      "const normalizedNewline = new URL('ht\\ntps://example.com/request/path', import.meta.url).pathname;",
+      "const normalizedTab = new URL('ht\\ttps://example.com/request/path', import.meta.url).pathname;",
+      "const normalizedCarriageReturn = new URL('ht\\rtps://example.com/request/path', import.meta.url).pathname;",
+      'const normalizedTemplate = new URL(`\\r\\nht\\ntps://${host}/v1`, import.meta.url).pathname;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('whatwg-https-preprocessing.ts', httpsCases),
+      [],
+    );
+
+    const dynamicCases = [
+      'declare const condition: boolean;',
+      'declare const dynamicScheme: string;',
+      "const maybeFile = condition ? 'file:///C:/work/file.ts' : `${dynamicScheme}://example.com/path`;",
+      "new URL(maybeFile, 'https://example.com/base').pathname;",
+      'new URL(`${dynamicScheme}://example.com/path`, import.meta.url).pathname;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('whatwg-dynamic-boundary.ts', dynamicCases).map(
+        (violation) => violation.line,
+      ),
+      [4],
+    );
+
+    const runtimeHost = 'server';
+    assert.equal(
+      new URL('\u0000\u001f file:///C:/work/file.ts', 'https://example.com/base').protocol,
+      'file:',
+    );
+    assert.equal(
+      new URL('fi\tle:///D:/work/file.ts', 'https://example.com/base').protocol,
+      'file:',
+    );
+    assert.equal(
+      new URL('fi\rle:///E:/work/file.ts', 'https://example.com/base').protocol,
+      'file:',
+    );
+    assert.equal(
+      new URL(`\r\nfi\tle://${runtimeHost}/share/file.ts`, 'https://example.com/base').protocol,
+      'file:',
+    );
+    assert.equal(
+      new URL('\u0000 \t\r\nhttps://example.com/request/path', import.meta.url).protocol,
+      'https:',
+    );
+    assert.equal(new URL('ht\ntps://example.com/request/path', import.meta.url).protocol, 'https:');
+    assert.equal(new URL('ht\ttps://example.com/request/path', import.meta.url).protocol, 'https:');
+    assert.equal(new URL('ht\rtps://example.com/request/path', import.meta.url).protocol, 'https:');
+    assert.equal(
+      new URL(`\r\nht\ntps://${runtimeHost}/v1`, import.meta.url).protocol,
+      'https:',
+    );
+  });
+
+  void it('file URL guard preserves explicit abrupt completion states', () => {
+    const positiveCases: ReadonlyArray<{
+      readonly name: string;
+      readonly source: string;
+      readonly lines: readonly number[];
+    }> = [
+      {
+        name: 'nested ordinary switch break',
+        source: [
+          'declare const mode: string;',
+          "let target = 'https://example.com/request/path';",
+          'switch (mode) {',
+          "  case 'native': {",
+          "    target = 'file:///C:/work/file.ts';",
+          '    break;',
+          '  }',
+          '  default:',
+          "    target = 'https://example.com/other';",
+          '}',
+          'new URL(target).pathname;',
+        ].join('\n'),
+        lines: [11],
+      },
+      {
+        name: 'labeled break',
+        source: [
+          'declare const condition: boolean;',
+          "let target = 'file:///C:/work/file.ts';",
+          'exit: {',
+          '  if (condition) break exit;',
+          "  target = 'https://example.com/request/path';",
+          '}',
+          'new URL(target).pathname;',
+        ].join('\n'),
+        lines: [7],
+      },
+      {
+        name: 'ordinary continue',
+        source: [
+          'declare const condition: boolean;',
+          "let target = 'https://example.com/request/path';",
+          'do {',
+          '  if (condition) {',
+          "    target = 'file:///C:/work/file.ts';",
+          '    continue;',
+          '  }',
+          "  target = 'https://example.com/other';",
+          '} while (false);',
+          'new URL(target).pathname;',
+        ].join('\n'),
+        lines: [10],
+      },
+      {
+        name: 'labeled continue',
+        source: [
+          'declare const condition: boolean;',
+          "let target = 'https://example.com/request/path';",
+          'outer: do {',
+          '  if (condition) {',
+          "    target = 'file:///C:/work/file.ts';",
+          '    continue outer;',
+          '  }',
+          "  target = 'https://example.com/other';",
+          '} while (false);',
+          'new URL(target).pathname;',
+        ].join('\n'),
+        lines: [10],
+      },
+      {
+        name: 'normal completion runs finally',
+        source: [
+          'function inspect(): void {',
+          "  let target = 'https://example.com/request/path';",
+          "  try { target = 'file:///C:/work/file.ts'; }",
+          '  finally { new URL(target).pathname; }',
+          '}',
+        ].join('\n'),
+        lines: [4],
+      },
+      {
+        name: 'break runs finally',
+        source: [
+          'function inspect(): void {',
+          "  let target = 'https://example.com/request/path';",
+          '  while (true) {',
+          "    try { target = 'file:///C:/work/file.ts'; break; }",
+          '    finally { new URL(target).pathname; }',
+          '  }',
+          '}',
+        ].join('\n'),
+        lines: [5],
+      },
+      {
+        name: 'continue runs finally',
+        source: [
+          'function inspect(): void {',
+          "  let target = 'https://example.com/request/path';",
+          '  do {',
+          "    try { target = 'file:///C:/work/file.ts'; continue; }",
+          '    finally { new URL(target).pathname; }',
+          '  } while (false);',
+          '}',
+        ].join('\n'),
+        lines: [5],
+      },
+      {
+        name: 'return into finally with live provenance',
+        source: [
+          'function inspect(): void {',
+          "  let target = 'https://example.com/request/path';",
+          '  try {',
+          "    target = 'file:///C:/work/file.ts';",
+          '    return;',
+          '  } finally {',
+          '    new URL(target).pathname;',
+          '  }',
+          '}',
+        ].join('\n'),
+        lines: [7],
+      },
+      {
+        name: 'direct return finally syntax',
+        source: [
+          'function inspect(): void {',
+          '  try { return; } finally {',
+          "    new URL('file:///C:/work/file.ts').pathname;",
+          '  }',
+          '}',
+        ].join('\n'),
+        lines: [3],
+      },
+      {
+        name: 'throw state enters catch',
+        source: [
+          'function inspect(): void {',
+          "  let target = 'https://example.com/request/path';",
+          '  try {',
+          "    target = 'file:///C:/work/file.ts';",
+          "    throw new Error('caught');",
+          '  } catch {',
+          '    new URL(target).pathname;',
+          '  }',
+          '}',
+        ].join('\n'),
+        lines: [7],
+      },
+      {
+        name: 'throw into finally',
+        source: [
+          'function inspect(): void {',
+          "  let target = 'https://example.com/request/path';",
+          '  try {',
+          "    target = 'file:///C:/work/file.ts';",
+          "    throw new Error('uncaught');",
+          '  } finally {',
+          '    new URL(target).pathname;',
+          '  }',
+          '}',
+        ].join('\n'),
+        lines: [7],
+      },
+    ];
+    for (const fixture of positiveCases) {
+      assert.deepEqual(
+        findFileUrlPathnameViolations(`${fixture.name}.ts`, fixture.source).map(
+          (violation) => violation.line,
+        ),
+        fixture.lines,
+        fixture.name,
+      );
+    }
+
+    const httpControls = [
+      {
+        name: 'nested break HTTP',
+        source: [
+          'declare const mode: string;',
+          "let target = 'https://example.com/request/path';",
+          'switch (mode) {',
+          "  case 'keep': { break; }",
+          "  default: target = 'https://example.com/other';",
+          '}',
+          'new URL(target).pathname;',
+        ].join('\n'),
+      },
+      {
+        name: 'labeled break HTTP',
+        source: [
+          'declare const condition: boolean;',
+          "let target = 'https://example.com/request/path';",
+          'exit: {',
+          '  if (condition) break exit;',
+          "  target = 'https://example.com/other';",
+          '}',
+          'new URL(target).pathname;',
+        ].join('\n'),
+      },
+      {
+        name: 'continue HTTP',
+        source: [
+          'declare const condition: boolean;',
+          "let target = 'https://example.com/request/path';",
+          'do {',
+          '  if (condition) {',
+          "    target = 'https://example.com/continued';",
+          '    continue;',
+          '  }',
+          "  target = 'https://example.com/other';",
+          '} while (false);',
+          'new URL(target).pathname;',
+        ].join('\n'),
+      },
+      {
+        name: 'normal finally HTTP',
+        source: [
+          'function inspect(): void {',
+          "  let target = 'file:///C:/work/file.ts';",
+          "  try { target = 'https://example.com/request/path'; }",
+          '  finally { new URL(target).pathname; }',
+          '}',
+        ].join('\n'),
+      },
+      {
+        name: 'return finally HTTP',
+        source: [
+          'function inspect(): void {',
+          "  let target = 'file:///C:/work/file.ts';",
+          "  try { target = 'https://example.com/request/path'; return; }",
+          '  finally { new URL(target).pathname; }',
+          '}',
+        ].join('\n'),
+      },
+      {
+        name: 'caught throw HTTP',
+        source: [
+          'function inspect(): void {',
+          "  let target = 'file:///C:/work/file.ts';",
+          '  try {',
+          "    target = 'https://example.com/request/path';",
+          "    throw new Error('caught');",
+          '  } catch { new URL(target).pathname; }',
+          '}',
+        ].join('\n'),
+      },
+      {
+        name: 'throw finally HTTP',
+        source: [
+          'function inspect(): void {',
+          "  let target = 'file:///C:/work/file.ts';",
+          '  try {',
+          "    target = 'https://example.com/request/path';",
+          "    throw new Error('uncaught');",
+          '  } finally { new URL(target).pathname; }',
+          '}',
+        ].join('\n'),
+      },
+    ];
+    for (const fixture of httpControls) {
+      assert.deepEqual(
+        findFileUrlPathnameViolations(`${fixture.name}.ts`, fixture.source),
+        [],
+        fixture.name,
+      );
+    }
+  });
+
+  void it('file URL guard prunes statically impossible short-circuit writes', () => {
+    const controls = [
+      "let target = 'https://example.com/request/path';",
+      "false && (target = 'file:///C:/skipped-and.ts');",
+      "true || (target = 'file:///C:/skipped-or.ts');",
+      "const present = 'present';",
+      "present ?? (target = 'file:///C:/skipped-nullish.ts');",
+      'new URL(target).pathname;',
+    ].join('\n');
+    assert.deepEqual(findFileUrlPathnameViolations('short-circuit-controls.ts', controls), []);
+
+    const hazards = [
+      "let andTarget = 'https://example.com/request/path';",
+      "true && (andTarget = 'file:///C:/evaluated-and.ts');",
+      'new URL(andTarget).pathname;',
+      "let orTarget = 'https://example.com/request/path';",
+      "false || (orTarget = 'file:///C:/evaluated-or.ts');",
+      'new URL(orTarget).pathname;',
+      "let nullishTarget = 'https://example.com/request/path';",
+      'const missing = null;',
+      "missing ?? (nullishTarget = 'file:///C:/evaluated-nullish.ts');",
+      'new URL(nullishTarget).pathname;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('short-circuit-hazards.ts', hazards).map(
+        (violation) => violation.line,
+      ),
+      [3, 6, 10],
+    );
+  });
+
+  void it('file URL guard checks for-of destructuring and resolves globalThis lexically', () => {
+    const hazards = [
+      "let pathname = '';",
+      "for ({ pathname } of [new URL('file:///C:/work/file.ts')]) break;",
+      "for (const { pathname: declaredPath } of [new URL('file://server/share/file.ts')]) { void declaredPath; }",
+      "const globalPath = new globalThis.URL('file:///D:/work/file.ts').pathname;",
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('for-of-and-global-url.ts', hazards).map(
+        (violation) => violation.line,
+      ),
+      [2, 3, 4],
+    );
+
+    const controls = [
+      "let pathname = '';",
+      "for ({ pathname } of [new URL('https://example.com/request/path')]) break;",
+      "for (const { pathname: requestPath } of [new URL('https://example.com/other')]) { void requestPath; }",
+      'function localUrl(URL: new (value: string) => { pathname: string }): string {',
+      "  for ({ pathname } of [new URL('file:///C:/not-a-real-url')]) break;",
+      '  return pathname;',
+      '}',
+      "class FakeURL { readonly pathname = 'not-a-native-path'; constructor(_value: string) {} }",
+      'function parameterShadow(globalThis: { URL: typeof FakeURL }): string {',
+      "  return new globalThis.URL('file:///C:/not-a-real-url').pathname;",
+      '}',
+      'function localShadow(): string {',
+      '  const globalThis = { URL: FakeURL };',
+      "  return new globalThis.URL('file:///C:/still-not-a-real-url').pathname;",
+      '}',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('for-of-and-global-url-controls.ts', controls),
+      [],
+    );
+  });
+
   void it('file URL guard uses feasible values at each pathname read', () => {
     const readBeforeWrite = [
       "let target = 'file:///C:/work/file.ts';",

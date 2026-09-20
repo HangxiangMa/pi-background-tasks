@@ -1,3 +1,4 @@
+import { URL as WhatwgURL } from 'node:url';
 import ts from 'typescript';
 
 export type TypeSafetyRule =
@@ -236,6 +237,7 @@ const VALUE_URL_UNKNOWN = 1 << 8;
 const VALUE_IMPORT_META = 1 << 9;
 const VALUE_URL_CONSTRUCTOR = 1 << 10;
 const VALUE_PATH_TO_FILE_URL = 1 << 11;
+const VALUE_NULLISH = 1 << 12;
 
 type AbstractValue = number;
 type FlowState = Map<ts.Symbol, AbstractValue>;
@@ -246,10 +248,15 @@ interface FileUrlAnalysis {
   readonly violations: Map<number, FileUrlPathnameViolation>;
 }
 
-interface FlowResult {
-  readonly continues: boolean;
+type CompletionKind = 'normal' | 'break' | 'continue' | 'return' | 'throw';
+
+interface FlowCompletion {
+  readonly kind: CompletionKind;
+  readonly label: string | undefined;
   readonly state: FlowState;
 }
+
+type FlowResult = readonly FlowCompletion[];
 
 function isImportMeta(expression: ts.Expression): boolean {
   const current = unwrapForProvenance(expression);
@@ -260,25 +267,46 @@ function isImportMeta(expression: ts.Expression): boolean {
   );
 }
 
+function parsedProtocol(text: string): string | undefined {
+  try {
+    return new WhatwgURL(text).protocol.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+function isParseableRelativeUrl(text: string): boolean {
+  try {
+    void new WhatwgURL(text, 'https://pi-source-guard.invalid/base');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function valueForProtocol(protocol: string): AbstractValue {
+  return protocol === 'file:' ? VALUE_STRING_FILE : VALUE_STRING_NON_FILE_ABSOLUTE;
+}
+
 function staticStringValue(text: string): AbstractValue {
-  const protocol = /^([A-Za-z][A-Za-z\d+.-]*):/u.exec(text)?.[1]?.toLowerCase();
+  const protocol = parsedProtocol(text);
   let value =
-    protocol === 'file'
-      ? VALUE_STRING_FILE
-      : protocol === undefined
+    protocol !== undefined
+      ? valueForProtocol(protocol)
+      : isParseableRelativeUrl(text)
         ? VALUE_STRING_RELATIVE
-        : VALUE_STRING_NON_FILE_ABSOLUTE;
+        : VALUE_UNKNOWN;
   if (text === 'pathname') value |= VALUE_STATIC_PATHNAME;
   if (text === 'url') value |= VALUE_STATIC_URL;
   return value;
 }
 
 function templateValue(expression: ts.TemplateExpression): AbstractValue {
-  const prefix = expression.head.text;
-  const protocol = /^([A-Za-z][A-Za-z\d+.-]*):/u.exec(prefix)?.[1]?.toLowerCase();
-  if (protocol === 'file') return VALUE_STRING_FILE;
-  if (protocol !== undefined) return VALUE_STRING_NON_FILE_ABSOLUTE;
-  return prefix.length === 0 ? VALUE_UNKNOWN : VALUE_STRING_RELATIVE;
+  // An arbitrary interpolation can introduce a scheme. Classify a template as
+  // absolute only when its static head already makes WHATWG parsing absolute;
+  // otherwise retain unknown provenance rather than inventing a relative URL.
+  const protocol = parsedProtocol(`${expression.head.text}pi-template.invalid`);
+  return protocol === undefined ? VALUE_UNKNOWN : valueForProtocol(protocol);
 }
 
 function isImportedBinding(
@@ -307,6 +335,13 @@ function isNodeUrlNamespace(expression: ts.Expression, checker: ts.TypeChecker):
         ts.isNamespaceImport(declaration) && isNodeUrlModule(moduleSpecifierFor(declaration)),
     ) === true
   );
+}
+
+function isUnshadowedGlobalThis(expression: ts.Expression, checker: ts.TypeChecker): boolean {
+  const current = unwrapForProvenance(expression);
+  if (!ts.isIdentifier(current) || current.text !== 'globalThis') return false;
+  const symbol = checker.getSymbolAtLocation(current);
+  return symbol === undefined || (symbol.declarations?.length ?? 0) === 0;
 }
 
 function cloneState(state: FlowState): FlowState {
@@ -419,13 +454,14 @@ function expressionValue(
     return staticStringValue(current.text);
   }
   if (ts.isTemplateExpression(current)) return templateValue(current);
+  if (current.kind === ts.SyntaxKind.NullKeyword) return VALUE_NULLISH;
   if (isImportMeta(current)) return VALUE_IMPORT_META;
   if (ts.isIdentifier(current)) return identifierValue(current, state, analysis);
   if (ts.isPropertyAccessExpression(current)) {
     if (
       current.name.text === 'URL' &&
       (isNodeUrlNamespace(current.expression, analysis.checker) ||
-        (ts.isIdentifier(current.expression) && current.expression.text === 'globalThis'))
+        isUnshadowedGlobalThis(current.expression, analysis.checker))
     ) {
       return VALUE_URL_CONSTRUCTOR;
     }
@@ -450,10 +486,12 @@ function expressionValue(
     ) {
       return VALUE_STRING_FILE | VALUE_STATIC_URL;
     }
-    if (isNodeUrlNamespace(current.expression, analysis.checker)) {
-      if (keyValueHas(current.argumentExpression, VALUE_STATIC_URL, state, analysis)) {
-        return VALUE_URL_CONSTRUCTOR;
-      }
+    if (
+      (isNodeUrlNamespace(current.expression, analysis.checker) ||
+        isUnshadowedGlobalThis(current.expression, analysis.checker)) &&
+      keyValueHas(current.argumentExpression, VALUE_STATIC_URL, state, analysis)
+    ) {
+      return VALUE_URL_CONSTRUCTOR;
     }
     return VALUE_UNKNOWN;
   }
@@ -480,11 +518,28 @@ function expressionValue(
     if (current.operatorToken.kind === ts.SyntaxKind.CommaToken) {
       return expressionValue(current.right, state, analysis);
     }
-    if (
-      current.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
-      current.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
-      current.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
-    ) {
+    if (current.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+      const condition = staticBoolean(current.left);
+      if (condition === false) return expressionValue(current.left, state, analysis);
+      if (condition === true) return expressionValue(current.right, state, analysis);
+      return (
+        expressionValue(current.left, state, analysis) |
+        expressionValue(current.right, state, analysis)
+      );
+    }
+    if (current.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
+      const condition = staticBoolean(current.left);
+      if (condition === true) return expressionValue(current.left, state, analysis);
+      if (condition === false) return expressionValue(current.right, state, analysis);
+      return (
+        expressionValue(current.left, state, analysis) |
+        expressionValue(current.right, state, analysis)
+      );
+    }
+    if (current.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken) {
+      const nullish = staticNullish(current.left, state, analysis);
+      if (nullish === true) return expressionValue(current.right, state, analysis);
+      if (nullish === false) return expressionValue(current.left, state, analysis);
       return (
         expressionValue(current.left, state, analysis) |
         expressionValue(current.right, state, analysis)
@@ -509,6 +564,18 @@ function staticBoolean(expression: ts.Expression): boolean | undefined {
     return nested === undefined ? undefined : !nested;
   }
   return undefined;
+}
+
+function staticNullish(
+  expression: ts.Expression,
+  state: FlowState,
+  analysis: FileUrlAnalysis,
+): boolean | undefined {
+  const value = expressionValue(expression, state, analysis);
+  if ((value & VALUE_NULLISH) !== 0) {
+    return value === VALUE_NULLISH ? true : undefined;
+  }
+  return (value & VALUE_UNKNOWN) !== 0 ? undefined : false;
 }
 
 function addViolation(node: ts.Node, analysis: FileUrlAnalysis): void {
@@ -595,6 +662,23 @@ function invalidateAssignmentTarget(
   }
 }
 
+function checkObjectAssignmentPattern(
+  left: ts.ObjectLiteralExpression,
+  value: AbstractValue,
+  state: FlowState,
+  analysis: FileUrlAnalysis,
+): void {
+  if ((value & VALUE_URL_FILE) === 0) return;
+  for (const property of left.properties) {
+    if (
+      (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) &&
+      propertyMayBePathname(property.name, state, analysis)
+    ) {
+      addViolation(property, analysis);
+    }
+  }
+}
+
 function scanObjectAssignment(
   left: ts.ObjectLiteralExpression,
   right: ts.Expression,
@@ -610,17 +694,7 @@ function scanObjectAssignment(
     }
   }
   scanExpression(right, state, analysis);
-  const value = expressionValue(right, state, analysis);
-  if ((value & VALUE_URL_FILE) !== 0) {
-    for (const property of left.properties) {
-      if (
-        (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) &&
-        propertyMayBePathname(property.name, state, analysis)
-      ) {
-        addViolation(property, analysis);
-      }
-    }
-  }
+  checkObjectAssignmentPattern(left, expressionValue(right, state, analysis), state, analysis);
   invalidateAssignmentTarget(left, state, analysis);
 }
 
@@ -725,10 +799,23 @@ function scanExpression(
       expression.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
     ) {
       scanExpression(expression.left, state, analysis);
-      const skipped = cloneState(state);
-      const evaluated = cloneState(state);
-      scanExpression(expression.right, evaluated, analysis);
-      overwriteState(state, mergeStates([skipped, evaluated]));
+      const evaluateRight =
+        expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+          ? staticBoolean(expression.left)
+          : expression.operatorToken.kind === ts.SyntaxKind.BarBarToken
+            ? (() => {
+                const truthy = staticBoolean(expression.left);
+                return truthy === undefined ? undefined : !truthy;
+              })()
+            : staticNullish(expression.left, state, analysis);
+      if (evaluateRight === true) {
+        scanExpression(expression.right, state, analysis);
+      } else if (evaluateRight === undefined) {
+        const skipped = cloneState(state);
+        const evaluated = cloneState(state);
+        scanExpression(expression.right, evaluated, analysis);
+        overwriteState(state, mergeStates([skipped, evaluated]));
+      }
       return;
     }
     scanExpression(expression.left, state, analysis);
@@ -851,47 +938,202 @@ function scanVariableDeclarationList(
   }
 }
 
-function continuingFlow(results: readonly FlowResult[]): FlowResult {
-  const continuing = results.filter((result) => result.continues);
-  return continuing.length === 0
-    ? { continues: false, state: mergeStates(results.map((result) => result.state)) }
-    : { continues: true, state: mergeStates(continuing.map((result) => result.state)) };
+function completion(kind: CompletionKind, state: FlowState, label?: string): FlowCompletion {
+  return { kind, label, state };
 }
 
-// The value lattice is finite; cap loop reprocessing as an additional guard against
-// malformed/control-flow-heavy fixtures making a package policy check unbounded.
+function normalCompletion(state: FlowState): FlowResult {
+  return [completion('normal', state)];
+}
+
+function mergeFlow(completions: readonly FlowCompletion[]): FlowResult {
+  const merged = new Map<string, FlowCompletion>();
+  for (const current of completions) {
+    const key = `${current.kind}\u0000${current.label ?? ''}`;
+    const previous = merged.get(key);
+    merged.set(
+      key,
+      previous === undefined
+        ? current
+        : completion(current.kind, mergeStates([previous.state, current.state]), current.label),
+    );
+  }
+  return [...merged.values()];
+}
+
+function iterableElementValue(
+  expression: ts.Expression,
+  state: FlowState,
+  analysis: FileUrlAnalysis,
+): AbstractValue {
+  const current = unwrapForProvenance(expression);
+  if (!ts.isArrayLiteralExpression(current)) return VALUE_UNKNOWN;
+  let value = 0;
+  for (const element of current.elements) {
+    if (ts.isOmittedExpression(element)) continue;
+    value |= ts.isSpreadElement(element)
+      ? VALUE_UNKNOWN
+      : expressionValue(element, state, analysis);
+  }
+  return value === 0 ? VALUE_UNKNOWN : value;
+}
+
+function assignIterationTarget(
+  initializer: ts.ForInitializer,
+  value: AbstractValue,
+  state: FlowState,
+  analysis: FileUrlAnalysis,
+): void {
+  if (ts.isVariableDeclarationList(initializer)) {
+    for (const declaration of initializer.declarations) {
+      if (ts.isIdentifier(declaration.name)) {
+        const symbol = analysis.checker.getSymbolAtLocation(declaration.name);
+        if (symbol !== undefined) state.set(symbol, value);
+      } else {
+        if (ts.isObjectBindingPattern(declaration.name)) {
+          checkBindingPattern(declaration.name, value, state, analysis);
+        }
+        bindUnknown(declaration.name, state, analysis);
+      }
+    }
+    return;
+  }
+
+  const target = unwrapForProvenance(initializer);
+  if (ts.isObjectLiteralExpression(target)) {
+    for (const property of target.properties) {
+      if (
+        (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) &&
+        ts.isComputedPropertyName(property.name)
+      ) {
+        scanExpression(property.name.expression, state, analysis);
+      }
+    }
+    checkObjectAssignmentPattern(target, value, state, analysis);
+  }
+  assignValue(target, value, state, analysis);
+}
+
+function scanIntrinsicFileUrlHazards(analysis: FileUrlAnalysis): void {
+  const emptyState: FlowState = new Map();
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      node.name.text === 'pathname' &&
+      (expressionValue(node.expression, emptyState, analysis) & VALUE_URL_FILE) !== 0
+    ) {
+      addViolation(node, analysis);
+    } else if (
+      ts.isElementAccessExpression(node) &&
+      keyValueHas(node.argumentExpression, VALUE_STATIC_PATHNAME, emptyState, analysis) &&
+      (expressionValue(node.expression, emptyState, analysis) & VALUE_URL_FILE) !== 0
+    ) {
+      addViolation(node, analysis);
+    } else if (
+      ts.isVariableDeclaration(node) &&
+      ts.isObjectBindingPattern(node.name) &&
+      node.initializer !== undefined
+    ) {
+      checkBindingPattern(
+        node.name,
+        expressionValue(node.initializer, emptyState, analysis),
+        emptyState,
+        analysis,
+      );
+    } else if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    ) {
+      const left = unwrapForProvenance(node.left);
+      if (ts.isObjectLiteralExpression(left)) {
+        checkObjectAssignmentPattern(
+          left,
+          expressionValue(node.right, emptyState, analysis),
+          emptyState,
+          analysis,
+        );
+      }
+    } else if (ts.isForOfStatement(node)) {
+      const value = iterableElementValue(node.expression, emptyState, analysis);
+      if (ts.isVariableDeclarationList(node.initializer)) {
+        for (const declaration of node.initializer.declarations) {
+          if (ts.isObjectBindingPattern(declaration.name)) {
+            checkBindingPattern(declaration.name, value, emptyState, analysis);
+          }
+        }
+      } else {
+        const target = unwrapForProvenance(node.initializer);
+        if (ts.isObjectLiteralExpression(target)) {
+          checkObjectAssignmentPattern(target, value, emptyState, analysis);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(analysis.sourceFile);
+}
+
+// The value lattice and completion set are finite. This additional cap prevents
+// malformed/control-flow-heavy fixtures from making the package policy unbounded.
 const LOOP_ANALYSIS_LIMIT = 8;
+
+interface LoopScanOptions {
+  readonly labels: readonly string[];
+  readonly maySkip: boolean;
+  readonly prepareIteration?: ((state: FlowState) => void) | undefined;
+  readonly completeIteration: (state: FlowState) => boolean | undefined;
+}
 
 function scanLoop(
   body: ts.Statement,
   entryState: FlowState,
   analysis: FileUrlAnalysis,
-  afterBody?: ((state: FlowState) => void) | undefined,
-  atLeastOnce = false,
-): FlowState {
-  let accumulated = atLeastOnce ? new Map<ts.Symbol, AbstractValue>() : cloneState(entryState);
-  let iterationInput = cloneState(entryState);
+  options: LoopScanOptions,
+): FlowResult {
+  const exits: FlowState[] = options.maySkip ? [cloneState(entryState)] : [];
+  const escaped: FlowCompletion[] = [];
+  let header = cloneState(entryState);
+
   for (let pass = 0; pass < LOOP_ANALYSIS_LIMIT; pass += 1) {
-    const bodyResult = scanStatement(body, cloneState(iterationInput), analysis);
-    const completed = bodyResult.state;
-    if (bodyResult.continues) afterBody?.(completed);
-    const next = mergeStates(
-      atLeastOnce || accumulated.size > 0
-        ? [accumulated, completed]
-        : [completed],
-    );
-    if (statesEqual(next, accumulated)) return next;
-    accumulated = next;
-    iterationInput = mergeStates([entryState, accumulated]);
+    const bodyEntry = cloneState(header);
+    options.prepareIteration?.(bodyEntry);
+    const result = scanStatement(body, bodyEntry, analysis);
+    const backEdges: FlowState[] = [];
+
+    for (const current of result) {
+      if (
+        current.kind === 'normal' ||
+        (current.kind === 'continue' &&
+          (current.label === undefined || options.labels.includes(current.label)))
+      ) {
+        backEdges.push(cloneState(current.state));
+      } else if (current.kind === 'break' && current.label === undefined) {
+        exits.push(current.state);
+      } else {
+        escaped.push(current);
+      }
+    }
+
+    const repeating: FlowState[] = [];
+    for (const backEdge of backEdges) {
+      const repeats = options.completeIteration(backEdge);
+      if (repeats !== true) exits.push(cloneState(backEdge));
+      if (repeats !== false) repeating.push(backEdge);
+    }
+    if (repeating.length === 0) break;
+
+    const nextHeader = mergeStates([header, ...repeating]);
+    if (statesEqual(nextHeader, header)) break;
+    header = nextHeader;
   }
-  return mergeStates([entryState, accumulated]);
+
+  return mergeFlow([
+    ...(exits.length === 0 ? [] : [completion('normal', mergeStates(exits))]),
+    ...escaped,
+  ]);
 }
 
-function scanClass(
-  node: ts.ClassDeclaration,
-  state: FlowState,
-  analysis: FileUrlAnalysis,
-): void {
+function scanClass(node: ts.ClassDeclaration, state: FlowState, analysis: FileUrlAnalysis): void {
   for (const member of node.members) {
     if (ts.isPropertyDeclaration(member) && member.initializer !== undefined) {
       scanExpression(member.initializer, cloneState(state), analysis);
@@ -914,33 +1156,48 @@ function scanSwitchPath(
   entryState: FlowState,
   analysis: FileUrlAnalysis,
 ): FlowResult {
-  let state = cloneState(entryState);
-  for (let index = start; index < clauses.length; index += 1) {
-    const clause = clauses[index];
-    if (clause === undefined) break;
-    for (const statement of clause.statements) {
-      if (ts.isBreakStatement(statement)) return { continues: true, state };
-      const result = scanStatement(statement, state, analysis);
-      state = result.state;
-      if (!result.continues) return result;
+  const statements = clauses.slice(start).flatMap((clause) => [...clause.statements]);
+  return mergeFlow(
+    scanStatementList(statements, cloneState(entryState), analysis).map((current) =>
+      current.kind === 'break' && current.label === undefined
+        ? completion('normal', current.state)
+        : current,
+    ),
+  );
+}
+
+function applyFinally(
+  incoming: FlowResult,
+  block: ts.Block,
+  analysis: FileUrlAnalysis,
+): FlowResult {
+  const result: FlowCompletion[] = [];
+  for (const prior of incoming) {
+    for (const finalCompletion of scanStatement(block, cloneState(prior.state), analysis)) {
+      result.push(
+        finalCompletion.kind === 'normal'
+          ? completion(prior.kind, finalCompletion.state, prior.label)
+          : finalCompletion,
+      );
     }
   }
-  return { continues: true, state };
+  return mergeFlow(result);
 }
 
 function scanStatement(
   statement: ts.Statement,
   state: FlowState,
   analysis: FileUrlAnalysis,
+  labels: readonly string[] = [],
 ): FlowResult {
   if (ts.isBlock(statement)) return scanStatementList(statement.statements, state, analysis);
   if (ts.isVariableStatement(statement)) {
     scanVariableDeclarationList(statement.declarationList, state, analysis);
-    return { continues: true, state };
+    return normalCompletion(state);
   }
   if (ts.isExpressionStatement(statement)) {
     scanExpression(statement.expression, state, analysis);
-    return { continues: true, state };
+    return normalCompletion(state);
   }
   if (ts.isIfStatement(statement)) {
     scanExpression(statement.expression, state, analysis);
@@ -948,27 +1205,27 @@ function scanStatement(
     if (condition === true) return scanStatement(statement.thenStatement, state, analysis);
     if (condition === false) {
       return statement.elseStatement === undefined
-        ? { continues: true, state }
+        ? normalCompletion(state)
         : scanStatement(statement.elseStatement, state, analysis);
     }
     const whenTrue = scanStatement(statement.thenStatement, cloneState(state), analysis);
     const whenFalse =
       statement.elseStatement === undefined
-        ? { continues: true, state: cloneState(state) }
+        ? normalCompletion(cloneState(state))
         : scanStatement(statement.elseStatement, cloneState(state), analysis);
-    return continuingFlow([whenTrue, whenFalse]);
+    return mergeFlow([...whenTrue, ...whenFalse]);
   }
   if (ts.isFunctionDeclaration(statement)) {
     scanFunction(statement, state, analysis);
-    return { continues: true, state };
+    return normalCompletion(state);
   }
   if (ts.isClassDeclaration(statement)) {
     scanClass(statement, state, analysis);
-    return { continues: true, state };
+    return normalCompletion(state);
   }
   if (ts.isReturnStatement(statement) || ts.isThrowStatement(statement)) {
     if (statement.expression !== undefined) scanExpression(statement.expression, state, analysis);
-    return { continues: false, state };
+    return [completion(ts.isReturnStatement(statement) ? 'return' : 'throw', state)];
   }
   if (ts.isForStatement(statement)) {
     if (statement.initializer !== undefined) {
@@ -979,91 +1236,128 @@ function scanStatement(
       }
     }
     if (statement.condition !== undefined) scanExpression(statement.condition, state, analysis);
-    if (statement.condition !== undefined && staticBoolean(statement.condition) === false) {
-      return { continues: true, state };
-    }
-    const loopState = scanLoop(statement.statement, state, analysis, (next) => {
-      if (statement.incrementor !== undefined) scanExpression(statement.incrementor, next, analysis);
-      if (statement.condition !== undefined) scanExpression(statement.condition, next, analysis);
+    const initialCondition =
+      statement.condition === undefined ? true : staticBoolean(statement.condition);
+    if (initialCondition === false) return normalCompletion(state);
+    return scanLoop(statement.statement, state, analysis, {
+      labels,
+      maySkip: initialCondition !== true,
+      completeIteration: (next) => {
+        if (statement.incrementor !== undefined) {
+          scanExpression(statement.incrementor, next, analysis);
+        }
+        if (statement.condition === undefined) return true;
+        scanExpression(statement.condition, next, analysis);
+        return staticBoolean(statement.condition);
+      },
     });
-    return { continues: true, state: loopState };
   }
   if (ts.isWhileStatement(statement)) {
     scanExpression(statement.expression, state, analysis);
-    if (staticBoolean(statement.expression) === false) return { continues: true, state };
-    const loopState = scanLoop(statement.statement, state, analysis, (next) => {
-      scanExpression(statement.expression, next, analysis);
+    const initialCondition = staticBoolean(statement.expression);
+    if (initialCondition === false) return normalCompletion(state);
+    return scanLoop(statement.statement, state, analysis, {
+      labels,
+      maySkip: initialCondition !== true,
+      completeIteration: (next) => {
+        scanExpression(statement.expression, next, analysis);
+        return staticBoolean(statement.expression);
+      },
     });
-    return { continues: true, state: loopState };
   }
   if (ts.isDoStatement(statement)) {
-    const loopState = scanLoop(
-      statement.statement,
-      state,
-      analysis,
-      (next) => scanExpression(statement.expression, next, analysis),
-      true,
-    );
-    return { continues: true, state: loopState };
+    return scanLoop(statement.statement, state, analysis, {
+      labels,
+      maySkip: false,
+      completeIteration: (next) => {
+        scanExpression(statement.expression, next, analysis);
+        return staticBoolean(statement.expression);
+      },
+    });
   }
   if (ts.isForInStatement(statement) || ts.isForOfStatement(statement)) {
     scanExpression(statement.expression, state, analysis);
-    if (ts.isVariableDeclarationList(statement.initializer)) {
-      scanVariableDeclarationList(statement.initializer, state, analysis);
-    } else {
-      invalidateAssignmentTarget(statement.initializer, state, analysis);
-    }
-    return {
-      continues: true,
-      state: scanLoop(statement.statement, state, analysis),
-    };
+    const itemValue = ts.isForOfStatement(statement)
+      ? iterableElementValue(statement.expression, state, analysis)
+      : VALUE_UNKNOWN;
+    return scanLoop(statement.statement, state, analysis, {
+      labels,
+      maySkip: true,
+      prepareIteration: (next) => {
+        assignIterationTarget(statement.initializer, itemValue, next, analysis);
+      },
+      completeIteration: () => undefined,
+    });
   }
   if (ts.isSwitchStatement(statement)) {
     scanExpression(statement.expression, state, analysis);
     const clauses = statement.caseBlock.clauses;
-    const alternatives: FlowResult[] = clauses.map((_, index) =>
+    const alternatives = clauses.flatMap((_, index) =>
       scanSwitchPath(clauses, index, state, analysis),
     );
     if (!clauses.some((clause) => ts.isDefaultClause(clause))) {
-      alternatives.push({ continues: true, state: cloneState(state) });
+      alternatives.push(completion('normal', cloneState(state)));
     }
-    return continuingFlow(alternatives);
+    return mergeFlow(alternatives);
   }
   if (ts.isTryStatement(statement)) {
     const attempted = scanStatement(statement.tryBlock, cloneState(state), analysis);
-    const alternatives: FlowResult[] = [attempted];
-    if (statement.catchClause !== undefined) {
-      const caught = cloneState(state);
-      const declaration = statement.catchClause.variableDeclaration;
-      if (declaration !== undefined) bindUnknown(declaration.name, caught, analysis);
-      alternatives.push(scanStatement(statement.catchClause.block, caught, analysis));
+    let combined: FlowResult;
+    if (statement.catchClause === undefined) {
+      combined = attempted;
+    } else {
+      const thrown = attempted.filter((current) => current.kind === 'throw');
+      const uncaught = attempted.filter((current) => current.kind !== 'throw');
+      if (thrown.length === 0) {
+        combined = uncaught;
+      } else {
+        const caught = mergeStates(thrown.map((current) => current.state));
+        const declaration = statement.catchClause.variableDeclaration;
+        if (declaration !== undefined) bindUnknown(declaration.name, caught, analysis);
+        combined = mergeFlow([
+          ...uncaught,
+          ...scanStatement(statement.catchClause.block, caught, analysis),
+        ]);
+      }
     }
-    let result = continuingFlow(alternatives);
-    if (statement.finallyBlock !== undefined && result.continues) {
-      result = scanStatement(statement.finallyBlock, result.state, analysis);
-    }
-    return result;
+    return statement.finallyBlock === undefined
+      ? combined
+      : applyFinally(combined, statement.finallyBlock, analysis);
   }
-  if (ts.isLabeledStatement(statement) || ts.isWithStatement(statement)) {
-    if (ts.isWithStatement(statement)) scanExpression(statement.expression, state, analysis);
+  if (ts.isLabeledStatement(statement)) {
+    const label = statement.label.text;
+    return mergeFlow(
+      scanStatement(statement.statement, state, analysis, [...labels, label]).map((current) =>
+        current.kind === 'break' && current.label === label
+          ? completion('normal', current.state)
+          : current,
+      ),
+    );
+  }
+  if (ts.isWithStatement(statement)) {
+    scanExpression(statement.expression, state, analysis);
     return scanStatement(statement.statement, state, analysis);
   }
   if (ts.isExportAssignment(statement)) {
     scanExpression(statement.expression, state, analysis);
-    return { continues: true, state };
+    return normalCompletion(state);
   }
-  if (
-    ts.isBreakStatement(statement) ||
-    ts.isContinueStatement(statement) ||
-    ts.isDebuggerStatement(statement) ||
-    ts.isEmptyStatement(statement)
-  ) {
-    return { continues: !ts.isBreakStatement(statement) && !ts.isContinueStatement(statement), state };
+  if (ts.isBreakStatement(statement) || ts.isContinueStatement(statement)) {
+    return [
+      completion(
+        ts.isBreakStatement(statement) ? 'break' : 'continue',
+        state,
+        statement.label?.text,
+      ),
+    ];
+  }
+  if (ts.isDebuggerStatement(statement) || ts.isEmptyStatement(statement)) {
+    return normalCompletion(state);
   }
   ts.forEachChild(statement, (child) => {
     if (ts.isExpression(child)) scanExpression(child, state, analysis);
   });
-  return { continues: true, state };
+  return normalCompletion(state);
 }
 
 function scanStatementList(
@@ -1071,13 +1365,19 @@ function scanStatementList(
   initialState: FlowState,
   analysis: FileUrlAnalysis,
 ): FlowResult {
-  let state = initialState;
+  let paths: FlowResult = normalCompletion(initialState);
   for (const statement of statements) {
-    const result = scanStatement(statement, state, analysis);
-    state = result.state;
-    if (!result.continues) return result;
+    const next: FlowCompletion[] = [];
+    for (const current of paths) {
+      if (current.kind === 'normal') {
+        next.push(...scanStatement(statement, current.state, analysis));
+      } else {
+        next.push(current);
+      }
+    }
+    paths = mergeFlow(next);
   }
-  return { continues: true, state };
+  return paths;
 }
 
 export function findFileUrlPathnameViolations(
@@ -1090,6 +1390,7 @@ export function findFileUrlPathnameViolations(
     sourceFile,
     violations: new Map(),
   };
+  scanIntrinsicFileUrlHazards(analysis);
   scanStatementList(sourceFile.statements, new Map(), analysis);
   return [...analysis.violations]
     .sort(([left], [right]) => left - right)
