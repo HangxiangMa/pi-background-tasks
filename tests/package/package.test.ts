@@ -56,6 +56,51 @@ interface CommandResult {
   readonly stderr: string;
 }
 
+type NpmIgnoreScriptsObservation = readonly [
+  version: string,
+  status: number | null,
+  output: string,
+  markers: readonly string[],
+];
+
+function requireSupportedNpmVersion(rawVersion: string): string {
+  const version = rawVersion.trim();
+  const match = /^(\d+)\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.exec(version);
+  assert.ok(
+    match,
+    `expected npm --version to report a semantic version, received ${JSON.stringify(rawVersion)}`,
+  );
+  const npmMajor = Number(match[1]);
+  assert.ok(
+    Number.isSafeInteger(npmMajor) && npmMajor >= 10,
+    `expected npm >=10, received ${version}`,
+  );
+  return version;
+}
+
+function assertNpmIgnoreScriptsObservation(
+  versionText: string,
+  status: number | null,
+  output: string,
+  markers: readonly string[],
+): void {
+  const version = requireSupportedNpmVersion(versionText);
+  if (status === 0 && markers.length === 0) return;
+
+  const isKnownNpm1093PrepareDefect =
+    version === '10.9.3' &&
+    status === 1 &&
+    output.includes('sentinel lifecycle executed: prepare') &&
+    markers.length === 1 &&
+    markers[0] === 'prepare';
+  if (isKnownNpm1093PrepareDefect) return;
+
+  assert.fail(
+    `unexpected npm pack --ignore-scripts lifecycle observation for npm ${version}: ` +
+      `status=${String(status)} markers=${JSON.stringify(markers)} output=${JSON.stringify(output)}`,
+  );
+}
+
 function runNpm(
   args: readonly string[],
   options: { cwd: string; env: NodeJS.ProcessEnv },
@@ -2256,6 +2301,39 @@ void describe('package', () => {
     }
   });
 
+  void it('characterizes npm --ignore-scripts without requiring future npm defects', () => {
+    const prepareFailure = 'sentinel lifecycle executed: prepare';
+    const accepted: readonly NpmIgnoreScriptsObservation[] = [
+      ['10.9.3', 1, prepareFailure, ['prepare']],
+      ['11.13.0', 0, '', []],
+      ['10.10.0', 0, '', []],
+    ];
+    for (const observation of accepted) assertNpmIgnoreScriptsObservation(...observation);
+
+    const rejected: readonly NpmIgnoreScriptsObservation[] = [
+      ['10.10.0', 1, prepareFailure, ['prepare']],
+      ['11.13.0', 0, '', ['prepare']],
+      ['10.9.3', 1, prepareFailure, ['prepack', 'prepare']],
+      ['10.9.3', 2, prepareFailure, ['prepare']],
+      ['10.9.3', 1, 'different failure', ['prepare']],
+      ['11.13.0', 1, 'different failure', []],
+    ];
+    for (const observation of rejected) {
+      assert.throws(
+        () => assertNpmIgnoreScriptsObservation(...observation),
+        /unexpected npm pack --ignore-scripts lifecycle observation/u,
+      );
+    }
+    assert.throws(
+      () => assertNpmIgnoreScriptsObservation('not-semver', 0, '', []),
+      /expected npm --version to report a semantic version/u,
+    );
+    assert.throws(
+      () => assertNpmIgnoreScriptsObservation('9.9.9', 0, '', []),
+      /expected npm >=10/u,
+    );
+  });
+
   void it('denies dependency packing lifecycle scripts across supported npm CLIs', async () => {
     const temp = await mkdtemp(join(tmpdir(), 'pi-bg-pack-script-denial-'));
     const envRoot = makeIsolatedEnvRoot('pi-bg-pack-script-env-');
@@ -2327,8 +2405,7 @@ void describe('package', () => {
         env: sentinelEnv(''),
       });
       assert.equal(npmVersion.status, 0, npmVersion.stderr);
-      const npmMajor = Number.parseInt(npmVersion.stdout, 10);
-      assert.ok(npmMajor >= 10, `expected npm >=10, received ${npmVersion.stdout.trim()}`);
+      const npmVersionText = requireSupportedNpmVersion(npmVersion.stdout);
 
       resetMarkers();
       const attemptedTarballs = join(temp, 'attempted-tarballs');
@@ -2364,17 +2441,12 @@ void describe('package', () => {
         ],
         { cwd: packProject, env: sentinelEnv('prepare') },
       );
-      if (npmMajor === 10) {
-        assert.notEqual(ignoredAttempt.status, 0, 'npm 10 must expose its prepare-script defect');
-        assert.match(
-          `${ignoredAttempt.stderr}\n${ignoredAttempt.stdout}`,
-          /sentinel lifecycle executed: prepare/u,
-        );
-        assert.deepEqual(markerEvents(), ['prepare']);
-      } else {
-        assert.equal(ignoredAttempt.status, 0, ignoredAttempt.stderr);
-        assert.deepEqual(markerEvents(), []);
-      }
+      assertNpmIgnoreScriptsObservation(
+        npmVersionText,
+        ignoredAttempt.status,
+        `${ignoredAttempt.stderr}\n${ignoredAttempt.stdout}`,
+        markerEvents(),
+      );
 
       resetMarkers();
       await assert.rejects(
