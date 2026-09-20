@@ -301,6 +301,7 @@ function requireTask(value: unknown, label: string): BgTaskSnapshot {
     startTime: partial.startTime ?? 0,
     bytesWritten: partial.bytesWritten ?? 0,
     isAgent: partial.isAgent ?? false,
+    surviveReload: partial.surviveReload ?? false,
     notified: partial.notified ?? false,
     notifyOnCompletion: partial.notifyOnCompletion ?? false,
     triggerOnCompletion: partial.triggerOnCompletion ?? false,
@@ -473,6 +474,33 @@ void describe('background EventBus protocol', () => {
       assert.equal(malformedPayload.ok, false);
       assert.match(malformedPayload.ok ? '' : malformedPayload.error, /positive integer/u);
       assert.equal(h.spawnCount(), 0);
+
+      const survivalIsNotInV1 = await emitRequest(h.bus, {
+        schema_version: BG_REQUEST_SCHEMA,
+        request_id: 'v1-survival-closed',
+        operation: 'run',
+        payload: {
+          name: 'Unsupported V1 Survival',
+          command: 'printf nope',
+          isAgent: false,
+          surviveReload: true,
+          notifyOnCompletion: true,
+          triggerOnCompletion: true,
+        },
+      });
+      assert.equal(survivalIsNotInV1.ok, false);
+      assert.match(survivalIsNotInV1.ok ? '' : survivalIsNotInV1.error, /unknown key surviveReload/u);
+      assert.equal(h.spawnCount(), 0);
+      assert.deepEqual(Object.keys(BG_EXTENSION_CAPABILITIES).sort(), [
+        'api_version',
+        'kill',
+        'logs',
+        'logs_bounded',
+        'run',
+        'run_completion_trigger',
+        'run_is_agent',
+        'status',
+      ]);
 
       h.setCtx(undefined);
       const missingCtx = await emitRequest(h.bus, {
