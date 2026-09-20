@@ -83,30 +83,34 @@ function payloadText(payload: JsonObject | undefined): string {
   return JSON.stringify(payload);
 }
 
-async function removeFirstPersistedThinking(sessionFile: string): Promise<void> {
-  const source = await readFile(sessionFile, 'utf8');
-  let removed = false;
-  const rewritten = source
+async function removeLatestPersistedThinking(sessionFile: string): Promise<void> {
+  const records = (await readFile(sessionFile, 'utf8'))
     .trimEnd()
     .split('\n')
-    .map((line) => {
+    .map((line): JsonObject => {
       const parsed: unknown = JSON.parse(line);
-      if (!removed && isJsonObject(parsed) && parsed['type'] === 'message') {
-        const message = parsed['message'];
-        if (isJsonObject(message) && message['role'] === 'assistant' && Array.isArray(message['content'])) {
-          const nextContent = message['content'].filter(
-            (block) => !isJsonObject(block) || block['type'] !== 'thinking',
-          );
-          if (nextContent.length !== message['content'].length) {
-            removed = true;
-            return JSON.stringify({ ...parsed, message: { ...message, content: nextContent } });
-          }
-        }
-      }
-      return JSON.stringify(parsed);
+      assert.ok(isJsonObject(parsed));
+      return parsed;
     });
-  assert.equal(removed, true, 'fixture should remove one persisted thinking block');
-  await writeFile(sessionFile, `${rewritten.join('\n')}\n`, 'utf8');
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    const message = record?.['message'];
+    if (!isJsonObject(message) || message['role'] !== 'assistant') continue;
+    const content = message['content'];
+    if (!Array.isArray(content)) continue;
+    const nextContent = content.filter(
+      (block) => !isJsonObject(block) || block['type'] !== 'thinking',
+    );
+    assert.notEqual(nextContent.length, content.length, 'latest assistant should contain thinking');
+    records[index] = { ...record, message: { ...message, content: nextContent } };
+    await writeFile(
+      sessionFile,
+      `${records.map((entry) => JSON.stringify(entry)).join('\n')}\n`,
+      'utf8',
+    );
+    return;
+  }
+  assert.fail('fixture should find a latest persisted assistant');
 }
 
 void describe('Anthropic attribution through Pi reload and resume (#14)', () => {
@@ -151,6 +155,12 @@ void describe('Anthropic attribution through Pi reload and resume (#14)', () => 
       assert.ok(isJsonObject(parsed));
       payloads.push(parsed);
       requestOrdinal += 1;
+      if (requestOrdinal >= 3 && previousId(parsed) === 'msg_lifecycle_2') {
+        return new Response('thinking prefix mismatch', {
+          status: 400,
+          statusText: 'Bad Request',
+        });
+      }
       return response(`msg_lifecycle_${String(requestOrdinal)}`);
     });
 
@@ -232,14 +242,21 @@ void describe('Anthropic attribution through Pi reload and resume (#14)', () => 
       firstSession.dispose();
       firstSession = undefined;
 
-      await removeFirstPersistedThinking(sessionFile);
+      await removeLatestPersistedThinking(sessionFile);
       const resumedManager = SessionManager.open(sessionFile, sessionDir, cwd);
       const reconstructed = resumedManager.buildSessionContext();
+      const reconstructedAssistants = reconstructed.messages.filter(
+        (message) => message.role === 'assistant',
+      );
+      assert.equal(reconstructedAssistants.length, 2);
       assert.ok(
-        reconstructed.messages.some(
-          (message) => message.role === 'assistant' && message.content.some((block) => block.type === 'thinking'),
-        ),
-        'later thinking should remain after the persisted-history reconstruction fixture',
+        reconstructedAssistants[0]?.content.some((block) => block.type === 'thinking'),
+        'earlier thinking should remain in the reconstructed persistent session',
+      );
+      assert.equal(
+        reconstructedAssistants[1]?.content.some((block) => block.type === 'thinking'),
+        false,
+        'the latest persisted assistant should be the mutated response',
       );
 
       const resumedRuntime = await makeRuntime();
@@ -263,16 +280,20 @@ void describe('Anthropic attribution through Pi reload and resume (#14)', () => 
       await resumedSession.bindExtensions({ onError: (error) => assert.fail(error.error) });
       assert.ok(lifecycleEvents.includes('start:resume'));
 
-      await resumedSession.prompt('Continue from reconstructed history.');
+      await resumedSession.prompt('Continue from reconstructed latest response.');
       const recovered = assistant(resumedSession);
-      assert.equal(recovered.stopReason, 'stop', recovered.errorMessage);
-      assert.equal(previousId(payloads[2]), null);
-      assert.deepEqual(signedValues(payloads[2]), []);
-      assert.match(payloadText(payloads[2]), /Visible thought msg_lifecycle_2/u);
+      await resumedSession.prompt('Retry or chain after the reconstructed turn.');
+      const chained = assistant(resumedSession);
 
-      await resumedSession.prompt('Chain after the recovered turn.');
-      assert.equal(assistant(resumedSession).stopReason, 'stop');
-      assert.equal(previousId(payloads[3]), 'msg_lifecycle_3');
+      assert.deepEqual(
+        payloads.slice(2).map((payload) => previousId(payload)),
+        [null, 'msg_lifecycle_3'],
+        'reopen plus retry must not remain pinned to the stale msg_lifecycle_2 receipt',
+      );
+      assert.equal(recovered.stopReason, 'stop', recovered.errorMessage);
+      assert.equal(chained.stopReason, 'stop', chained.errorMessage);
+      assert.deepEqual(signedValues(payloads[2]), []);
+      assert.match(payloadText(payloads[2]), /Visible thought msg_lifecycle_1/u);
       assert.deepEqual(signedValues(payloads[3]), ['signature-msg_lifecycle_3']);
       assert.equal(payloads.length, 4);
     } finally {

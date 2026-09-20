@@ -148,6 +148,43 @@ function previousId(payload: JsonObject | undefined): unknown {
   return payload['diagnostics']['previous_message_id'];
 }
 
+type AssistantContextMessage = Extract<
+  PiStreamContext['messages'][number],
+  { readonly role: 'assistant' }
+>;
+
+function changeLatestAssistant(
+  context: PiStreamContext,
+  change: (message: AssistantContextMessage) => AssistantContextMessage,
+): PiStreamContext {
+  let changed = false;
+  const messages = [...context.messages];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== 'assistant') continue;
+    messages[index] = change(message);
+    changed = true;
+    break;
+  }
+  assert.equal(changed, true, 'fixture should contain a latest assistant');
+  return { ...context, messages };
+}
+
+function changeReceiptField(
+  message: AssistantContextMessage,
+  field: string,
+  value: unknown,
+): AssistantContextMessage {
+  return {
+    ...message,
+    diagnostics: (message.diagnostics ?? []).map((diagnostic) =>
+      diagnostic.type === 'anthropic-cache-lineage'
+        ? { ...diagnostic, details: { ...(diagnostic.details ?? {}), [field]: value } }
+        : diagnostic,
+    ),
+  };
+}
+
 void describe('Anthropic attribution lineage recovery (#14)', () => {
   void it('chains unchanged append-only requests and replays exact signed thinking', async (t) => {
     const { send, payloads } = harness(t);
@@ -289,6 +326,92 @@ void describe('Anthropic attribution lineage recovery (#14)', () => {
     assert.equal(fourth.stopReason, 'stop', fourth.errorMessage);
     assert.equal(previousId(payloads[3]), third.responseId);
   });
+
+  void it('treats a changed latest assistant with a valid-shaped stale receipt as a boundary', async (t) => {
+    const { send, payloads } = harness(t);
+    const first = await send(initialContext);
+    const beforeSecond = continuation(initialContext, first);
+    const second = await send(beforeSecond);
+    const beforeThird = continuation(beforeSecond, second);
+    const changed = changeLatestAssistant(beforeThird, (message) => ({
+      ...message,
+      content: message.content.map((block) =>
+        block['type'] === 'text' ? { ...block, text: 'Reconstructed latest answer' } : block,
+      ),
+    }));
+
+    const recovered = await send(changed);
+    assert.equal(recovered.stopReason, 'stop', recovered.errorMessage);
+    assert.equal(previousId(payloads[2]), null);
+    assert.deepEqual(signedBlocks(payloads[2]), []);
+    assert.ok(blocks(payloads[2]).some((block) => block['text'] === 'Reason 😀 msg_1'));
+
+    const next = await send(continuation(changed, recovered));
+    assert.equal(next.stopReason, 'stop', next.errorMessage);
+    assert.equal(previousId(payloads[3]), recovered.responseId);
+    assert.deepEqual(
+      signedBlocks(payloads[3]).map((block) => block['signature'] ?? block['data']),
+      ['sig-msg_3', 'redacted-msg_3'],
+    );
+  });
+
+  const staleReceiptMutations: Array<{
+    readonly name: string;
+    readonly change: (message: AssistantContextMessage) => AssistantContextMessage;
+  }> = [
+    {
+      name: 'assistant provider',
+      change: (message) => ({ ...message, provider: 'not-anthropic' }),
+    },
+    {
+      name: 'assistant API',
+      change: (message) => ({ ...message, api: 'not-anthropic-messages' }),
+    },
+    {
+      name: 'assistant model',
+      change: (message) => ({ ...message, model: 'claude-other' }),
+    },
+    {
+      name: 'assistant successful terminal state',
+      change: (message) => ({ ...message, stopReason: 'deferred' }),
+    },
+    {
+      name: 'assistant response ID',
+      change: (message) => ({ ...message, responseId: 'changed-response' }),
+    },
+    {
+      name: 'non-empty assistant response ID',
+      change: (message) => ({ ...message, responseId: '' }),
+    },
+    {
+      name: 'non-empty receipt response ID',
+      change: (message) => changeReceiptField(message, 'response_id', ''),
+    },
+    {
+      name: 'non-empty receipt previous response ID',
+      change: (message) => changeReceiptField(message, 'previous_message_id', ''),
+    },
+  ];
+
+  for (const mutation of staleReceiptMutations) {
+    void it(`requires receipt binding to the containing ${mutation.name}`, async (t) => {
+      const { send, payloads } = harness(t);
+      const first = await send(initialContext);
+      const beforeSecond = continuation(initialContext, first);
+      const second = await send(beforeSecond);
+      const beforeThird = continuation(beforeSecond, second);
+      const changed = changeLatestAssistant(beforeThird, mutation.change);
+
+      const recovered = await send(changed);
+      assert.equal(recovered.stopReason, 'stop', recovered.errorMessage);
+      assert.equal(previousId(payloads[2]), null);
+      assert.deepEqual(signedBlocks(payloads[2]), []);
+
+      const next = await send(continuation(changed, recovered));
+      assert.equal(next.stopReason, 'stop', next.errorMessage);
+      assert.equal(previousId(payloads[3]), recovered.responseId);
+    });
+  }
 
   void it('recovers again after a failed reset attempt without persisting a false anchor', async (t) => {
     const { send, payloads } = harness(t);

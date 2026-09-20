@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { describe, it, type TestContext } from 'node:test';
 import {
   streamAnthropicViaBetaMessages,
+  type AssistantMessageLike,
   type PiStreamContext,
 } from '../../src/core/anthropic-attribution.js';
 import { isJsonObject, type JsonObject } from '../../src/core/common.js';
@@ -27,8 +28,15 @@ const minimaxContext: PiStreamContext = {
   ],
 };
 
-function successfulSse(): Response {
-  const events: JsonObject[] = [
+function sseResponse(events: readonly JsonObject[], status = 200): Response {
+  return new Response(
+    events.map((event) => `event: ${String(event['type'])}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
+    { status, headers: { 'content-type': 'text/event-stream' } },
+  );
+}
+
+function textSuccessEvents(): JsonObject[] {
+  return [
     {
       type: 'message_start',
       message: {
@@ -52,19 +60,58 @@ function successfulSse(): Response {
     },
     { type: 'message_stop' },
   ];
-  return new Response(
-    events.map((event) => `event: ${String(event['type'])}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
-    { status: 200, headers: { 'content-type': 'text/event-stream' } },
-  );
+}
+
+function richSuccessEvents(): JsonObject[] {
+  return [
+    {
+      type: 'message_start',
+      message: {
+        id: 'minimax-rich-response',
+        type: 'message',
+        role: 'assistant',
+        model: 'MiniMax-M3',
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 3, output_tokens: 0 },
+      },
+    },
+    { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'reasoning' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'opaque-signature' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'answer' } },
+    { type: 'content_block_stop', index: 1 },
+    {
+      type: 'content_block_start',
+      index: 2,
+      content_block: { type: 'tool_use', id: 'tool-1', name: 'read', input: {} },
+    },
+    {
+      type: 'content_block_delta',
+      index: 2,
+      delta: { type: 'input_json_delta', partial_json: '{"path":"notes.txt"}' },
+    },
+    { type: 'content_block_stop', index: 2 },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: 'tool_use', stop_sequence: null },
+      usage: { output_tokens: 7, output_tokens_details: { thinking_tokens: 5 } },
+    },
+    { type: 'message_stop' },
+  ];
 }
 
 void describe('non-target anthropic-messages forwarding (#19)', () => {
-  void it('uses only the exported host SDK adapter surface', async () => {
+  void it('uses the direct exported host adapter without a serialization bridge', async () => {
     const source = await readFile('src/core/anthropic-attribution.ts', 'utf8');
     assert.match(source, /from '@earendil-works\/pi-ai\/compat'/u);
     assert.match(source, /anthropicMessagesApi\(\)\.streamSimple/u);
-    assert.doesNotMatch(source, /new Function/u);
-    assert.doesNotMatch(source, /@earendil-works\/pi-ai\/anthropic/u);
+    assert.equal(/localForwarded(?:ContentBlock|Message|Event)/u.test(source), false);
+    assert.equal(/new Function/u.test(source), false);
+    assert.equal(/@earendil-works\/pi-ai\/anthropic/u.test(source), false);
   });
 
   void it('uses the supported host adapter once without target-only rewriting', async (t: TestContext) => {
@@ -83,7 +130,7 @@ void describe('non-target anthropic-messages forwarding (#19)', () => {
       const parsed: unknown = JSON.parse(body);
       assert.ok(isJsonObject(parsed));
       requestPayload = parsed;
-      return successfulSse();
+      return sseResponse(textSuccessEvents());
     });
 
     const result = await streamAnthropicViaBetaMessages(
@@ -96,13 +143,13 @@ void describe('non-target anthropic-messages forwarding (#19)', () => {
         headers: { 'x-minimax-route': 'route-a' },
         onPayload(payload, forwardedModel) {
           middlewareCalls += 1;
-          assert.equal(forwardedModel.provider, 'minimax');
+          assert.strictEqual(forwardedModel, minimaxModel);
           return payload;
         },
         onResponse(response, forwardedModel) {
           responseCalls += 1;
           assert.equal(response.status, 200);
-          assert.equal(forwardedModel.provider, 'minimax');
+          assert.strictEqual(forwardedModel, minimaxModel);
         },
       },
     ).result();
@@ -123,5 +170,112 @@ void describe('non-target anthropic-messages forwarding (#19)', () => {
     assert.equal(JSON.stringify(requestPayload).includes('x-anthropic-billing-header'), false);
     assert.equal(requestPayload['metadata'], undefined);
     assert.equal(requestHeaders.get('X-Claude-Code-Session-Id'), null);
+  });
+
+  void it('preserves provider-reported reasoning usage and tool output fields', async (t: TestContext) => {
+    t.mock.method(globalThis, 'fetch', async () => sseResponse(richSuccessEvents()));
+    const result = await streamAnthropicViaBetaMessages(
+      { ...minimaxModel, reasoning: true },
+      {
+        ...minimaxContext,
+        tools: [{ name: 'read', description: 'Read a file', parameters: { properties: {} } }],
+      },
+      {
+        apiKey: 'minimax-test-key',
+        reasoning: 'high',
+        cacheRetention: 'none',
+      },
+    ).result();
+
+    assert.equal(result.stopReason, 'toolUse', result.errorMessage);
+    assert.equal(Reflect.get(result.usage, 'reasoning'), 5);
+    assert.equal(result.responseId, 'minimax-rich-response');
+    assert.equal(result.rawStopReason, 'tool_use');
+    assert.deepEqual(result.content, [
+      {
+        type: 'thinking',
+        thinking: 'reasoning',
+        thinkingSignature: 'opaque-signature',
+      },
+      { type: 'text', text: 'answer' },
+      { type: 'toolCall', id: 'tool-1', name: 'read', arguments: { path: 'notes.txt' } },
+    ]);
+  });
+
+  void it('keeps one live partial and retains host-added optional fields and tool metadata', async (t: TestContext) => {
+    t.mock.method(globalThis, 'fetch', async () => sseResponse(richSuccessEvents()));
+    const stream = streamAnthropicViaBetaMessages(
+      { ...minimaxModel, reasoning: true },
+      {
+        ...minimaxContext,
+        tools: [{ name: 'read', description: 'Read a file', parameters: { properties: {} } }],
+      },
+      {
+        apiKey: 'minimax-test-key',
+        reasoning: 'high',
+        cacheRetention: 'none',
+      },
+    );
+
+    const partials: object[] = [];
+    let terminal: AssistantMessageLike | undefined;
+    for await (const event of stream) {
+      if ('partial' in event) {
+        partials.push(event.partial);
+        if (event.type === 'start') {
+          Reflect.set(event.partial, 'providerThinkingLevel', 'provider-native-high');
+          Reflect.set(event.partial, 'endTurn', true);
+        }
+        if (event.type === 'toolcall_start') {
+          const block = event.partial.content[event.contentIndex];
+          assert.ok(block);
+          Reflect.set(block, 'namespace', 'provider.tools');
+        }
+      }
+      if (event.type === 'done') terminal = event.message;
+    }
+    const result = await stream.result();
+
+    assert.ok(partials.length > 3);
+    assert.ok(partials.every((partial) => partial === partials[0]));
+    assert.strictEqual(result, terminal);
+    assert.strictEqual(result, partials[0]);
+    assert.equal(Reflect.get(result, 'providerThinkingLevel'), 'provider-native-high');
+    assert.equal(Reflect.get(result, 'endTurn'), true);
+    const toolCall = result.content.find((block) => block['type'] === 'toolCall');
+    assert.ok(toolCall);
+    assert.equal(Reflect.get(toolCall, 'namespace'), 'provider.tools');
+  });
+
+  void it('settles an adapter error event and result with the same message', async (t: TestContext) => {
+    let responseCalls = 0;
+    t.mock.method(globalThis, 'fetch', async () => new Response('offline failure', {
+      status: 503,
+      statusText: 'Service Unavailable',
+    }));
+    const stream = streamAnthropicViaBetaMessages(minimaxModel, minimaxContext, {
+      apiKey: 'minimax-test-key',
+      cacheRetention: 'none',
+      onResponse(response, forwardedModel) {
+        responseCalls += 1;
+        assert.equal(response.status, 503);
+        assert.strictEqual(forwardedModel, minimaxModel);
+      },
+    });
+
+    let terminalError: AssistantMessageLike | undefined;
+    let terminalEvents = 0;
+    for await (const event of stream) {
+      if (event.type === 'error') {
+        terminalEvents += 1;
+        terminalError = event.error;
+      }
+    }
+    const result = await stream.result();
+    assert.equal(terminalEvents, 1);
+    assert.strictEqual(result, terminalError);
+    assert.equal(result.stopReason, 'error');
+    assert.match(result.errorMessage ?? '', /503|offline failure/u);
+    assert.equal(responseCalls, 0);
   });
 });

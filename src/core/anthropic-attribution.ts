@@ -4,9 +4,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { anthropicMessagesApi } from '@earendil-works/pi-ai/compat';
 import type {
-  Api as HostApi,
-  AssistantMessage as HostAssistantMessage,
-  AssistantMessageEvent as HostAssistantMessageEvent,
+  AssistantMessageEventStream as HostAssistantMessageEventStream,
   Context as HostContext,
   Model as HostModel,
   SimpleStreamOptions as HostSimpleStreamOptions,
@@ -1459,6 +1457,10 @@ function isSha256(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
 }
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 function blockWithoutCacheControl(block: unknown): unknown {
   if (!isPlainObject(block)) return block;
   const output = { ...block };
@@ -1529,8 +1531,8 @@ function parseAnthropicLineageDetails(
     details['projection_version'] !== ANTHROPIC_PROJECTION_VERSION ||
     details['source_provider'] !== 'anthropic' ||
     details['source_api'] !== 'anthropic-messages' ||
-    typeof sourceModel !== 'string' ||
-    typeof responseId !== 'string' ||
+    !isNonEmptyString(sourceModel) ||
+    !isNonEmptyString(responseId) ||
     !isSha256(assistantContentSha256) ||
     !isSha256(conversationStaticSha256) ||
     typeof requestMessageCount !== 'number' ||
@@ -1542,7 +1544,7 @@ function parseAnthropicLineageDetails(
     (compactionBoundarySha256 !== null && !isSha256(compactionBoundarySha256)) ||
     !isSha256(signatureEpochSha256) ||
     typeof signatureEpochInheritsPrior !== 'boolean' ||
-    (previousMessageId !== null && typeof previousMessageId !== 'string')
+    (previousMessageId !== null && !isNonEmptyString(previousMessageId))
   ) {
     return undefined;
   }
@@ -1565,6 +1567,28 @@ function parseAnthropicLineageDetails(
     signature_epoch_inherits_prior: signatureEpochInheritsPrior,
     previous_message_id: previousMessageId,
   };
+}
+
+function isSuccessfulLineageStopReason(
+  stopReason: string | undefined,
+): stopReason is 'stop' | 'length' | 'toolUse' {
+  return stopReason === 'stop' || stopReason === 'length' || stopReason === 'toolUse';
+}
+
+function lineageBindsContainingAssistant(
+  message: Extract<PiMessage, { role: 'assistant' }>,
+  lineage: AnthropicLineageDetails,
+): boolean {
+  return (
+    message.provider === lineage.source_provider &&
+    message.api === lineage.source_api &&
+    isNonEmptyString(message.model) &&
+    message.model === lineage.source_model &&
+    isSuccessfulLineageStopReason(message.stopReason) &&
+    isNonEmptyString(message.responseId) &&
+    message.responseId === lineage.response_id &&
+    lineage.assistant_content_sha256 === assistantContentHash(message.content)
+  );
 }
 
 function canTargetReadAnthropicThinking(sourceModel: string, targetModel: string): boolean {
@@ -1653,22 +1677,12 @@ function isTrustedReplayableAnthropicAssistant(
   conversationStaticSha256: string,
   wireMessagesBeforeAssistant: readonly JsonObject[],
 ): boolean {
-  if (
-    message.provider !== 'anthropic' ||
-    message.api !== 'anthropic-messages' ||
-    typeof message.model !== 'string' ||
-    message.stopReason === 'error' ||
-    message.stopReason === 'aborted' ||
-    !canTargetReadAnthropicThinking(message.model, normalizedAnthropicModelId(targetModel))
-  ) {
-    return false;
-  }
+  if (typeof message.model !== 'string') return false;
   const lineage = parseAnthropicLineageDetails(message);
   if (
     lineage === undefined ||
-    lineage.source_model !== message.model ||
-    lineage.response_id !== message.responseId ||
-    lineage.assistant_content_sha256 !== assistantContentHash(message.content) ||
+    !lineageBindsContainingAssistant(message, lineage) ||
+    !canTargetReadAnthropicThinking(message.model, normalizedAnthropicModelId(targetModel)) ||
     lineage.cache_retention !== targetCacheRetention ||
     lineage.conversation_static_sha256 !== conversationStaticSha256 ||
     lineage.request_message_count !== wireMessagesBeforeAssistant.length ||
@@ -2131,36 +2145,53 @@ type TargetLineageState =
   | { readonly kind: 'trusted'; readonly lineage: AnthropicLineageDetails }
   | { readonly kind: 'untrusted'; readonly assistantSha256: string };
 
+function untrustedAssistantSha256(
+  message: Extract<PiMessage, { role: 'assistant' }>,
+): string {
+  return sha256Canonical({
+    provider: message.provider ?? null,
+    api: message.api ?? null,
+    model: message.model ?? null,
+    response_id: message.responseId ?? null,
+    stop_reason: message.stopReason ?? null,
+    assistant_content_sha256: assistantContentHash(message.content),
+    lineage_diagnostics: (message.diagnostics ?? []).filter(
+      (diagnostic) => diagnostic.type === ANTHROPIC_LINEAGE_DIAGNOSTIC_TYPE,
+    ),
+  });
+}
+
 function targetLineageState(
   context: PiStreamContext,
   targetModelId: string,
 ): TargetLineageState {
   for (let index = context.messages.length - 1; index >= 0; index -= 1) {
     const message = context.messages[index];
+    if (message?.role !== 'assistant') continue;
+
+    const lineageDiagnostics = (message.diagnostics ?? []).filter(
+      (diagnostic) => diagnostic.type === ANTHROPIC_LINEAGE_DIAGNOSTIC_TYPE,
+    );
+    const latestRawDetails = lineageDiagnostics.at(-1)?.details;
+    const receiptClaimsTarget = latestRawDetails?.['source_model'] === targetModelId;
+    const assistantClaimsTarget = message.model === targetModelId;
+    if (!assistantClaimsTarget && !receiptClaimsTarget) continue;
+
     if (
-      message?.role !== 'assistant' ||
-      message.model !== targetModelId ||
-      message.stopReason === 'error' ||
-      message.stopReason === 'aborted'
+      (message.stopReason === 'error' || message.stopReason === 'aborted') &&
+      lineageDiagnostics.length === 0
     ) {
       continue;
     }
+
     const lineage = parseAnthropicLineageDetails(message);
-    if (lineage?.source_model === targetModelId) return { kind: 'trusted', lineage };
-    return {
-      kind: 'untrusted',
-      assistantSha256: sha256Canonical({
-        provider: message.provider ?? null,
-        api: message.api ?? null,
-        model: message.model,
-        response_id: message.responseId ?? null,
-        stop_reason: message.stopReason ?? null,
-        assistant_content_sha256: assistantContentHash(message.content),
-        lineage_diagnostics: (message.diagnostics ?? []).filter(
-          (diagnostic) => diagnostic.type === ANTHROPIC_LINEAGE_DIAGNOSTIC_TYPE,
-        ),
-      }),
-    };
+    if (
+      lineage?.source_model === targetModelId &&
+      lineageBindsContainingAssistant(message, lineage)
+    ) {
+      return { kind: 'trusted', lineage };
+    }
+    return { kind: 'untrusted', assistantSha256: untrustedAssistantSha256(message) };
   }
   return { kind: 'none' };
 }
@@ -2280,6 +2311,14 @@ export function createAnthropicLineageDiagnostic(args: {
   readonly requestPayload: JsonObject;
   readonly previousMessageId?: string | null;
 }): PiAssistantDiagnosticLike {
+  if (!isNonEmptyString(args.responseId)) {
+    throw new Error('Anthropic lineage diagnostic requires a non-empty response ID');
+  }
+  if (args.previousMessageId !== undefined && args.previousMessageId !== null) {
+    if (!isNonEmptyString(args.previousMessageId)) {
+      throw new Error('Anthropic lineage diagnostic requires a non-empty previous response ID');
+    }
+  }
   const policy = resolveClaudeCodeModelPolicy(args.model);
   const messages = requestMessagesFromPayload(args.requestPayload);
   const staticSha256 = conversationStaticHash(
@@ -2321,7 +2360,7 @@ function appendLineageDiagnostic(
   output: AssistantMessageLike,
   prepared: PreparedAnthropicLineage,
 ): void {
-  if (typeof output.responseId !== 'string' || output.responseId.length === 0) {
+  if (!isNonEmptyString(output.responseId)) {
     throw new Error(
       'Anthropic attribution successful response is missing responseId lineage proof',
     );
@@ -2632,268 +2671,26 @@ function createOutput(model: PiModelLike): AssistantMessageLike {
   };
 }
 
-function isBuiltInForwardingModel(
-  model: PiModelLike,
-): model is PiModelLike & HostModel<'anthropic-messages'> {
-  const name = Reflect.get(model, 'name');
-  const input = Reflect.get(model, 'input');
-  const contextWindow = Reflect.get(model, 'contextWindow');
-  const cost = Reflect.get(model, 'cost');
-  return (
-    model.api === 'anthropic-messages' &&
-    typeof model.provider === 'string' &&
-    model.provider.trim().length > 0 &&
-    typeof model.id === 'string' &&
-    model.id.trim().length > 0 &&
-    typeof name === 'string' &&
-    name.trim().length > 0 &&
-    typeof model.baseUrl === 'string' &&
-    model.baseUrl.trim().length > 0 &&
-    typeof model.reasoning === 'boolean' &&
-    Array.isArray(input) &&
-    input.every((kind) => kind === 'text' || kind === 'image') &&
-    typeof contextWindow === 'number' &&
-    Number.isSafeInteger(contextWindow) &&
-    contextWindow > 0 &&
-    Number.isSafeInteger(model.maxTokens) &&
-    typeof model.maxTokens === 'number' &&
-    model.maxTokens > 0 &&
-    isPlainObject(cost) &&
-    typeof cost['input'] === 'number' &&
-    typeof cost['output'] === 'number' &&
-    typeof cost['cacheRead'] === 'number' &&
-    typeof cost['cacheWrite'] === 'number'
-  );
-}
+type HostForwardingModel = PiModelLike & HostModel<'anthropic-messages'>;
+type HostForwardingContext = PiStreamContext & HostContext;
+type HostForwardingOptions = PiSimpleStreamOptions & HostSimpleStreamOptions;
+type HostForwardingStream = AssistantMessageEventStreamLike & HostAssistantMessageEventStream;
 
-function isForwardingContent(content: unknown): boolean {
-  if (typeof content === 'string') return true;
-  if (!Array.isArray(content)) return false;
-  return content.every((block) => {
-    if (!isPlainObject(block)) return false;
-    if (block['type'] === 'text') return typeof block['text'] === 'string';
-    if (block['type'] === 'image')
-      return typeof block['mimeType'] === 'string' && typeof block['data'] === 'string';
-    if (block['type'] === 'thinking') return typeof block['thinking'] === 'string';
-    if (block['type'] === 'toolCall')
-      return (
-        typeof block['id'] === 'string' &&
-        typeof block['name'] === 'string' &&
-        isPlainObject(block['arguments'])
-      );
-    return false;
-  });
-}
-
-function isBuiltInForwardingMessage(message: unknown): boolean {
-  if (!isPlainObject(message) || typeof message['timestamp'] !== 'number') return false;
-  if (message['role'] === 'user') return isForwardingContent(message['content']);
-  if (message['role'] === 'assistant') {
-    return (
-      Array.isArray(message['content']) &&
-      isForwardingContent(message['content']) &&
-      typeof message['api'] === 'string' &&
-      typeof message['provider'] === 'string' &&
-      typeof message['model'] === 'string' &&
-      typeof message['stopReason'] === 'string' &&
-      isPlainObject(message['usage'])
-    );
-  }
-  if (message['role'] === 'toolResult') {
-    return (
-      typeof message['toolCallId'] === 'string' &&
-      typeof message['toolName'] === 'string' &&
-      typeof message['isError'] === 'boolean' &&
-      isForwardingContent(message['content'])
-    );
-  }
-  return false;
-}
-
-function isBuiltInForwardingContext(
-  context: PiStreamContext,
-): context is PiStreamContext & HostContext {
-  if (!Array.isArray(context.messages) || !context.messages.every(isBuiltInForwardingMessage))
-    return false;
-  if (context.tools === undefined) return true;
-  return (
-    Array.isArray(context.tools) &&
-    context.tools.every(
-      (tool) =>
-        typeof tool.name === 'string' &&
-        typeof tool.description === 'string' &&
-        isPlainObject(tool.parameters),
-    )
-  );
-}
-
-function builtInForwardingOptions(
-  options: PiSimpleStreamOptions | undefined,
-  originalModel: PiModelLike,
-): HostSimpleStreamOptions | undefined {
-  if (options === undefined) return undefined;
-  const { reasoning, env, onPayload, onResponse, ...rest } = options;
-  const normalizedEnv =
-    env === undefined
-      ? undefined
-      : Object.fromEntries(
-          Object.entries(env).filter((entry): entry is [string, string] =>
-            typeof entry[1] === 'string',
-          ),
-        );
-  const forwarded = {
-    ...rest,
-    ...(reasoning === undefined || reasoning === 'off' ? {} : { reasoning }),
-    ...(normalizedEnv === undefined ? {} : { env: normalizedEnv }),
-    ...(onPayload === undefined
-      ? {}
-      : {
-          onPayload: (payload: unknown, _forwardedModel: HostModel<HostApi>) => {
-            if (!isPlainObject(payload)) {
-              throw new Error('Built-in Anthropic adapter produced a non-object payload');
-            }
-            return onPayload(payload, originalModel);
-          },
-        }),
-    ...(onResponse === undefined
-      ? {}
-      : {
-          onResponse: (
-            response: { readonly status: number; readonly headers: Record<string, string> },
-            _forwardedModel: HostModel<HostApi>,
-          ) => onResponse(response, originalModel),
-        }),
-  } satisfies HostSimpleStreamOptions;
-  return forwarded;
-}
-
-function localForwardedContentBlock(
-  block: HostAssistantMessage['content'][number],
-): JsonObject {
-  if (block.type === 'text')
-    return {
-      type: 'text',
-      text: block.text,
-      ...(block.textSignature === undefined ? {} : { textSignature: block.textSignature }),
-    };
-  if (block.type === 'thinking')
-    return {
-      type: 'thinking',
-      thinking: block.thinking,
-      ...(block.thinkingSignature === undefined
-        ? {}
-        : { thinkingSignature: block.thinkingSignature }),
-      ...(block.redacted === undefined ? {} : { redacted: block.redacted }),
-    };
-  return {
-    type: 'toolCall',
-    id: block.id,
-    name: block.name,
-    arguments: block.arguments,
-    ...(block.thoughtSignature === undefined ? {} : { thoughtSignature: block.thoughtSignature }),
-  };
-}
-
-function localForwardedMessage(message: HostAssistantMessage): AssistantMessageLike {
-  return {
-    role: 'assistant',
-    content: message.content.map(localForwardedContentBlock),
-    api: message.api,
-    provider: message.provider,
-    model: message.model,
-    usage: {
-      input: message.usage.input,
-      output: message.usage.output,
-      cacheRead: message.usage.cacheRead,
-      cacheWrite: message.usage.cacheWrite,
-      ...(message.usage.cacheWrite1h === undefined
-        ? {}
-        : { cacheWrite1h: message.usage.cacheWrite1h }),
-      totalTokens: message.usage.totalTokens,
-      cost: { ...message.usage.cost },
-    },
-    stopReason: message.stopReason,
-    timestamp: message.timestamp,
-    ...(message.responseModel === undefined ? {} : { responseModel: message.responseModel }),
-    ...(message.responseId === undefined ? {} : { responseId: message.responseId }),
-    ...(message.diagnostics === undefined
-      ? {}
-      : { diagnostics: message.diagnostics.map((diagnostic) => ({ ...diagnostic })) }),
-    ...(message.deferred === undefined ? {} : { deferred: message.deferred }),
-    ...(message.errorMessage === undefined ? {} : { errorMessage: message.errorMessage }),
-    ...(message.rawStopReason === undefined ? {} : { rawStopReason: message.rawStopReason }),
-  };
-}
-
-function localForwardedEvent(event: HostAssistantMessageEvent): AssistantMessageEvent {
-  if (event.type === 'start') return { type: 'start', partial: localForwardedMessage(event.partial) };
-  if (event.type === 'text_start' || event.type === 'thinking_start' || event.type === 'toolcall_start')
-    return {
-      type: event.type,
-      contentIndex: event.contentIndex,
-      partial: localForwardedMessage(event.partial),
-    };
-  if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta')
-    return {
-      type: event.type,
-      contentIndex: event.contentIndex,
-      delta: event.delta,
-      partial: localForwardedMessage(event.partial),
-    };
-  if (event.type === 'text_end' || event.type === 'thinking_end')
-    return {
-      type: event.type,
-      contentIndex: event.contentIndex,
-      content: event.content,
-      partial: localForwardedMessage(event.partial),
-    };
-  if (event.type === 'toolcall_end')
-    return {
-      type: 'toolcall_end',
-      contentIndex: event.contentIndex,
-      toolCall: localForwardedContentBlock(event.toolCall),
-      partial: localForwardedMessage(event.partial),
-    };
-  if (event.type === 'done')
-    return {
-      type: 'done',
-      reason: event.reason,
-      message: localForwardedMessage(event.message),
-    };
-  return {
-    type: 'error',
-    reason: event.reason,
-    error: localForwardedMessage(event.error),
-  };
-}
-
-async function forwardToBuiltInAnthropic(
+function forwardToBuiltInAnthropic(
   model: PiModelLike,
   context: PiStreamContext,
   options: PiSimpleStreamOptions | undefined,
-  stream: AssistantMessageEventStreamLike,
-  output: AssistantMessageLike,
-): Promise<void> {
-  try {
-    if (!isBuiltInForwardingModel(model)) {
-      throw new Error('non-target anthropic-messages model is missing required host SDK fields');
-    }
-    if (!isBuiltInForwardingContext(context)) {
-      throw new Error('non-target anthropic-messages context is missing required host SDK fields');
-    }
-    const delegated = anthropicMessagesApi().streamSimple(
-      model,
-      context,
-      builtInForwardingOptions(options, model),
-    );
-    for await (const event of delegated) stream.push(localForwardedEvent(event));
-    stream.end(localForwardedMessage(await delegated.result()));
-  } catch (error) {
-    output.stopReason = 'error';
-    output.errorMessage = `Anthropic attribution could not delegate non-target provider ${JSON.stringify(model.provider)}: ${error instanceof Error ? error.message : String(error)}`;
-    stream.push({ type: 'error', reason: 'error', error: output });
-    stream.end();
-  }
+): AssistantMessageEventStreamLike {
+  // Pi aliases these SDK imports to its own version while loading extensions.
+  // The host therefore owns both its legacy Context or normalized TranscriptContext
+  // input and the complete stream/event/result shape. These intersections only mark
+  // that host-owned boundary; no request, callback, event, or result is reconstructed.
+  const delegated = anthropicMessagesApi().streamSimple(
+    model as HostForwardingModel,
+    context as HostForwardingContext,
+    options as HostForwardingOptions | undefined,
+  );
+  return delegated as HostForwardingStream;
 }
 
 export function streamAnthropicViaBetaMessages(
@@ -2902,14 +2699,12 @@ export function streamAnthropicViaBetaMessages(
   options?: PiSimpleStreamOptions,
   dependencies: AnthropicTransportDependencies = {},
 ): AssistantMessageEventStreamLike {
-  const stream = createAssistantMessageEventStream();
-  const output = createOutput(model);
-
   if (model.provider !== 'anthropic') {
-    void forwardToBuiltInAnthropic(model, context, options, stream, output);
-    return stream;
+    return forwardToBuiltInAnthropic(model, context, options);
   }
 
+  const stream = createAssistantMessageEventStream();
+  const output = createOutput(model);
   void (async () => {
     let preparedLineage: PreparedAnthropicLineage | undefined;
     try {
@@ -3075,7 +2870,7 @@ export function streamAnthropicViaBetaMessages(
               'Anthropic beta messages stream emitted malformed/duplicate message_start',
             );
           }
-          if (typeof event['message']['id'] !== 'string' || event['message']['id'].length === 0) {
+          if (!isNonEmptyString(event['message']['id'])) {
             throw new Error('Anthropic beta messages message_start is missing a response id');
           }
           sawMessageStart = true;
