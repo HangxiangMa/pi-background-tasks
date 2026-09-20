@@ -138,6 +138,10 @@ export interface BgTask extends Omit<BgTaskSnapshot, 'name'> {
   wrapperAbsPath?: string | undefined;
   attestationAbsPath?: string | undefined;
   child?: BackgroundTaskChildProcess | undefined;
+  /** Immutable in-memory ownership captured from a detached POSIX spawn; never restored from metadata. */
+  ownedPosixProcessGroupId?: number | undefined;
+  /** One-way latch preventing any later signal after group authority is released. */
+  posixProcessGroupSignalAuthorityReleased?: boolean | undefined;
   stream?: WriteStream | undefined;
   timeoutHandle?: NodeJS.Timeout | undefined;
   killKind?: KillKind | undefined;

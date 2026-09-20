@@ -175,6 +175,19 @@ type KillTreeFn = (
   signal?: AbortSignal,
 ) => Promise<TaskkillOutcome>;
 
+interface PosixProcessGroupKillState {
+  readonly groupId: number;
+  readonly completion: Promise<void>;
+  readonly resolveCompletion: () => void;
+  readonly deadlineAt: number;
+  forceAttempted: boolean;
+  settled: boolean;
+  failure?: Error | undefined;
+  lastProbeError?: Error | undefined;
+  verificationTimer?: NodeJS.Timeout | undefined;
+  failureListeners?: Array<(error: Error) => void> | undefined;
+}
+
 interface WindowsKillState {
   softController?: AbortController | undefined;
   softPromise?: Promise<void> | undefined;
@@ -803,6 +816,10 @@ export class BackgroundTaskRegistry {
   private readonly onChange: () => void;
   private readonly sendCompletionNotification: CompletionNotificationSender;
   private readonly publishTerminalSnapshot: (task: BgTaskSnapshot) => void;
+  private readonly posixProcessGroupKillStates = new WeakMap<
+    BgTask,
+    PosixProcessGroupKillState
+  >();
   private readonly windowsKillStates = new WeakMap<BgTask, WindowsKillState>();
   private readonly terminalPublicationAbandonSignals = new WeakMap<
     BgTask,
@@ -1098,6 +1115,21 @@ export class BackgroundTaskRegistry {
     };
   }
 
+  private captureSpawnedChild(task: BgTask, child: BackgroundTaskChildProcess): void {
+    task.child = child;
+    task.pid = child.pid;
+    if (
+      this.platform !== 'win32' &&
+      child.pid !== undefined &&
+      Number.isSafeInteger(child.pid) &&
+      child.pid > 0
+    ) {
+      // Capture detached-group ownership once, directly from this spawn. Never
+      // reconstruct signal authority from mutable task metadata or a later PID.
+      task.ownedPosixProcessGroupId = child.pid;
+    }
+  }
+
   private bindOwnedTaskToAdmission(task: BgTask, admission: TaskAdmission): () => void {
     const cancelOwnedTask = (): void => {
       this.stopOwnedTaskAfterAdmissionCancellation(task, this.taskAdmissionError(admission));
@@ -1266,9 +1298,7 @@ export class BackgroundTaskRegistry {
         windowsVerbatimArguments: invocation.windowsVerbatimArguments,
       });
 
-      task.child = child;
-      task.pid = child.pid;
-      unbindAdmissionCancellation = this.bindOwnedTaskToAdmission(task, admission);
+      this.captureSpawnedChild(task, child);
 
       child.stdout?.on('data', (data) => {
         this.appendChildOutput(task, data, 'stdout');
@@ -1323,6 +1353,7 @@ export class BackgroundTaskRegistry {
         }, timeoutSeconds * 1000);
       }
 
+      unbindAdmissionCancellation = this.bindOwnedTaskToAdmission(task, admission);
       await this.awaitTaskAdmissionBoundary(
         this.writeMetadata(task, admission.controller.signal),
         admission,
@@ -1651,21 +1682,7 @@ export class BackgroundTaskRegistry {
         env: request.env,
         windowsHide: true,
       });
-      task.child = child;
-      task.pid = child.pid;
-      unbindAdmissionCancellation = this.bindOwnedTaskToAdmission(task, admission);
-      writeDelegateStdin(child, request.stdinBytes, (error) => {
-        this.writeNotice(task, `\n[delegate stdin write failed: ${error.message}]\n`);
-        if (task.status === 'running') {
-          task.killKind = 'user';
-          task.error = `Delegate seed could not be delivered: ${error.message}`;
-          try {
-            this.requestKill(task, 'SIGTERM');
-          } catch {
-            void this.finalizeTask(task, 'failed', null, undefined, task.error);
-          }
-        }
-      });
+      this.captureSpawnedChild(task, child);
 
       child.stdout?.on('data', (data) => {
         this.appendChildOutput(task, data, 'stdout');
@@ -1713,6 +1730,21 @@ export class BackgroundTaskRegistry {
           }
         }, request.timeoutSeconds * 1000);
       }
+
+      unbindAdmissionCancellation = this.bindOwnedTaskToAdmission(task, admission);
+      this.assertTaskAdmissionOpen('a delegate task', admission);
+      writeDelegateStdin(child, request.stdinBytes, (error) => {
+        this.writeNotice(task, `\n[delegate stdin write failed: ${error.message}]\n`);
+        if (task.status === 'running') {
+          task.killKind = 'user';
+          task.error = `Delegate seed could not be delivered: ${error.message}`;
+          try {
+            this.requestKill(task, 'SIGTERM');
+          } catch {
+            void this.finalizeTask(task, 'failed', null, undefined, task.error);
+          }
+        }
+      });
 
       await this.awaitTaskAdmissionBoundary(
         this.writeMetadata(task, admission.controller.signal),
@@ -1899,9 +1931,7 @@ export class BackgroundTaskRegistry {
         this.platform,
         attestedPiLaunch,
       );
-      task.child = captured.child;
-      task.pid = captured.child.pid;
-      unbindAdmissionCancellation = this.bindOwnedTaskToAdmission(task, admission);
+      this.captureSpawnedChild(task, captured.child);
 
       captured.child.on('error', (error) => {
         void this.finalizeAttestedPiTask(
@@ -1956,6 +1986,7 @@ export class BackgroundTaskRegistry {
         );
       });
 
+      unbindAdmissionCancellation = this.bindOwnedTaskToAdmission(task, admission);
       await this.awaitTaskAdmissionBoundary(
         this.writeMetadata(task, admissionSignal),
         admission,
@@ -2044,16 +2075,21 @@ export class BackgroundTaskRegistry {
     if (task.finalized) return;
     task.finalized = true;
     if (task.timeoutHandle) clearTimeout(task.timeoutHandle);
-    if (task.killEscalationTimer !== undefined) {
-      clearTimeout(task.killEscalationTimer);
-      task.killEscalationTimer = undefined;
-    }
+    if (this.platform === 'win32') this.clearKillEscalationTimer(task);
     let finalStatus = status;
     let finalError = error;
-    const forceFailure = await this.awaitWindowsForceBeforeTerminal(task);
-    if (forceFailure !== undefined) {
+    const posixForceFailure = await this.awaitPosixProcessGroupBeforeTerminal(task);
+    if (posixForceFailure !== undefined) {
       finalStatus = 'failed';
-      finalError = BackgroundTaskRegistry.appendTaskError(finalError, forceFailure.message);
+      finalError = BackgroundTaskRegistry.appendTaskError(finalError, posixForceFailure.message);
+    }
+    const windowsForceFailure = await this.awaitWindowsForceBeforeTerminal(task);
+    if (windowsForceFailure !== undefined) {
+      finalStatus = 'failed';
+      finalError = BackgroundTaskRegistry.appendTaskError(
+        finalError,
+        windowsForceFailure.message,
+      );
     }
     task.exitCode = exitCode;
     task.signal = signal;
@@ -2162,16 +2198,34 @@ export class BackgroundTaskRegistry {
     if (task.status !== 'running') {
       throw new Error(`Task ${task.id} is ${task.status}, not running`);
     }
+    const stopWaitMs = task.managedStopWaitMs ?? this.stopWaitMs;
+    if (
+      this.platform !== 'win32' &&
+      task.managedCancel === undefined &&
+      task.posixProcessGroupSignalAuthorityReleased === true &&
+      this.posixProcessGroupKillStates.get(task) === undefined
+    ) {
+      const finalized = await this.waitForEnd(task, stopWaitMs);
+      if (!finalized) {
+        throw new Error(
+          `Task ${task.id} did not finish terminalization within ${formatDuration(stopWaitMs)} after its process group signal authority was released`,
+        );
+      }
+      return task;
+    }
     task.killKind = kind;
     if (reason) task.error = reason;
     this.requestKill(task, 'SIGTERM');
-    const stopWaitMs = task.managedStopWaitMs ?? this.stopWaitMs;
     const stopped =
-      this.platform === 'win32' && task.managedCancel === undefined
+      task.managedCancel === undefined && this.platform === 'win32'
         ? await this.waitForEndOrWindowsForceFailure(task, stopWaitMs)
-        : await this.waitForEnd(task, stopWaitMs);
-    const forceFailure = this.windowsKillStates.get(task)?.forceFailure;
-    if (forceFailure !== undefined) throw forceFailure;
+        : task.managedCancel === undefined
+          ? await this.waitForEndOrPosixForceFailure(task, stopWaitMs)
+          : await this.waitForEnd(task, stopWaitMs);
+    const posixForceFailure = this.posixProcessGroupKillStates.get(task)?.failure;
+    if (posixForceFailure !== undefined) throw posixForceFailure;
+    const windowsForceFailure = this.windowsKillStates.get(task)?.forceFailure;
+    if (windowsForceFailure !== undefined) throw windowsForceFailure;
     if (!stopped) {
       throw new Error(
         `Task ${task.id} did not exit within ${formatDuration(stopWaitMs)} after cancellation`,
@@ -2457,6 +2511,298 @@ export class BackgroundTaskRegistry {
     this.writeNotice(task, `${line}\n`);
   }
 
+  private beginPosixProcessGroupKill(
+    task: BgTask,
+    armGrace: boolean,
+  ): PosixProcessGroupKillState {
+    const existing = this.posixProcessGroupKillStates.get(task);
+    if (existing !== undefined) return existing;
+    if (task.posixProcessGroupSignalAuthorityReleased === true) {
+      throw new Error(`Task ${task.id} has released its POSIX process-group signal authority`);
+    }
+    const groupId = task.ownedPosixProcessGroupId;
+    if (groupId === undefined) {
+      throw new Error(`Task ${task.id} has no owned POSIX process group`);
+    }
+
+    let resolveCompletion = (): void => undefined;
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    // Finish ownership slightly before stopTask's waiter so a force/proof
+    // failure is observed as that specific loud error instead of a generic
+    // cancellation timeout.
+    const reserveMs = Math.min(25, Math.max(1, Math.floor(this.stopWaitMs / 4)));
+    const ownershipMs = Math.max(1, this.stopWaitMs - reserveMs);
+    const state: PosixProcessGroupKillState = {
+      groupId,
+      completion,
+      resolveCompletion,
+      deadlineAt: Date.now() + ownershipMs,
+      forceAttempted: false,
+      settled: false,
+    };
+    this.posixProcessGroupKillStates.set(task, state);
+
+    if (armGrace) {
+      // Publish the sole force owner before TERM. An injected signal can emit
+      // close reentrantly; that close must see and await this exact state.
+      task.killEscalationTimer = setTimeout(() => {
+        task.killEscalationTimer = undefined;
+        this.forceOwnedPosixProcessGroup(task, state);
+      }, Math.min(this.killGraceMs, ownershipMs));
+      // Unlike ordinary housekeeping timers, this owner stays referenced: a
+      // departed leader must not let the host exit and strand its owned group.
+    }
+    return state;
+  }
+
+  private finishPosixProcessGroupKill(
+    task: BgTask,
+    state: PosixProcessGroupKillState,
+    releaseOwnership: boolean,
+  ): void {
+    if (state.settled) return;
+    state.settled = true;
+    this.clearKillEscalationTimer(task);
+    if (state.verificationTimer !== undefined) {
+      clearTimeout(state.verificationTimer);
+      state.verificationTimer = undefined;
+    }
+    task.posixProcessGroupSignalAuthorityReleased = true;
+    if (releaseOwnership && task.ownedPosixProcessGroupId === state.groupId) {
+      delete task.ownedPosixProcessGroupId;
+    }
+    state.resolveCompletion();
+    const failure = state.failure;
+    const listeners = state.failureListeners;
+    if (listeners !== undefined) {
+      delete state.failureListeners;
+      if (failure !== undefined) {
+        for (const listener of listeners) listener(failure);
+      }
+    }
+  }
+
+  private observeOwnedPosixProcessGroupGone(
+    task: BgTask,
+    state: PosixProcessGroupKillState,
+  ): boolean {
+    if (state.settled) return state.failure === undefined;
+    try {
+      const exists = this.killProcess(-state.groupId, 0);
+      state.lastProbeError = exists
+        ? undefined
+        : new Error(`process-group probe for ${String(state.groupId)} returned false`);
+      return false;
+    } catch (error) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        Reflect.get(error, 'code') === 'ESRCH'
+      ) {
+        this.finishPosixProcessGroupKill(task, state, true);
+        return true;
+      }
+      state.lastProbeError =
+        error instanceof Error ? error : new Error(BackgroundTaskRegistry.errorMessage(error));
+      return false;
+    }
+  }
+
+  private recordPosixProcessGroupForceFailure(
+    task: BgTask,
+    state: PosixProcessGroupKillState,
+    error: Error,
+  ): void {
+    if (state.settled) return;
+    state.failure = error;
+    this.finishPosixProcessGroupKill(task, state, false);
+    task.error = BackgroundTaskRegistry.appendTaskError(task.error, error.message);
+    this.writeNotice(task, `\n[background task POSIX termination: ${error.message}]\n`);
+    this.onChange();
+    void this.writeMetadata(task).catch((metadataError: unknown) => {
+      this.logger.error(
+        `[background-tasks] failed to write POSIX process-group failure metadata for ${task.id}:`,
+        metadataError,
+      );
+    });
+  }
+
+  private schedulePosixProcessGroupVerification(
+    task: BgTask,
+    state: PosixProcessGroupKillState,
+  ): void {
+    if (state.settled) return;
+    const remainingMs = state.deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      const probeDetail =
+        state.lastProbeError === undefined
+          ? ''
+          : `; last group probe failed: ${state.lastProbeError.message}`;
+      this.recordPosixProcessGroupForceFailure(
+        task,
+        state,
+        new Error(
+          `POSIX process group ${String(state.groupId)} remained present after SIGKILL${probeDetail}. Descendant processes may have leaked.`,
+        ),
+      );
+      return;
+    }
+    state.verificationTimer = setTimeout(() => {
+      state.verificationTimer = undefined;
+      if (this.observeOwnedPosixProcessGroupGone(task, state)) return;
+      this.schedulePosixProcessGroupVerification(task, state);
+    }, Math.min(10, remainingMs));
+  }
+
+  private forceOwnedPosixProcessGroup(
+    task: BgTask,
+    state: PosixProcessGroupKillState,
+  ): void {
+    if (state.settled || state.forceAttempted) return;
+    // Latch before either probe or signal: both are injected boundaries that can
+    // reentrantly emit root close, and no continuation may launch a second KILL.
+    state.forceAttempted = true;
+    this.clearKillEscalationTimer(task);
+    if (this.observeOwnedPosixProcessGroupGone(task, state)) return;
+
+    try {
+      const forced = this.killProcess(-state.groupId, 'SIGKILL');
+      if (!forced) {
+        this.recordPosixProcessGroupForceFailure(
+          task,
+          state,
+          new Error(
+            `POSIX process-group SIGKILL returned false for task ${task.id} group ${String(state.groupId)}. Descendant processes may have leaked.`,
+          ),
+        );
+        return;
+      }
+    } catch (error) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        Reflect.get(error, 'code') === 'ESRCH'
+      ) {
+        this.finishPosixProcessGroupKill(task, state, true);
+        return;
+      }
+      this.recordPosixProcessGroupForceFailure(
+        task,
+        state,
+        new Error(
+          `POSIX process-group SIGKILL failed for task ${task.id} group ${String(state.groupId)}: ${BackgroundTaskRegistry.errorMessage(error)}. Descendant processes may have leaked.`,
+        ),
+      );
+      return;
+    }
+
+    if (this.observeOwnedPosixProcessGroupGone(task, state)) return;
+    this.schedulePosixProcessGroupVerification(task, state);
+  }
+
+  private requestPosixKill(task: BgTask, signal: NodeJS.Signals): void {
+    const state = this.beginPosixProcessGroupKill(task, signal !== 'SIGKILL');
+    if (signal === 'SIGKILL') {
+      task.killSignalSent = true;
+      this.forceOwnedPosixProcessGroup(task, state);
+      return;
+    }
+    if (task.killSignalSent) return;
+    // Publish de-duplication before the signal boundary for the same reason the
+    // state/timer is published above: close may be emitted synchronously.
+    task.killSignalSent = true;
+
+    const errors: string[] = [];
+    let killed = false;
+    try {
+      killed = this.killProcess(-state.groupId, signal);
+      if (!killed) errors.push(`process group ${signal} returned false`);
+    } catch (error) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        Reflect.get(error, 'code') === 'ESRCH'
+      ) {
+        this.finishPosixProcessGroupKill(task, state, true);
+      } else {
+        errors.push(
+          `process group kill failed: ${BackgroundTaskRegistry.errorMessage(error)}`,
+        );
+      }
+    }
+
+    if (!killed) {
+      try {
+        killed = task.child?.kill(signal) === true;
+        if (!killed) errors.push(`child ${signal} returned false`);
+      } catch (error) {
+        errors.push(`child kill failed: ${BackgroundTaskRegistry.errorMessage(error)}`);
+      }
+    }
+
+    if (!killed) {
+      // If TERM reached neither target, waiting out grace has no benefit. Keep
+      // the same owner but attempt its one force phase immediately.
+      if (!state.settled) this.forceOwnedPosixProcessGroup(task, state);
+      throw new Error(`Could not kill task ${task.id}: ${errors.join('; ')}`);
+    }
+  }
+
+  private async awaitPosixProcessGroupBeforeTerminal(
+    task: BgTask,
+  ): Promise<Error | undefined> {
+    if (this.platform === 'win32') return undefined;
+    const state = this.posixProcessGroupKillStates.get(task);
+    if (state === undefined) {
+      // No tree stop won the race before direct-child finalization. Release
+      // signal authority synchronously so a concurrent late stop waits for this
+      // terminalization instead of targeting a potentially reused group id.
+      task.posixProcessGroupSignalAuthorityReleased = true;
+      delete task.ownedPosixProcessGroupId;
+      return undefined;
+    }
+    this.observeOwnedPosixProcessGroupGone(task, state);
+    await state.completion;
+    return state.failure;
+  }
+
+  private waitForEndOrPosixForceFailure(task: BgTask, timeoutMs: number): Promise<boolean> {
+    const state = this.posixProcessGroupKillStates.get(task);
+    if (state === undefined) return this.waitForEnd(task, timeoutMs);
+    if (state.failure !== undefined) return Promise.reject(state.failure);
+    if (task.status !== 'running') return Promise.resolve(true);
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timeout);
+        const waiterIndex = task.waiters.indexOf(done);
+        if (waiterIndex >= 0) task.waiters.splice(waiterIndex, 1);
+        const listeners = state.failureListeners;
+        if (listeners !== undefined) {
+          const listenerIndex = listeners.indexOf(failed);
+          if (listenerIndex >= 0) listeners.splice(listenerIndex, 1);
+          if (listeners.length === 0) delete state.failureListeners;
+        }
+      };
+      const timeout = setTimeout(() => {
+        cleanup();
+        resolve(false);
+      }, timeoutMs);
+      const done = () => {
+        cleanup();
+        resolve(true);
+      };
+      const failed = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+      task.waiters.push(done);
+      if (state.failureListeners === undefined) state.failureListeners = [];
+      state.failureListeners.push(failed);
+    });
+  }
+
   private getWindowsKillState(task: BgTask): WindowsKillState {
     let state = this.windowsKillStates.get(task);
     if (state === undefined) {
@@ -2738,62 +3084,15 @@ export class BackgroundTaskRegistry {
     if (!task.child) {
       throw new Error(`Task ${task.id} has no child process handle`);
     }
-    if (!task.pid) {
-      throw new Error(`Task ${task.id} has no process id`);
-    }
     if (task.killSignalSent && signal === 'SIGTERM') return;
 
     if (this.platform === 'win32') {
+      if (!task.pid) throw new Error(`Task ${task.id} has no process id`);
       this.requestWindowsKill(task, task.pid, signal);
       return;
     }
 
-    const errors: string[] = [];
-    let killed = false;
-
-    try {
-      this.killProcess(-task.pid, signal);
-      killed = true;
-    } catch (error) {
-      errors.push(
-        `process group kill failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-
-    if (!killed) {
-      try {
-        task.child.kill(signal);
-        killed = true;
-      } catch (error) {
-        errors.push(`child kill failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-
-    if (!killed) {
-      throw new Error(`Could not kill task ${task.id}: ${errors.join('; ')}`);
-    }
-
-    task.killSignalSent = true;
-    // SIGKILL is the terminal escalation; it must never schedule a further one.
-    if (signal === 'SIGKILL') return;
-    // Only one escalation timer may be outstanding. Concurrent stop requests
-    // previously each scheduled their own, producing duplicate SIGKILLs.
-    if (task.killEscalationTimer !== undefined) return;
-    task.killEscalationTimer = setTimeout(() => {
-      task.killEscalationTimer = undefined;
-      if (task.status !== 'running') return;
-      try {
-        this.requestKill(task, 'SIGKILL');
-      } catch (error) {
-        task.error = `SIGKILL failed: ${error instanceof Error ? error.message : String(error)}`;
-        void this.writeMetadata(task).catch((metadataError: unknown) => {
-          this.logger.error(
-            `[background-tasks] failed to write metadata for ${task.id}:`,
-            metadataError,
-          );
-        });
-      }
-    }, this.killGraceMs).unref();
+    this.requestPosixKill(task, signal);
   }
 
   private waitForEnd(task: BgTask, timeoutMs: number): Promise<boolean> {
@@ -3128,16 +3427,21 @@ export class BackgroundTaskRegistry {
     if (task.finalized) return;
     task.finalized = true;
     if (task.timeoutHandle) clearTimeout(task.timeoutHandle);
-    if (task.killEscalationTimer !== undefined) {
-      clearTimeout(task.killEscalationTimer);
-      task.killEscalationTimer = undefined;
-    }
+    if (this.platform === 'win32') this.clearKillEscalationTimer(task);
     let finalStatus = status;
     let finalError = error;
-    const forceFailure = await this.awaitWindowsForceBeforeTerminal(task);
-    if (forceFailure !== undefined) {
+    const posixForceFailure = await this.awaitPosixProcessGroupBeforeTerminal(task);
+    if (posixForceFailure !== undefined) {
       finalStatus = 'failed';
-      finalError = BackgroundTaskRegistry.appendTaskError(finalError, forceFailure.message);
+      finalError = BackgroundTaskRegistry.appendTaskError(finalError, posixForceFailure.message);
+    }
+    const windowsForceFailure = await this.awaitWindowsForceBeforeTerminal(task);
+    if (windowsForceFailure !== undefined) {
+      finalStatus = 'failed';
+      finalError = BackgroundTaskRegistry.appendTaskError(
+        finalError,
+        windowsForceFailure.message,
+      );
     }
     task.exitCode = exitCode;
     task.signal = signal ?? null;

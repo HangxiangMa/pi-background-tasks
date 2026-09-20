@@ -151,12 +151,15 @@ async function createProtocolHarness(
   await mkdir(cwd, { recursive: true });
   const bus = new MemoryEventBus();
   const children: FakeChild[] = [];
+  const liveGroups = new Set<number>();
   let pid = 5100;
   let idSeq = 0;
   const errors: unknown[][] = [];
   let service: BackgroundTaskExtensionService | undefined;
   const spawn: BackgroundTaskSpawn = () => {
     const child = new FakeChild(++pid);
+    liveGroups.add(child.pid);
+    child.on('close', () => liveGroups.delete(child.pid));
     children.push(child);
     options.onSpawn?.(child);
     return child;
@@ -175,7 +178,14 @@ async function createProtocolHarness(
   // tests/windows/windows-integration.test.ts (grandchild tree teardown) and
   // by the injected killTree cases in tests/unit/registry.test.ts.
   const killProcess = (pid: number, signal?: NodeJS.Signals | number): boolean => {
-    const target = children.find((child) => child.pid === Math.abs(pid));
+    const groupId = Math.abs(pid);
+    if (signal === 0) {
+      if (liveGroups.has(groupId)) return true;
+      throw Object.assign(new Error(`fake process group ${String(groupId)} is gone`), {
+        code: 'ESRCH',
+      });
+    }
+    const target = children.find((child) => child.pid === groupId);
     if (!target) throw new Error(`no fake child for pid ${String(pid)}`);
     target.kill(typeof signal === 'string' ? signal : 'SIGTERM');
     return true;

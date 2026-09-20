@@ -62,7 +62,7 @@ Telemetry is task-owned. It is parsed from task output/control lines when the ta
 
 A child closing with code `0` becomes `completed` unless killed/timeout/cap state overrides it. Nonzero exit becomes `failed` with `Exited with code ...`. User or shutdown kills become `killed`; timeout and output cap become `failed`.
 
-During finalization, the runtime flushes wrapped-agent output, ends and waits for the output stream to finish/close, writes terminal metadata through the durable metadata path, updates waiters, initiates terminal EventBus publication, sends the completion notification when enabled and not shutting down, persists notification state, then prunes old finished tasks. Actual EventBus emission may wait behind the run-response publication gate and therefore may occur after the completion notification; it still occurs only after stream close and terminal metadata. The registry calls a historically named `closeAndFsyncOutputStream()` helper, but its current implementation ends and observes the stream rather than issuing `fsync` for ordinary `.output`; durable terminal truth refers to the metadata-backed status, not a stronger crash-durability guarantee for every output byte.
+During finalization, the runtime flushes wrapped-agent output, ends and waits for the output stream to finish/close, writes terminal metadata through the durable metadata path, updates waiters, initiates terminal EventBus publication, sends the completion notification when enabled and not shutting down, persists notification state, then prunes old finished tasks. After a POSIX tree stop, finalization first waits for the originally owned detached group to be observed gone or records a loud failed result when force/proof fails; direct-child close alone cannot publish successful cleanup. Actual EventBus emission may wait behind the run-response publication gate and therefore may occur after the completion notification; it still occurs only after stream close and terminal metadata. The registry calls a historically named `closeAndFsyncOutputStream()` helper, but its current implementation ends and observes the stream rather than issuing `fsync` for ordinary `.output`; durable terminal truth refers to the metadata-backed status, not a stronger crash-durability guarantee for every output byte.
 
 Terminal EventBus publication has separate `pending`, `delivered`, and `abandoned` truth. The legacy internal `terminalPublished` latch means delivered only; abandonment never sets it. A genuine synchronous emitter failure is retried after 100 ms, up to three total emit attempts. Exhaustion abandons publication with bounded diagnostics. Since an earlier listener can receive before a later listener throws, retries are at-least-once and consumers deduplicate by task id.
 
@@ -78,9 +78,13 @@ Session shutdown atomically closes task admission and terminal publication befor
 
 POSIX stop path:
 
-1. send `SIGTERM` to the detached process group (`-pid`),
-2. if that fails, call the child handle's `kill`,
-3. after the grace window, send one `SIGKILL` escalation.
+1. use the immutable process-group id captured directly from the detached spawn (never a restored metadata PID), and publish one shared grace/force owner before signaling,
+2. send `SIGTERM` to that process group (`-pid`), falling back to the child handle's `kill` when the group signal fails,
+3. if the direct child closes, probe the still-owned group; only `ESRCH` disarms escalation,
+4. after the grace window, probe and send at most one group `SIGKILL`, then perform bounded signal-0 probes until `ESRCH`,
+5. on force failure or inability to prove the group gone within the stop window, report `failed` with `Descendant processes may have leaked` rather than claim a successful kill.
+
+The POSIX grace/proof owner remains referenced after leader close, is shared by concurrent stop requests, and is permanently disarmed once group absence is observed so it cannot later signal a reused group id. This proves process-group disappearance for the ordinary local case; it does not claim that Node reaps grandchildren or that signals can cure a kernel-uninterruptible process. Such a limit is surfaced as a bounded cleanup failure.
 
 Windows stop path:
 

@@ -7,7 +7,11 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { parseJsonText, type StartDelegateTaskOptions } from '../../src/core/common.js';
+import {
+  parseJsonText,
+  shellQuote,
+  type StartDelegateTaskOptions,
+} from '../../src/core/common.js';
 import {
   BackgroundTaskRegistry,
   WIN32_CMD_PI_TELEMETRY_UNAVAILABLE_REASON,
@@ -327,6 +331,17 @@ function pidExists(pid: number): boolean {
       Reflect.get(error, 'code') === 'ESRCH'
     );
   }
+}
+
+function pgidFor(pid: number): number | undefined {
+  const result = spawnSync('/bin/ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' });
+  if (result.status !== 0) return undefined;
+  const pgid = Number(result.stdout.trim());
+  return Number.isSafeInteger(pgid) && pgid > 0 ? pgid : undefined;
+}
+
+function errnoError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
 }
 
 async function waitForPidExit(pid: number, label: string, timeoutMs = 1000): Promise<void> {
@@ -949,8 +964,516 @@ setInterval(() => {}, 1000);
     }
   });
 
+  void it(
+    'retains an admission-owned POSIX group after leader close until its TERM-ignoring descendant is forced',
+    { timeout: 5000 },
+    async () => {
+      if (process.platform === 'win32') return;
+      const root = await mkdtemp(join(tmpdir(), 'pi-bg-inserted-tree-'));
+      const cwd = join(root, 'project');
+      const script = join(root, 'leader.mjs');
+      const descendantScript = join(root, 'descendant.mjs');
+      const rootPidPath = join(root, 'leader.pid');
+      const descendantPidPath = join(root, 'descendant.pid');
+      await mkdir(cwd, { recursive: true });
+      await writeFile(
+        descendantScript,
+        [
+          `import { writeFileSync } from 'node:fs';`,
+          `process.on('SIGTERM', () => undefined);`,
+          `writeFileSync(process.env.PI_BG_TREE_DESCENDANT_PID, String(process.pid));`,
+          `setInterval(() => {}, 1000);`,
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      await writeFile(
+        script,
+        [
+          `import { spawn } from 'node:child_process';`,
+          `import { writeFileSync } from 'node:fs';`,
+          `process.on('SIGTERM', () => process.exit(0));`,
+          `writeFileSync(process.env.PI_BG_TREE_ROOT_PID, String(process.pid));`,
+          `spawn(process.execPath, [process.env.PI_BG_TREE_DESCENDANT_SCRIPT], { stdio: 'ignore' });`,
+          `setInterval(() => {}, 1000);`,
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const enteredMetadata = deferred<void>();
+      const releaseMetadata = deferred<void>();
+      const terminalSnapshots: BgTaskSnapshot[] = [];
+      const notifications: CompletionNotificationMessage[] = [];
+      const killCalls: Array<{ pid: number; signal?: NodeJS.Signals | number }> = [];
+      const registry = new BackgroundTaskRegistry({
+        killGraceMs: 250,
+        stopWaitMs: 800,
+        env: {
+          ...process.env,
+          PI_BG_TREE_ROOT_PID: rootPidPath,
+          PI_BG_TREE_DESCENDANT_PID: descendantPidPath,
+          PI_BG_TREE_DESCENDANT_SCRIPT: descendantScript,
+        },
+        killProcess: (pid, signal) => {
+          const call: { pid: number; signal?: NodeJS.Signals | number } = { pid };
+          if (signal !== undefined) call.signal = signal;
+          killCalls.push(call);
+          return process.kill(pid, signal);
+        },
+        publishTerminal: (task) => terminalSnapshots.push(task),
+        sendCompletionNotification: (message) => notifications.push(message),
+      });
+      const ctx: BackgroundTaskContext = {
+        cwd,
+        sessionId: 'inserted-process-tree',
+        modelRegistry: { getAll: () => [] },
+        model: undefined,
+      };
+      const originalWriteMetadata = Reflect.get(registry, 'writeMetadata');
+      assert.equal(typeof originalWriteMetadata, 'function');
+      let metadataCalls = 0;
+      Reflect.set(
+        registry,
+        'writeMetadata',
+        async function (this: BackgroundTaskRegistry, task: BgTask, signal?: AbortSignal) {
+          metadataCalls += 1;
+          if (metadataCalls === 1) {
+            enteredMetadata.resolve(undefined);
+            await releaseMetadata.promise;
+          }
+          return Reflect.apply(originalWriteMetadata, this, [task, signal]);
+        },
+      );
+
+      let start: Promise<BgTask> | undefined;
+      let rootPid: number | undefined;
+      let descendantPid: number | undefined;
+      let assertionsComplete = false;
+      try {
+        start = registry.startTask(
+          ctx,
+          `exec ${shellQuote(process.execPath)} ${shellQuote(script)}`,
+          { name: 'inserted process tree', notifyOnCompletion: true },
+        );
+        await enteredMetadata.promise;
+        await waitFor(
+          () => existsSync(rootPidPath) && existsSync(descendantPidPath),
+          'leader and descendant pid files',
+          1500,
+        );
+        rootPid = Number((await readFile(rootPidPath, 'utf8')).trim());
+        descendantPid = Number((await readFile(descendantPidPath, 'utf8')).trim());
+        assert.ok(Number.isSafeInteger(rootPid) && rootPid > 0);
+        assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
+        assert.equal(pgidFor(descendantPid), rootPid, 'descendant must remain in the owned group');
+
+        registry.setShuttingDown(true);
+        const drain = registry.waitForTaskAdmissions();
+        await waitForPidExit(rootPid, 'inserted task leader', 750);
+        const task = registry.allTasks()[0];
+        assert.ok(task, 'inserted task must remain registry-owned');
+        assert.equal(pidExists(descendantPid), true, 'fixture descendant must survive group TERM');
+        assert.equal(task.status, 'running', 'leader close cannot publish terminal tree cleanup');
+        assert.ok(task.killEscalationTimer, 'leader close must retain the force owner');
+        assert.equal(terminalSnapshots.length, 0);
+        assert.equal(notifications.length, 0);
+
+        releaseMetadata.resolve(undefined);
+        const startResult = await start.then(
+          () => 'fulfilled' as const,
+          () => 'rejected' as const,
+        );
+        assert.equal(startResult, 'rejected');
+        await drain;
+        const stopResult = await registry.stopAllRunning(
+          'shutdown',
+          'Killed during inserted process-tree regression',
+        );
+        assert.deepEqual(stopResult, { stopped: 1, failures: [] });
+        await waitForPidExit(descendantPid, 'inserted task descendant', 750);
+        assert.equal(pidExists(rootPid), false);
+        assert.equal(pidExists(descendantPid), false);
+        assert.equal(task.status, 'killed');
+        assert.equal(task.killEscalationTimer, undefined, 'tree owner must disarm after ESRCH');
+        assert.equal(
+          killCalls.filter((call) => call.signal === 'SIGKILL').length,
+          1,
+          'the owned process group must receive exactly one force signal',
+        );
+        assert.equal(terminalSnapshots.length, 0, 'shutdown publication remains suppressed');
+        assert.equal(notifications.length, 0, 'shutdown notification remains suppressed');
+        assertionsComplete = true;
+      } finally {
+        releaseMetadata.resolve(undefined);
+        Reflect.set(registry, 'writeMetadata', originalWriteMetadata);
+        registry.setShuttingDown(true);
+        if (start !== undefined) await start.catch(() => undefined);
+        // Rescue is failure-only: a green regression receives no test-originated signal.
+        if (!assertionsComplete && rootPid !== undefined) {
+          try {
+            process.kill(-rootPid, 'SIGKILL');
+          } catch {
+            // The owned process group may already be gone.
+          }
+        }
+        if (!assertionsComplete && descendantPid !== undefined && pidExists(descendantPid)) {
+          try {
+            process.kill(descendantPid, 'SIGKILL');
+          } catch {
+            // Already gone.
+          }
+        }
+        if (descendantPid !== undefined && pidExists(descendantPid)) {
+          await waitForPidExit(descendantPid, 'failure-only rescued descendant', 1500);
+        }
+        const cleanupTask = registry.allTasks()[0];
+        if (cleanupTask?.status === 'running') {
+          await registry
+            .stopAllRunning('shutdown', 'Failure-only process-tree test cleanup')
+            .catch(() => undefined);
+        }
+        if (cleanupTask !== undefined) {
+          await waitFor(() => cleanupTask.status !== 'running', 'process-tree test finalization');
+          await cleanupTask.metadataWriteChain?.catch(() => undefined);
+        }
+        await cleanup(root);
+      }
+    },
+  );
+
+  void it('publishes POSIX ownership and close listeners before an already-aborted admission can kill', async () => {
+    let childRef: FakeChild | undefined;
+    let groupAlive = true;
+    const signals: Array<NodeJS.Signals | number | undefined> = [];
+    const h = await createHarness({
+      platform: 'linux',
+      killGraceMs: 20,
+      stopWaitMs: 250,
+      killProcess: (_pid, signal) => {
+        signals.push(signal);
+        if (signal === 0) {
+          if (groupAlive) return true;
+          throw errnoError('ESRCH', 'owned group is gone');
+        }
+        if (signal === 'SIGTERM') {
+          groupAlive = false;
+          childRef?.close(null, 'SIGTERM');
+        }
+        return true;
+      },
+      childFactory: (pid) => {
+        childRef = new FakeChild(pid);
+        return childRef;
+      },
+    });
+    const originalSpawn = Reflect.get(h.registry, 'spawn');
+    assert.equal(typeof originalSpawn, 'function');
+    Reflect.set(
+      h.registry,
+      'spawn',
+      (command: string, args: string[], options: Parameters<BackgroundTaskSpawn>[2]) => {
+        const child = Reflect.apply(originalSpawn, h.registry, [command, args, options]);
+        h.registry.setShuttingDown(true);
+        return child;
+      },
+    );
+    try {
+      await assert.rejects(
+        h.registry.startTask(h.ctx, 'node reentrant-admission-close.js', {
+          name: 'Reentrant admission close',
+          notifyOnCompletion: false,
+        }),
+        /admission|closed/i,
+      );
+      await h.registry.waitForTaskAdmissions();
+      const task = h.registry.allTasks()[0];
+      assert.ok(task, 'spawned task must remain registry-owned');
+      await waitFor(() => task.status === 'killed', 'reentrant admission close finalization');
+      assert.equal(signals.filter((signal) => signal === 'SIGTERM').length, 1);
+      assert.equal(signals.filter((signal) => signal === 'SIGKILL').length, 0);
+      assert.ok(signals.some((signal) => signal === 0));
+      assert.equal(task.killEscalationTimer, undefined);
+    } finally {
+      groupAlive = false;
+      Reflect.set(h.registry, 'spawn', originalSpawn);
+      await cleanup(h.root);
+    }
+  });
+
+  void it('holds ordinary POSIX terminal delivery through root-close-before-grace and shares one force', async () => {
+    let childRef: FakeChild | undefined;
+    let groupAlive = true;
+    const signals: Array<NodeJS.Signals | number | undefined> = [];
+    const terminals: BgTaskSnapshot[] = [];
+    const h = await createHarness({
+      platform: 'linux',
+      killGraceMs: 25,
+      stopWaitMs: 300,
+      publishTerminal: (task) => terminals.push(task),
+      killProcess: (_pid, signal) => {
+        signals.push(signal);
+        if (signal === 0) {
+          if (groupAlive) return true;
+          throw errnoError('ESRCH', 'owned group is gone');
+        }
+        if (signal === 'SIGTERM') {
+          childRef?.close(null, 'SIGTERM');
+          return true;
+        }
+        if (signal === 'SIGKILL') {
+          groupAlive = false;
+          return true;
+        }
+        return true;
+      },
+      childFactory: (pid) => {
+        childRef = new FakeChild(pid);
+        return childRef;
+      },
+    });
+    try {
+      const { task } = await startFakeTask(h, 'POSIX Root Close Barrier');
+      const stops = [
+        h.registry.stopTask(task, 'user'),
+        h.registry.stopTask(task, 'user'),
+        h.registry.stopTask(task, 'user'),
+      ];
+      assert.equal(task.status, 'running');
+      assert.equal(terminals.length, 0, 'direct close must not publish before group force');
+      await Promise.all(stops);
+      assert.equal(signals.filter((signal) => signal === 'SIGTERM').length, 1);
+      assert.equal(signals.filter((signal) => signal === 'SIGKILL').length, 1);
+      assert.ok(signals.some((signal) => signal === 0), 'group disappearance must be observed');
+      assert.equal(task.status, 'killed');
+      assert.equal(task.killEscalationTimer, undefined);
+      assert.equal(terminals.length, 1);
+      assert.equal(terminals[0]?.status, 'killed');
+      assert.equal(h.notifications.length, 1);
+    } finally {
+      groupAlive = false;
+      await cleanup(h.root);
+    }
+  });
+
+  void it('does not signal a released POSIX group during natural-close terminalization', async () => {
+    let signalCalls = 0;
+    const h = await createHarness({
+      platform: 'linux',
+      stopWaitMs: 250,
+      killProcess: () => {
+        signalCalls += 1;
+        throw new Error('released group must not be signaled');
+      },
+    });
+    try {
+      const { task, child } = await startFakeTask(h, 'POSIX Natural Close Race');
+      child.close(0, null);
+      const stopped = await h.registry.stopTask(task, 'shutdown');
+      assert.equal(stopped, task);
+      assert.equal(task.status, 'completed');
+      assert.equal(signalCalls, 0);
+      assert.equal(task.ownedPosixProcessGroupId, undefined);
+      assert.equal(task.posixProcessGroupSignalAuthorityReleased, true);
+    } finally {
+      await cleanup(h.root);
+    }
+  });
+
+  void it('disarms an already-gone POSIX group without a stale escalation or force signal', async () => {
+    let childRef: FakeChild | undefined;
+    let groupAlive = true;
+    const signals: Array<NodeJS.Signals | number | undefined> = [];
+    const h = await createHarness({
+      platform: 'linux',
+      killGraceMs: 25,
+      stopWaitMs: 300,
+      killProcess: (_pid, signal) => {
+        signals.push(signal);
+        if (signal === 0) {
+          if (groupAlive) return true;
+          throw errnoError('ESRCH', 'owned group is gone');
+        }
+        if (signal === 'SIGTERM') {
+          groupAlive = false;
+          childRef?.close(null, 'SIGTERM');
+        }
+        return true;
+      },
+      childFactory: (pid) => {
+        childRef = new FakeChild(pid);
+        return childRef;
+      },
+    });
+    try {
+      const { task } = await startFakeTask(h, 'POSIX Already Gone');
+      await h.registry.stopTask(task, 'user');
+      assert.equal(signals.filter((signal) => signal === 'SIGKILL').length, 0);
+      assert.ok(signals.some((signal) => signal === 0));
+      assert.equal(task.status, 'killed');
+      assert.equal(task.killEscalationTimer, undefined);
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      assert.equal(signals.filter((signal) => signal === 'SIGKILL').length, 0);
+    } finally {
+      groupAlive = false;
+      await cleanup(h.root);
+    }
+  });
+
+  void it('turns POSIX group force failure into loud failed terminal truth', async () => {
+    let childRef: FakeChild | undefined;
+    let groupAlive = true;
+    const terminals: BgTaskSnapshot[] = [];
+    const h = await createHarness({
+      platform: 'linux',
+      killGraceMs: 20,
+      stopWaitMs: 250,
+      publishTerminal: (task) => terminals.push(task),
+      killProcess: (_pid, signal) => {
+        if (signal === 0) return groupAlive;
+        if (signal === 'SIGTERM') {
+          childRef?.close(null, 'SIGTERM');
+          return true;
+        }
+        if (signal === 'SIGKILL') throw errnoError('EACCES', 'force denied');
+        return true;
+      },
+      childFactory: (pid) => {
+        childRef = new FakeChild(pid);
+        return childRef;
+      },
+    });
+    try {
+      const { task } = await startFakeTask(h, 'POSIX Force Failure');
+      await assert.rejects(
+        h.registry.stopTask(task, 'user'),
+        /SIGKILL[\s\S]*force denied[\s\S]*Descendant processes may have leaked/i,
+      );
+      await waitFor(() => task.status === 'failed', 'loud POSIX force-failure finalization');
+      assert.match(task.error ?? '', /Descendant processes may have leaked/i);
+      assert.equal(task.killEscalationTimer, undefined);
+      assert.equal(terminals.length, 1);
+      assert.equal(terminals[0]?.status, 'failed');
+    } finally {
+      groupAlive = false;
+      await cleanup(h.root);
+    }
+  });
+
+  void it('applies the POSIX group barrier to direct delegate finalization', async () => {
+    let childRef: FakeChild | undefined;
+    let groupAlive = true;
+    const signals: Array<NodeJS.Signals | number | undefined> = [];
+    const h = await createHarness({
+      platform: 'linux',
+      killGraceMs: 20,
+      stopWaitMs: 250,
+      killProcess: (_pid, signal) => {
+        signals.push(signal);
+        if (signal === 0) {
+          if (groupAlive) return true;
+          throw errnoError('ESRCH', 'owned group is gone');
+        }
+        if (signal === 'SIGTERM') {
+          childRef?.close(null, 'SIGTERM');
+          return true;
+        }
+        if (signal === 'SIGKILL') {
+          groupAlive = false;
+          return true;
+        }
+        return true;
+      },
+      childFactory: (pid) => {
+        childRef = Object.assign(new FakeChild(pid), {
+          stdin: {
+            once: () => undefined,
+            write: (_data: Buffer, callback: (error?: Error | null) => void) => {
+              callback();
+              return true;
+            },
+            end: () => undefined,
+          },
+        });
+        return childRef;
+      },
+    });
+    try {
+      const request: StartDelegateTaskOptions = Object.assign(Object.create(null), {
+        name: 'delegate process-tree barrier',
+        argv: [],
+        stdinBytes: Buffer.from('seed', 'utf8'),
+        env: {},
+        facts: {
+          taskId: 'delegate-process-tree-barrier',
+          route: { qualifiedId: 'test/delegate-model' },
+        },
+        notifyOnCompletion: false,
+        triggerOnCompletion: false,
+      });
+      const task = await h.registry.startDelegateTask(h.ctx, request);
+      await h.registry.stopTask(task, 'user');
+      assert.equal(signals.filter((signal) => signal === 'SIGKILL').length, 1);
+      assert.equal(task.status, 'killed');
+      assert.equal(task.killEscalationTimer, undefined);
+    } finally {
+      groupAlive = false;
+      await cleanup(h.root);
+    }
+  });
+
+  void it('applies the POSIX group barrier to direct attested finalization', async () => {
+    let childRef: FakeChild | undefined;
+    let groupAlive = true;
+    const signals: Array<NodeJS.Signals | number | undefined> = [];
+    const h = await createHarness({
+      platform: 'linux',
+      modelRegistry: oauthRegistry(),
+      killGraceMs: 20,
+      stopWaitMs: 300,
+      killProcess: (_pid, signal) => {
+        signals.push(signal);
+        if (signal === 0) {
+          if (groupAlive) return true;
+          throw errnoError('ESRCH', 'owned group is gone');
+        }
+        if (signal === 'SIGTERM') {
+          childRef?.close(null, 'SIGTERM');
+          return true;
+        }
+        if (signal === 'SIGKILL') {
+          groupAlive = false;
+          return true;
+        }
+        return true;
+      },
+      childFactory: (pid) => {
+        childRef = new FakeChild(pid);
+        return childRef;
+      },
+    });
+    try {
+      await initCleanGit(h.cwd);
+      const task = await h.registry.startAttestedPiTask(h.ctx, {
+        name: 'attested process-tree barrier',
+        provider: 'openai-codex',
+        model: 'gpt-5.5',
+        prompt: 'write report.md',
+        reportPath: 'report.md',
+      });
+      await h.registry.stopTask(task, 'user');
+      assert.equal(signals.filter((signal) => signal === 'SIGKILL').length, 1);
+      assert.equal(task.status, 'killed');
+      assert.equal(task.killEscalationTimer, undefined);
+    } finally {
+      groupAlive = false;
+      await cleanup(h.root);
+    }
+  });
+
   void it('uses POSIX process-group kill before child fallback', async () => {
     let childRef: FakeChild | undefined;
+    let groupAlive = true;
     const killCalls: Array<{ pid: number; signal?: NodeJS.Signals | number }> = [];
     const h = await createHarness({
       platform: 'darwin',
@@ -958,9 +1481,14 @@ setInterval(() => {}, 1000);
         const call: { pid: number; signal?: NodeJS.Signals | number } = { pid };
         if (signal !== undefined) call.signal = signal;
         killCalls.push(call);
-        queueMicrotask(() => {
-          childRef?.close(null, typeof signal === 'string' ? signal : null);
-        });
+        if (signal === 0) {
+          if (groupAlive) return true;
+          throw errnoError('ESRCH', 'owned group is gone');
+        }
+        if (signal === 'SIGTERM') {
+          groupAlive = false;
+          queueMicrotask(() => childRef?.close(null, signal));
+        }
         return true;
       },
       childFactory: (pid) => {
@@ -970,11 +1498,16 @@ setInterval(() => {}, 1000);
     });
     try {
       const { task, child } = await startFakeTask(h);
+      task.pid = child.pid + 99_999;
       await h.registry.stopTask(task, 'user');
-      assert.deepEqual(killCalls, [{ pid: -child.pid, signal: 'SIGTERM' }]);
+      assert.equal(killCalls[0]?.pid, -child.pid, 'signals must use spawn-captured ownership');
+      assert.equal(killCalls[0]?.signal, 'SIGTERM');
+      assert.equal(killCalls.filter((call) => call.signal === 'SIGKILL').length, 0);
+      assert.ok(killCalls.some((call) => call.signal === 0));
       assert.deepEqual(child.killCalls, []);
       assert.equal(task.status, 'killed');
     } finally {
+      groupAlive = false;
       await cleanup(h.root);
     }
   });
@@ -983,7 +1516,7 @@ setInterval(() => {}, 1000);
     const h = await createHarness({
       platform: 'linux',
       killProcess: () => {
-        throw new Error('group unavailable');
+        throw errnoError('ESRCH', 'group already gone');
       },
       childFactory: (pid) =>
         new FakeChild(pid, function (this: FakeChild, signal) {
@@ -1005,7 +1538,7 @@ setInterval(() => {}, 1000);
     const failing = await createHarness({
       platform: 'linux',
       killProcess: () => {
-        throw new Error('group unavailable');
+        throw errnoError('ESRCH', 'group already gone');
       },
       childFactory: (pid) =>
         new FakeChild(pid, () => {
@@ -1016,7 +1549,7 @@ setInterval(() => {}, 1000);
       const { task } = await startFakeTask(failing, 'Failed Kill');
       await assert.rejects(
         () => failing.registry.stopTask(task, 'user'),
-        /Could not kill task[\s\S]*group unavailable[\s\S]*child unavailable/,
+        /Could not kill task[\s\S]*child unavailable/,
       );
       assert.equal(task.status, 'running');
     } finally {
@@ -1282,6 +1815,7 @@ setInterval(() => {}, 1000);
 
   void it('keeps duplicate stop requests idempotent and escalates to SIGKILL after grace', async () => {
     let childRef: FakeChild | undefined;
+    let groupAlive = true;
     const killCalls: Array<NodeJS.Signals | number | undefined> = [];
     const h = await createHarness({
       platform: 'linux',
@@ -1289,7 +1823,12 @@ setInterval(() => {}, 1000);
       stopWaitMs: 500,
       killProcess: (_pid, signal) => {
         killCalls.push(signal);
+        if (signal === 0) {
+          if (groupAlive) return true;
+          throw errnoError('ESRCH', 'owned group is gone');
+        }
         if (signal === 'SIGKILL') {
+          groupAlive = false;
           queueMicrotask(() => {
             childRef?.close(null, 'SIGKILL');
           });
@@ -1306,10 +1845,14 @@ setInterval(() => {}, 1000);
       const first = h.registry.stopTask(task, 'user');
       const second = h.registry.stopTask(task, 'user');
       await Promise.all([first, second]);
-      assert.deepEqual(killCalls, ['SIGTERM', 'SIGKILL']);
+      assert.deepEqual(
+        killCalls.filter((signal) => signal !== 0),
+        ['SIGTERM', 'SIGKILL'],
+      );
       assert.equal(task.status, 'killed');
       assert.equal(task.killEscalationTimer, undefined, 'escalation timer must be cleared');
     } finally {
+      groupAlive = false;
       await cleanup(h.root);
     }
   });
@@ -1318,14 +1861,20 @@ setInterval(() => {}, 1000);
     // Regression: SIGTERM de-duplication guarded the signal but not the timer,
     // so each concurrent stopTask scheduled its own escalation. When the child
     // outlived the grace window that produced duplicate SIGKILLs.
+    let groupAlive = true;
     const killCalls: Array<NodeJS.Signals | number | undefined> = [];
     const h = await createHarness({
       platform: 'linux',
       killGraceMs: 20,
       stopWaitMs: 120,
-      // Never close the child, so every scheduled escalation timer can fire.
+      // Never close the child, so stop waiters time out after the sole force.
       killProcess: (_pid, signal) => {
         killCalls.push(signal);
+        if (signal === 0) {
+          if (groupAlive) return true;
+          throw errnoError('ESRCH', 'owned group is gone');
+        }
+        if (signal === 'SIGKILL') groupAlive = false;
         return true;
       },
       childFactory: (pid) => new FakeChild(pid),
@@ -1339,19 +1888,33 @@ setInterval(() => {}, 1000);
       ]);
       await new Promise((resolve) => setTimeout(resolve, 120));
       assert.deepEqual(
-        killCalls,
+        killCalls.filter((signal) => signal !== 0),
         ['SIGTERM', 'SIGKILL'],
         'concurrent stop requests must escalate to SIGKILL exactly once',
       );
     } finally {
+      groupAlive = false;
       await cleanup(h.root);
     }
   });
 
   void it('finalizes and notifies once under error/close and output-cap races', async () => {
+    const liveGroups = new Set<number>();
     const h = await createHarness({
       maxOutputBytes: 8,
-      killProcess: () => true,
+      killProcess: (pid, signal) => {
+        const groupId = Math.abs(pid);
+        if (signal === 0) {
+          if (liveGroups.has(groupId)) return true;
+          throw errnoError('ESRCH', 'owned group is gone');
+        }
+        liveGroups.delete(groupId);
+        return true;
+      },
+      childFactory: (pid) => {
+        liveGroups.add(pid);
+        return new FakeChild(pid);
+      },
     });
     try {
       const { task, child } = await startFakeTask(h, 'Race Failure');
