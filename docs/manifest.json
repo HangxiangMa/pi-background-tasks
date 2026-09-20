@@ -1,7 +1,7 @@
 {
   "attestation_state": [
     {
-      "authored_body_sha256": "sha256:078476916ca5c7e505c6c5b825dc70f34ac7b1b13252c4d4cf76fa02a3a26d59",
+      "authored_body_sha256": "sha256:d71aace12a6d092e963a2d99915f94d45c34c4f93e3ce936837dc6182dc1d6d3",
       "covers_sources": [
         "src/core/extension-api.ts"
       ],
@@ -49,7 +49,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:c0fa757f3af57aefbc48737fb2bec43ebcf9321e5eb3d23d743c8ac59390d348",
+      "authored_body_sha256": "sha256:2d05c5c7b510ef46489113efc08158e2dee1eb3c5883456c4ddf23fdc57f87c2",
       "covers_sources": [
         "src/core/common.ts",
         "src/core/registry.ts",

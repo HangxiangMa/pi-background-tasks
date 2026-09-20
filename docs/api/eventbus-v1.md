@@ -142,7 +142,7 @@ Shutdown, service disposal, a rejected publication gate, retry exhaustion, reten
 
 A valid opted reload handoff removes the survivor before old publication closure, clears only old physical gate/retry handles, and retains its logical state plus cumulative attempt count. Completion in the gap queues for the fresh service. The three-attempt cap and typed closed-service handling do not reset across reload; physical delivery remains at-least-once and consumers still deduplicate by task id.
 
-If a synchronous terminal listener calls `close()` while emission is on the stack, queued publication work is disposed but that emission settles only when the emitter returns or throws. A normal return is delivered without an abandonment diagnostic; a throw is abandoned once with truthful diagnostics. Closure never records both outcomes.
+If a synchronous terminal listener calls `close()` while emission is on the stack, queued publication work is disposed but that emission settles only when the emitter returns or throws. A normal return is delivered without an abandonment diagnostic; a non-handoff throw is abandoned once with truthful diagnostics. If the listener synchronously transferred reload ownership before throwing, the old publisher first observes that its exact task/lease binding is gone, leaves publication pending with the attempt consumed, and schedules no old retry; the fresh activation resumes at the next cumulative attempt. Closure never records both outcomes.
 
 ## Operations
 

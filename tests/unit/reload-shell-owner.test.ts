@@ -251,6 +251,98 @@ void describe('same-process reload shell owner', { concurrency: false }, () => {
     assert.equal(inspectReloadShellOwnerForTests(hub, identity).executions.length, 0);
   });
 
+  void it('releases an orphaned slot when terminal settlement follows a bounded stop failure', async () => {
+    const logs: string[] = [];
+    let nonce = 0;
+    const hub = createReloadShellOwnerHubForTests({
+      handoffTimeoutMs: 20,
+      randomNonce: () => String(++nonce).padStart(32, '0'),
+      logger: { error: (...args: unknown[]) => logs.push(args.map(String).join(' ')) },
+    });
+    const identity = makeReloadShellIdentity('late-terminal-release', realpathSync('/tmp'));
+    const claim = hub.beginActivation(identity, 'startup', 'a'.repeat(32));
+    const lease = hub.commitActivation(claim, adapter('a'.repeat(32), []));
+    const task = fakeTask('owner-late-terminal');
+    let sink: ReloadShellOwnerEventSinkV1 | undefined;
+    let resolveTerminal: (settled: BgTask) => void = () => {};
+    const terminal = new Promise<BgTask>((resolve) => {
+      resolveTerminal = resolve;
+    });
+    let released = false;
+    let stopCalls = 0;
+    const execution: ReloadableShellExecutionV1 = {
+      protocol: RELOAD_SHELL_OWNER_PROTOCOL,
+      launchNonce: task.reloadSurvival?.launchNonce ?? 'owner-late-terminal',
+      completionId: `${task.id}:1`,
+      task,
+      child: undefined,
+      outputStream: undefined,
+      spawnedAt: task.startTime,
+      outputCapBytes: 1024,
+      terminal,
+      phase: 'running',
+      admissionCommitted: false,
+      notificationState: 'disabled',
+      commitInitialMetadata: () => Promise.resolve(),
+      failAdmission() {},
+      setOwnerEventSink(next) {
+        sink = next;
+      },
+      markAdmissionCommitted(generation, handoffCount) {
+        execution.admissionCommitted = true;
+        if (task.reloadSurvival !== undefined) {
+          task.reloadSurvival.leaseGeneration = generation;
+          task.reloadSurvival.handoffCount = handoffCount;
+        }
+      },
+      updateLeaseAudit() {},
+      abandonReloadHandoff() {
+        task.terminalPublicationState = 'abandoned';
+        task.terminalPublicationAbandonReason = 'reload_handoff_expired';
+      },
+      beginNotification() {
+        return undefined;
+      },
+      finishNotification() {},
+      releaseResources() {
+        released = true;
+        execution.phase = 'released';
+      },
+      async requestStop() {
+        stopCalls += 1;
+        execution.phase = 'stop_requested';
+        setTimeout(() => {
+          task.status = 'failed';
+          execution.phase = 'terminal';
+          resolveTerminal(task);
+          sink?.onTerminal(execution);
+        }, 70);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        throw new Error('synthetic bounded stop wait expired before terminal close');
+      },
+    };
+    task.reloadExecution = execution;
+    hub.registerExecution(lease, execution);
+    hub.markAdmissionCommitted(lease, execution);
+    hub.beginReloadHandoff(lease);
+
+    await new Promise((resolve) => setTimeout(resolve, 130));
+
+    assert.equal(stopCalls, 1, 'deadline cleanup must request one stop');
+    assert.equal(task.status, 'failed');
+    assert.equal(execution.phase, 'released');
+    assert.equal(released, true);
+    assert.deepEqual(inspectReloadShellOwnerForTests(hub, identity).executions, []);
+    assert.match(logs.join('\n'), /could not settle.*bounded stop wait expired/u);
+
+    const replacement = hub.beginActivation(identity, 'startup', 'b'.repeat(32));
+    const replacementLease = hub.commitActivation(
+      replacement,
+      adapter('b'.repeat(32), []),
+    );
+    hub.releaseActivation(replacementLease);
+  });
+
   void it('rejects a competing same-identity activation and incompatible global protocol loudly', () => {
     const hub = createReloadShellOwnerHubForTests();
     const identity = makeReloadShellIdentity('conflict-test', realpathSync('/tmp'));

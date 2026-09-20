@@ -194,7 +194,7 @@ This generated registry lists production environment-variable references, runtim
 | `pi-background-tasks.fusion-validation-candidate.v1` | `src/core/fusion/types.ts:18` |
 | `pi-background-tasks.input-token-calibration.v1` | `src/core/context/token-budget.ts:18` |
 | `pi-background-tasks.reload-shell-owner.v1` | `src/core/reload-shell-owner.ts:36` |
-| `pi-background-tasks.reload-shell.v1` | `src/core/reload-shell-owner.ts:934` |
+| `pi-background-tasks.reload-shell.v1` | `src/core/reload-shell-owner.ts:996` |
 
 ### Status vocabularies
 

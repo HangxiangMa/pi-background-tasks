@@ -180,6 +180,10 @@ export function createReloadShellOwnerHubForTests(
     RELOAD_SHELL_HANDOFF_TIMEOUT_MS,
   );
   const slots = new Map<string, OwnerSlot>();
+  const terminalReleaseContinuations = new WeakMap<
+    ReloadableShellExecutionV1,
+    Promise<void>
+  >();
   const hubNonce = nextNonce();
   requireNonce(hubNonce, 'hub nonce');
 
@@ -262,12 +266,50 @@ export function createReloadShellOwnerHubForTests(
     execution.releaseResources();
     if (
       slot.executions.size === 0 &&
-      (slot.phase === 'releasing' || slot.phase === 'orphaned')
+      (slot.phase === 'handoff' || slot.phase === 'releasing' || slot.phase === 'orphaned')
     ) {
       clearHandoffTimer(slot);
       slots.delete(slot.identityKey);
     }
   }
+
+  const releaseAfterTerminal = (
+    slot: OwnerSlot,
+    execution: ReloadableShellExecutionV1,
+  ): Promise<void> => {
+    const existing = terminalReleaseContinuations.get(execution);
+    if (existing !== undefined) return existing;
+    const continuation = execution.terminal.then(
+      () => {
+        if (
+          slots.get(slot.identityKey) !== slot ||
+          slot.executions.get(execution.launchNonce) !== execution
+        ) {
+          return;
+        }
+        if (execution.phase !== 'terminal') {
+          logger.error(
+            `[background-tasks] retained reload shell execution ${execution.task.id} settled without terminal ownership proof; keeping its owner slot`,
+          );
+          return;
+        }
+        try {
+          removeExecution(slot, execution);
+        } catch (error) {
+          logger.error(
+            `[background-tasks] retained reload shell execution cleanup failed for ${execution.task.id}: ${boundedError(error)}`,
+          );
+        }
+      },
+      (error: unknown) => {
+        logger.error(
+          `[background-tasks] retained reload shell execution terminal promise rejected for ${execution.task.id}; keeping its owner slot: ${boundedError(error)}`,
+        );
+      },
+    );
+    terminalReleaseContinuations.set(execution, continuation);
+    return continuation;
+  };
 
   const expireHandoff = (slot: OwnerSlot, deadline: number): void => {
     if (slots.get(slot.identityKey) !== slot) return;
@@ -287,6 +329,7 @@ export function createReloadShellOwnerHubForTests(
     void Promise.allSettled(
       executions.map(async (execution) => {
         execution.abandonReloadHandoff();
+        const terminalRelease = releaseAfterTerminal(slot, execution);
         try {
           if (execution.phase === 'running' || execution.phase === 'stop_requested') {
             await execution.requestStop(
@@ -304,15 +347,17 @@ export function createReloadShellOwnerHubForTests(
           } else if (execution.phase === 'finalizing') {
             await execution.terminal;
           }
-          removeExecution(slot, execution);
         } catch (error) {
           logger.error(
             `[background-tasks] reload handoff expiry could not settle ${execution.task.id}: ${boundedError(error)}`,
           );
         }
+        await terminalRelease;
       }),
     ).then(() => {
-      if (slot.executions.size === 0) slots.delete(slot.identityKey);
+      if (slots.get(slot.identityKey) === slot && slot.executions.size === 0) {
+        slots.delete(slot.identityKey);
+      }
     });
     logger.error(
       `[background-tasks] pi_bg_reload_handoff_expired: ${String(executions.length)} live reload shell execution(s) were not claimed before the fixed handoff deadline`,
@@ -430,8 +475,12 @@ export function createReloadShellOwnerHubForTests(
         slot.phase = slot.expiresAt === undefined ? 'releasing' : 'handoff';
         slot.claim = undefined;
         delete slot.claimNonce;
-        if (slot.expiresAt === undefined) slots.delete(slot.identityKey);
-        else armHandoffDeadline(slot);
+        if (slot.expiresAt === undefined || slot.executions.size === 0) {
+          clearHandoffTimer(slot);
+          slots.delete(slot.identityKey);
+        } else {
+          armHandoffDeadline(slot);
+        }
         throw error;
       }
       slot.lease = lease;
@@ -472,6 +521,11 @@ export function createReloadShellOwnerHubForTests(
         return;
       }
       slot.phase = 'handoff';
+      if (slot.executions.size === 0) {
+        clearHandoffTimer(slot);
+        slots.delete(slot.identityKey);
+        return;
+      }
       armHandoffDeadline(slot);
     },
     beginReloadHandoff(
@@ -485,17 +539,18 @@ export function createReloadShellOwnerHubForTests(
       slot.handoffCount += 1;
       slot.expiresAt = now() + handoffTimeoutMs;
       slot.lease = undefined;
+      const transferred: ReloadableShellExecutionV1[] = [];
       for (const execution of [...slot.executions.values()]) {
         if (execution.admissionCommitted) {
           slot.queuedChanged.add(execution.launchNonce);
           if (execution.phase === 'terminal') slot.queuedTerminal.add(execution.launchNonce);
+          transferred.push(execution);
           continue;
         }
-        // Admission closure remains old-registry owned. It must never become
-        // claimable, but removing it from the global slot must not discard its
-        // live child handle before old shutdown settles it.
-        slot.executions.delete(execution.launchNonce);
-        execution.setOwnerEventSink(undefined);
+        // Admission closure remains old-registry owned and uncommitted work is
+        // never claimable. Keep its process authority in the hub until terminal
+        // settlement, without requiring either the old or fresh host adapter.
+        void releaseAfterTerminal(slot, execution);
       }
       if (slot.executions.size === 0) {
         clearHandoffTimer(slot);
@@ -503,7 +558,7 @@ export function createReloadShellOwnerHubForTests(
         return Object.freeze([]);
       }
       armHandoffDeadline(slot);
-      return Object.freeze([...slot.executions.values()]);
+      return Object.freeze(transferred);
     },
     releaseActivation(lease: ReloadShellActivationLeaseV1): void {
       const slot = currentSlotForLease(lease);
@@ -559,7 +614,14 @@ export function createReloadShellOwnerHubForTests(
       if (slot.executions.get(execution.launchNonce) !== execution) {
         return failStale('cannot release an execution not owned by this activation');
       }
-      removeExecution(slot, execution);
+      if (execution.phase === 'terminal') {
+        removeExecution(slot, execution);
+        return;
+      }
+      // A bounded stop wait is not terminal proof. Retain the child, streams,
+      // listeners, tree state, and timers under this slot until the execution's
+      // one terminal continuation can release them safely.
+      void releaseAfterTerminal(slot, execution);
     },
     isCurrentLease(lease: ReloadShellActivationLeaseV1): boolean {
       try {
