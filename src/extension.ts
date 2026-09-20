@@ -51,7 +51,14 @@ import {
   type TaskManagerResult,
 } from './ui/background-tasks-manager.js';
 import { registerFusionExtension } from './fusion-extension.js';
-import { registerDelegateExtension } from './delegate-extension.js';
+import {
+  registerBackgroundResultExtension,
+  registerDelegateExtension,
+} from './delegate-extension.js';
+import {
+  dockShortcutFooterHint,
+  parseBackgroundTasksConfig,
+} from './core/config.js';
 
 /**
  * Project-local Pi background task manager.
@@ -75,7 +82,6 @@ const PACKAGE_VERSION = packageInfo.version;
 const LIGHT_BLUE_BG = '\x1b[48;2;183;223;255m';
 const LIGHT_BLUE_FG = '\x1b[38;2;11;70;110m';
 const ANSI_RESET = '\x1b[0m';
-
 function lightBlue(value: string): string {
   return `${LIGHT_BLUE_BG}${LIGHT_BLUE_FG}${value}${ANSI_RESET}`;
 }
@@ -208,6 +214,8 @@ function renderPlainResult(result: TextToolResult, options: ToolRenderResultOpti
 }
 
 export default function backgroundTasksExtension(pi: ExtensionAPI): void {
+  const config = parseBackgroundTasksConfig();
+  const dockEntryHint = dockShortcutFooterHint(config.dockShortcut);
   const shellPolicy = initializeShellPolicy();
   pi.on('before_agent_start', createShellPolicyGuidanceHandler(shellPolicy));
   const seenTaskIds = new Set<string>();
@@ -260,24 +268,33 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     beginSessionShutdown();
   });
 
-  registerFusionExtension(pi, {
-    startManagedTask: async (ctx, options) => {
-      currentCtx = ctx;
-      return registry.startManagedTask(ctx, options);
-    },
-    snapshot: (task) => registry.snapshot(task),
-    updateManagedTask: (task, state, line) => registry.updateManagedTask(task, state, line),
-  });
+  if (config.features.fusion) {
+    registerFusionExtension(pi, {
+      startManagedTask: async (ctx, options) => {
+        currentCtx = ctx;
+        return registry.startManagedTask(ctx, options);
+      },
+      snapshot: (task) => registry.snapshot(task),
+      updateManagedTask: (task, state, line) => registry.updateManagedTask(task, state, line),
+    });
+  }
 
-  registerDelegateExtension(pi, {
-    startDelegateTask: async (ctx, options) => {
-      currentCtx = ctx;
-      return registry.startDelegateTask(ctx, options);
-    },
-    snapshot: (task) => registry.snapshot(task),
-    resolveTask: (idOrPrefix) => registry.resolveTask(idOrPrefix),
-    claimFusionUsage: (task) => registry.claimFusionUsage(task),
-  });
+  if (config.features.delegate) {
+    registerDelegateExtension(pi, {
+      startDelegateTask: async (ctx, options) => {
+        currentCtx = ctx;
+        return registry.startDelegateTask(ctx, options);
+      },
+      snapshot: (task) => registry.snapshot(task),
+    });
+  }
+
+  if (config.features.delegate || config.features.fusion) {
+    registerBackgroundResultExtension(pi, {
+      resolveTask: (idOrPrefix) => registry.resolveTask(idOrPrefix),
+      claimFusionUsage: (task) => registry.claimFusionUsage(task),
+    });
+  }
 
   function unseenFinishedTasks(): BgTask[] {
     return registry
@@ -337,7 +354,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       if (unseenDone.length > 0) parts.push(`${String(unseenDone.length)} done`);
       const entryHint = dockOpen
         ? 'focused'
-        : `Shift↓${unseenFinishedCount > 0 ? ' · /bg-clear' : ''}`;
+        : `${dockEntryHint}${unseenFinishedCount > 0 ? ' · /bg-clear' : ''}`;
       const segments = [...parts, entryHint];
       if (updateSegment) segments.push(updateSegment);
       const label = ` bg ${segments.join(' · ')} `;
@@ -631,12 +648,23 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerShortcut('shift+down' satisfies KeyId, {
-    description: 'Open focused background task footer dock',
-    handler: async (ctx) => {
-      await openTaskManager(ctx);
-    },
-  });
+  if (config.dockShortcut === 'shift+down') {
+    pi.registerShortcut('shift+down' satisfies KeyId, {
+      description: 'Open focused background task footer dock',
+      handler: async (ctx) => {
+        await openTaskManager(ctx);
+      },
+    });
+  }
+
+  if (config.dockShortcut === 'ctrl+alt+b') {
+    pi.registerShortcut('ctrl+alt+b' satisfies KeyId, {
+      description: 'Open focused background task footer dock',
+      handler: async (ctx) => {
+        await openTaskManager(ctx);
+      },
+    });
+  }
 
   pi.registerShortcut('ctrl+alt+c' satisfies KeyId, {
     description:
@@ -808,70 +836,73 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool<typeof BgPiAttestedParams, BgRunDetails>({
-    name: 'bg_run_pi_attested',
-    label: 'Attested Pi Run',
-    description:
-      'Opt-in evidence-oriented direct Pi spawn. Launches exactly one `pi --mode json` child, records raw Pi events/stderr, hashes prompt/report/output, observes OAuth through ModelRegistry, and emits a strict attestation sidecar only after successful completion.',
-    promptSnippet: 'Start an attested direct Pi agent task and return its task ID plus output path',
-    promptGuidelines: [
-      'Use only when the user explicitly asks for an attested Pi evidence-producing task; ordinary background work should use bg_run unchanged.',
-      'Provide provider/model as structured fields and a relative reportPath that the child Pi prompt will write before exit.',
-      'Do not provide channel, auth, route, or hash claims; the producer observes those facts itself and fails loudly if it cannot attest them.',
-    ],
-    parameters: BgPiAttestedParams,
-    prepareArguments(args): BgPiAttestedParamsValue {
-      if (!args || typeof args !== 'object')
-        throw new Error('bg_run_pi_attested arguments must be an object');
-      const input = args as BgPiAttestedArgumentRecord;
-      if (typeof input.name !== 'string') throw new Error('bg_run_pi_attested requires name');
-      if (typeof input.provider !== 'string')
-        throw new Error('bg_run_pi_attested requires provider');
-      if (typeof input.model !== 'string') throw new Error('bg_run_pi_attested requires model');
-      if (typeof input.prompt !== 'string') throw new Error('bg_run_pi_attested requires prompt');
-      if (typeof input.reportPath !== 'string')
-        throw new Error('bg_run_pi_attested requires reportPath');
-      const prepared: BgPiAttestedParamsValue = {
-        name: input.name,
-        provider: input.provider,
-        model: input.model,
-        prompt: input.prompt,
-        reportPath: input.reportPath,
-      };
-      if (Array.isArray(input.extraPiArgs)) {
-        if (!input.extraPiArgs.every((entry) => typeof entry === 'string'))
-          throw new Error('bg_run_pi_attested extraPiArgs entries must be strings');
-        prepared.extraPiArgs = input.extraPiArgs;
-      }
-      if (typeof input.thinking === 'string') prepared.thinking = input.thinking;
-      if (typeof input.timeoutSeconds === 'number') prepared.timeoutSeconds = input.timeoutSeconds;
-      return prepared;
-    },
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const task = await startAttestedPiTask(ctx, params);
-      return {
-        content: textContent(
-          `Started attested Pi task ${taskDisplayName(task)} (${task.id})\nStatus: ${task.status}\nPID: ${String(task.pid ?? 'unknown')}\nOutput: ${task.outputPath}\nAttestation: ${task.attestationPath ?? 'pending until completion'}`,
-        ),
-        details: { task: registry.snapshot(task) },
-      };
-    },
-    renderCall(args, theme) {
-      return new Text(
-        `${theme.fg('toolTitle', theme.bold('bg_run_pi_attested '))}${theme.fg('muted', truncateChars(args.name, COMMAND_PREVIEW_CHARS))}`,
-        0,
-        0,
-      );
-    },
-    renderResult(result, _options, theme) {
-      const { task } = result.details;
-      return new Text(
-        `${theme.fg('success', '✓ started')} ${theme.fg('accent', taskDisplayName(task))} ${theme.fg('dim', `(${task.id})`)}\n${theme.fg('dim', `Output: ${task.outputPath}`)}\n${theme.fg('dim', `Attestation: ${task.attestationPath ?? 'pending'}`)}`,
-        0,
-        0,
-      );
-    },
-  });
+  if (config.features.attested) {
+    pi.registerTool<typeof BgPiAttestedParams, BgRunDetails>({
+      name: 'bg_run_pi_attested',
+      label: 'Attested Pi Run',
+      description:
+        'Opt-in evidence-oriented direct Pi spawn. Launches exactly one `pi --mode json` child, records raw Pi events/stderr, hashes prompt/report/output, observes OAuth through ModelRegistry, and emits a strict attestation sidecar only after successful completion.',
+      promptSnippet: 'Start an attested direct Pi agent task and return its task ID plus output path',
+      promptGuidelines: [
+        'Use only when the user explicitly asks for an attested Pi evidence-producing task; ordinary background work should use bg_run unchanged.',
+        'Provide provider/model as structured fields and a relative reportPath that the child Pi prompt will write before exit.',
+        'Do not provide channel, auth, route, or hash claims; the producer observes those facts itself and fails loudly if it cannot attest them.',
+      ],
+      parameters: BgPiAttestedParams,
+      prepareArguments(args): BgPiAttestedParamsValue {
+        if (!args || typeof args !== 'object')
+          throw new Error('bg_run_pi_attested arguments must be an object');
+        const input = args as BgPiAttestedArgumentRecord;
+        if (typeof input.name !== 'string') throw new Error('bg_run_pi_attested requires name');
+        if (typeof input.provider !== 'string')
+          throw new Error('bg_run_pi_attested requires provider');
+        if (typeof input.model !== 'string') throw new Error('bg_run_pi_attested requires model');
+        if (typeof input.prompt !== 'string') throw new Error('bg_run_pi_attested requires prompt');
+        if (typeof input.reportPath !== 'string')
+          throw new Error('bg_run_pi_attested requires reportPath');
+        const prepared: BgPiAttestedParamsValue = {
+          name: input.name,
+          provider: input.provider,
+          model: input.model,
+          prompt: input.prompt,
+          reportPath: input.reportPath,
+        };
+        if (Array.isArray(input.extraPiArgs)) {
+          if (!input.extraPiArgs.every((entry) => typeof entry === 'string'))
+            throw new Error('bg_run_pi_attested extraPiArgs entries must be strings');
+          prepared.extraPiArgs = input.extraPiArgs;
+        }
+        if (typeof input.thinking === 'string') prepared.thinking = input.thinking;
+        if (typeof input.timeoutSeconds === 'number')
+          prepared.timeoutSeconds = input.timeoutSeconds;
+        return prepared;
+      },
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        const task = await startAttestedPiTask(ctx, params);
+        return {
+          content: textContent(
+            `Started attested Pi task ${taskDisplayName(task)} (${task.id})\nStatus: ${task.status}\nPID: ${String(task.pid ?? 'unknown')}\nOutput: ${task.outputPath}\nAttestation: ${task.attestationPath ?? 'pending until completion'}`,
+          ),
+          details: { task: registry.snapshot(task) },
+        };
+      },
+      renderCall(args, theme) {
+        return new Text(
+          `${theme.fg('toolTitle', theme.bold('bg_run_pi_attested '))}${theme.fg('muted', truncateChars(args.name, COMMAND_PREVIEW_CHARS))}`,
+          0,
+          0,
+        );
+      },
+      renderResult(result, _options, theme) {
+        const { task } = result.details;
+        return new Text(
+          `${theme.fg('success', '✓ started')} ${theme.fg('accent', taskDisplayName(task))} ${theme.fg('dim', `(${task.id})`)}\n${theme.fg('dim', `Output: ${task.outputPath}`)}\n${theme.fg('dim', `Attestation: ${task.attestationPath ?? 'pending'}`)}`,
+          0,
+          0,
+        );
+      },
+    });
+  }
 
   pi.registerTool<typeof BgStatusParams, BgStatusDetails>({
     name: 'bg_status',

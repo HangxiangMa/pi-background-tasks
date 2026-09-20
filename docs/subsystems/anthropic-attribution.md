@@ -5,15 +5,23 @@ mode: authored
 review_policy: behavioral
 stability: evolving
 covers_surfaces: []
-covers_sources: [extensions/anthropic-attribution.ts, src/core/anthropic-attribution-path.ts, src/core/anthropic-attribution.ts]
+covers_sources: [extensions/anthropic-attribution-child.ts, extensions/anthropic-attribution.ts, src/core/anthropic-attribution-path.ts, src/core/anthropic-attribution.ts]
 ---
 # Anthropic attribution subsystem
 
-This subsystem owns the package-wide Anthropic subscription attribution provider, exact-match system-prompt sanitization, cache-retention command, and the package extension path shared by isolated child Pi processes.
+This subsystem owns the package-wide Anthropic subscription attribution provider, exact-match system-prompt sanitization, cache-retention command, the feature-aware ambient parent entrypoint, and the distinct always-on extension path shared by isolated child Pi processes.
 
 ## Global package behavior
 
-`package.json.pi.extensions` loads `extensions/anthropic-attribution.ts` for every normal `pi-background-tasks` installation, before the background-task entrypoint. The extension is provider-gated: non-Anthropic sessions and payloads are unchanged.
+`package.json.pi.extensions` loads `extensions/anthropic-attribution.ts` for every normal `pi-background-tasks` installation, before the background-task entrypoint. It parses the complete shared configuration before registration. With the default `attribution` capability, it activates the accepted attribution implementation from `session_start`, after Pi has bound its public provider runtime; without that token it registers no parent provider, attribution lifecycle hooks, duplicate-owner responder, or `/claude-cache` command. Invalid feature or dock configuration fails before ambient activation.
+
+Before activation, the wrapper snapshots the effective provider plus the public legacy/native registration through `ctx.modelRegistry`. The accepted factory's provider call is then immediate rather than queued. A thrown application failure occurs before its command, hooks, or claim responder are published. A successful installation is owned only after a new current legacy-config object and changed effective provider are observed; that exact config object is the instance token. On shutdown the wrapper acts only while that token is still current. A later legacy or native owner is left untouched. Otherwise it restores the prior native registration directly, clears the package layer with the captured effective provider before reapplying a prior legacy config, or—when there was no prior dynamic registration—uses public unregister only after the exact token/later-owner checks to restore dynamic-registration absence and the captured built-in effective object. It never blindly deletes another owner's provider and never reads private host state. A subsequent real reload with attribution disabled therefore restores the host's prior public registration state. When enabled, the transport remains provider-gated: non-Anthropic sessions and payloads are unchanged.
+
+## Initialized-host SDK contract and blocker
+
+Normal Pi TUI, RPC, print, and JSON modes supply counted bindings and satisfy the initialized-host contract. SDK embedders must call `bindExtensions()` with at least one counted UI/command/shutdown/error binding; after reload, that binding causes Pi to emit `session_start`. Empty or mode-only bindings require an explicit `bindExtensions()` call after every reload.
+
+**BLOCKED_SCOPE / SDK compatibility:** bare `createAgentSession()` never emits the activation event, and empty or mode-only binding state does not make `reload()` emit it. On those paths the selected ambient provider, `/claude-cache`, hooks, persisted cache initialization, and duplicate-owner responder remain absent until an explicit bind. There is no safe package-only repair through the current public API: factory-time provider registration is queued and gives no success/owner token. Closure still requires a guaranteed post-core-bind/reload callback or owner-token registration API; excluding these SDK hosts is not approved. Generated availability describes the initialized-host contract and is not a pre-bind availability guarantee.
 
 For Anthropic sessions it registers the package-owned `anthropic` provider transport. Mandatory attribution is owned inside that transport from each request's Pi-supplied `options.sessionId`; `before_provider_request` remains optional middleware and is never an identity initializer. The transport applies the Claude Code subscription request contract:
 
@@ -48,21 +56,21 @@ Only complete matching lines are removed. Other system text, non-text blocks, cu
 
 ## Duplicate-owner protocol
 
-A package extension and an independent project/user copy can otherwise register duplicate provider hooks and `/claude-cache` commands. The factory therefore probes `pi-anthropic-attribution:claim:v1` on Pi's shared EventBus before registration. The first successfully registered copy installs one responder; later compatible copies become inert.
+A package extension and an independent project/user copy can otherwise register duplicate provider hooks and `/claude-cache` commands. During ordered `session_start` activation, the factory therefore probes `pi-anthropic-attribution:claim:v1` on Pi's shared EventBus before registration. The first successfully installed copy adds one responder; later compatible copies become inert.
 
-Ownership is published only after all hooks and the command register. Extension loading is sequential and EventBus listener invocation is synchronous at the probe boundary, so a failed first factory cannot strand a false claim. The responder lives for the shared EventBus runtime, matching the extension registrations it protects.
+Ownership is published only after the immediate provider application, all hooks, and the command register. EventBus listener invocation is synchronous at the probe boundary, so a failed first installation cannot strand a false claim and a later copy may still activate. The responder lives for the shared EventBus runtime, matching the extension registrations it protects.
 
 ## Isolated package children
 
-Ambient discovery is insufficient for child paths that use `--no-extensions`. `resolveAnthropicAttributionExtensionPath()` is the single package path seam used by:
+Ambient discovery and the parent capability flag are both insufficient for child paths that use `--no-extensions`. `resolveAnthropicAttributionExtensionPath()` resolves the distinct `extensions/anthropic-attribution-child.ts` entrypoint and is the single package path seam used by:
 
 - Fusion Anthropic children, before the Fusion runtime governor;
 - Anthropic delegate children, before the delegate guard;
 - Anthropic attested Pi children.
 
-Non-Anthropic child argv does not resolve or add this extension. Missing package extension bytes fail before child creation; no route substitution or sanitizer fallback is attempted.
+The child entrypoint directly invokes the accepted implementation and deliberately does not consult `PI_BG_FEATURES`. Non-Anthropic child argv does not resolve or add it. Missing package extension bytes fail before child creation; no route substitution or sanitizer fallback is attempted. Delegate and Fusion keep attribution before their guard/governor, and attested Anthropic argv adds the same entrypoint before the prompt.
 
-Arbitrary shell commands started through `bg_run` are not rewritten. An Anthropic child `pi` launched this way must keep normal extension discovery enabled. If the command deliberately uses `--no-extensions`, it must also explicitly load this package's `extensions/anthropic-attribution.ts` with `-e`/`--extension`; otherwise attribution and sanitization are bypassed and the launch is unsupported. The package does not parse or override arbitrary shell authority.
+Arbitrary shell commands started through `bg_run` are not rewritten. An Anthropic child `pi` launched this way may keep normal extension discovery enabled when ambient attribution is enabled. If the command deliberately uses `--no-extensions`, it must explicitly load this package's always-on `extensions/anthropic-attribution-child.ts` with `-e`/`--extension`; otherwise attribution and sanitization are bypassed and the launch is unsupported. The package does not parse or override arbitrary shell authority.
 
 ## Cache retention
 

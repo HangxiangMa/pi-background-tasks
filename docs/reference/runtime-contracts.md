@@ -12,6 +12,35 @@ covers_sources: []
 This generated registry lists production environment-variable references, runtime paths/artifacts, schema identifiers, and status vocabularies extracted from package source. It intentionally excludes incidental source-code literals such as package metadata import paths.
 
 <!-- pi-docs:begin name="runtime-contracts" generator="scripts/docs/generate.mjs" -->
+### Configuration variants
+
+
+```json
+{
+  "default_dock_shortcut": "shift+down",
+  "default_features": [
+    "process",
+    "delegate",
+    "fusion",
+    "attested",
+    "attribution"
+  ],
+  "dock_shortcut_values": [
+    "shift+down",
+    "ctrl+alt+b",
+    "off"
+  ],
+  "feature_values": [
+    "process",
+    "delegate",
+    "fusion",
+    "attested",
+    "attribution"
+  ],
+  "source": "src/core/config.ts"
+}
+```
+
 ### Environment variable references
 
 | Name | Access | Provenance |
@@ -44,11 +73,13 @@ This generated registry lists production environment-variable references, runtim
 | `PI_BG_DELEGATE_SEED_SHA256` | read, write | `src/core/delegate/launch.ts:355`<br>`src/delegate-child-extension.ts:386` |
 | `PI_BG_DELEGATE_TASK_ID` | read, write | `src/core/delegate/launch.ts:356`<br>`src/delegate-child-extension.ts:387` |
 | `PI_BG_DISABLE_PI_TELEMETRY` | read | `src/core/registry.ts:270` |
-| `PI_BG_DISABLE_UPDATE_CHECK` | read | `src/extension.ts:486` |
+| `PI_BG_DISABLE_UPDATE_CHECK` | read | `src/extension.ts:503` |
+| `PI_BG_DOCK_SHORTCUT` | read | `src/core/config.ts:113` |
+| `PI_BG_FEATURES` | read | `src/core/config.ts:112` |
 | `PI_BG_MAX_OUTPUT_BYTES` | read | `src/core/registry.ts:78` |
 | `PI_BG_POSIX_SHELL` | read | `src/core/common.ts:870` |
 | `PI_BG_POSIX_SHELL_PATH` | read | `src/core/common.ts:880` |
-| `PI_BG_REGISTRY_URL` | read | `src/extension.ts:495` |
+| `PI_BG_REGISTRY_URL` | read | `src/extension.ts:512` |
 | `PI_BG_SHELL` | read | `src/core/common.ts:827` |
 | `PI_BG_SHELL_PATH` | read | `src/core/common.ts:828` |
 | `PI_CACHE_RETENTION` | read, write | `src/core/anthropic-attribution.ts:658`<br>`src/core/anthropic-attribution.ts:669`<br>`src/core/fusion/claude-cache.ts:57`<br>`src/core/fusion/pi-child.ts:273`<br>`src/core/fusion/pi-child.ts:274` |
@@ -58,7 +89,7 @@ This generated registry lists production environment-variable references, runtim
 | `PI_FUSION_SOURCE_POLICY_SHA256` | read, remove, write | `src/core/fusion/pi-child.ts:100`<br>`src/core/fusion/pi-child.ts:1904`<br>`src/fusion-child-extension.ts:556` |
 | `PI_FUSION_TOOL_CALL_LOG_PATH` | read, remove, write | `src/core/fusion/pi-child.ts:100`<br>`src/core/fusion/pi-child.ts:1891`<br>`src/fusion-child-extension.ts:598` |
 | `PI_MODEL` | remove | `src/core/delegate/launch.ts:330`<br>`src/core/fusion/pi-child.ts:100` |
-| `PI_OFFLINE` | read | `src/extension.ts:487` |
+| `PI_OFFLINE` | read | `src/extension.ts:504` |
 | `PI_PROVIDER` | remove | `src/core/delegate/launch.ts:330`<br>`src/core/fusion/pi-child.ts:100` |
 | `PI_REASONING_LEVEL` | remove | `src/core/delegate/launch.ts:330`<br>`src/core/fusion/pi-child.ts:100` |
 | `PI_SESSION_FILE` | remove | `src/core/delegate/launch.ts:330`<br>`src/core/fusion/pi-child.ts:100` |
@@ -120,12 +151,12 @@ This generated registry lists production environment-variable references, runtim
 | `pi-background-tasks.delegate-budget-plan.v3` | `src/core/delegate/types.ts:21` |
 | `pi-background-tasks.delegate-child-terminal.v1` | `src/delegate-child-extension.ts:584` |
 | `pi-background-tasks.delegate-hook-contract.v1` | `src/core/delegate/hook-contract.ts:15` |
-| `pi-background-tasks.delegate-launch.v1` | `src/delegate-extension.ts:458` |
+| `pi-background-tasks.delegate-launch.v1` | `src/delegate-extension.ts:461` |
 | `pi-background-tasks.delegate-ledger.v1` | `src/core/delegate/types.ts:16` |
 | `pi-background-tasks.delegate-manifest.v2` | `src/core/delegate/types.ts:22` |
 | `pi-background-tasks.delegate-outcome.v1` | `src/core/delegate/runner.ts:228` |
 | `pi-background-tasks.delegate-receipt.v1` | `src/core/delegate/types.ts:19` |
-| `pi-background-tasks.delegate-result-view.v1` | `src/delegate-extension.ts:734` |
+| `pi-background-tasks.delegate-result-view.v1` | `src/delegate-extension.ts:748` |
 | `pi-background-tasks.delegate-result.v1` | `src/core/delegate/types.ts:18` |
 | `pi-background-tasks.delegate-runtime-budget.v1` | `src/delegate-child-extension.ts:489` |
 | `pi-background-tasks.delegate-seed.v2` | `src/core/delegate/types.ts:15` |
@@ -152,7 +183,7 @@ This generated registry lists production environment-variable references, runtim
 | `pi-background-tasks.fusion-merge-input.v1` | `src/core/fusion/prompts.ts:336` |
 | `pi-background-tasks.fusion-models.v1` | `src/core/fusion/types.ts:13` |
 | `pi-background-tasks.fusion-progress.v1` | `src/fusion-extension.ts:59` |
-| `pi-background-tasks.fusion-result-view.v1` | `src/delegate-extension.ts:775` |
+| `pi-background-tasks.fusion-result-view.v1` | `src/delegate-extension.ts:789` |
 | `pi-background-tasks.fusion-result.v4` | `src/core/fusion/types.ts:19` |
 | `pi-background-tasks.fusion-result.v5` | `src/core/fusion/types.ts:20` |
 | `pi-background-tasks.fusion-runtime-guard.v2` | `src/core/fusion/child-protocol.ts:24` |

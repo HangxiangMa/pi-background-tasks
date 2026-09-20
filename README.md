@@ -17,7 +17,7 @@
 - **Run long work without blocking**: start named shell jobs, keep talking to Pi, and get durable completion notifications when they finish.
 - **Delegate context-aware investigation**: launch one route-pinned, inspect-only child Pi agent seeded with a frozen projection of the current conversation, then retrieve a hash-verified result.
 - **Combine model perspectives through fixed-purpose Fusion**: run three candidate children, blind evaluation, optional bounded evaluator repair, and merger for reasoning, investigation, targeted URL research, or validation review.
-- **Keep Anthropic subscription traffic attributed and compatible**: globally apply the package-owned Claude Code OAuth attribution, cache policy, and exact-match prompt sanitization to Anthropic routes without an external sanitizer dependency.
+- **Keep Anthropic subscription traffic attributed and compatible**: by default, apply the package-owned Claude Code OAuth attribution, cache policy, and exact-match prompt sanitization to parent Anthropic routes without an external sanitizer dependency; isolated package children retain mandatory attribution even when ambient parent attribution is disabled.
 
 <p align="center">
   <img src="docs/assets/architecture.svg" alt="Architecture diagram showing Pi session, background task registry, delegated child agent, and Fusion candidate/evaluator/merger flow" width="760">
@@ -34,24 +34,45 @@
 <!-- pi-docs:end name="readme-package-facts" -->
 
 <!-- pi-docs:begin name="readme-public-surfaces" generator="scripts/docs/generate.mjs" -->
-| Surface kind | Count |
-| --- | --- |
-| command | 11 |
-| tool | 11 |
-| shortcut | 2 |
-| renderer | 2 |
-| eventbus | 1 |
-| workflow | 4 |
+| Surface kind | Configured variants | Available by default |
+| --- | --- | --- |
+| command | 11 | 11 |
+| tool | 11 | 11 |
+| shortcut | 3 | 2 |
+| renderer | 2 | 2 |
+| eventbus | 1 | 1 |
+| workflow | 4 | 4 |
 
 Public commands: `/bg`, `/bg-clear`, `/bg-tasks`, `/bg-update`, `/claude-cache`, `/fusion`, `/fusion-models`, `/jobs`, `/kill`, `/logs`, `/tasks`.
 
 Public tools: `bg_delegate`, `bg_kill`, `bg_logs`, `bg_result`, `bg_run`, `bg_run_pi_attested`, `bg_status`, `fusion_investigate`, `fusion_reason`, `fusion_research`, `fusion_validate`.
 
+### Configuration-dependent surfaces
+
+| Surface | Availability | Default |
+| --- | --- | --- |
+| `command:claude-cache` | `feature:attribution` | yes |
+| `command:fusion` | `feature:fusion` | yes |
+| `command:fusion-models` | `feature:fusion` | yes |
+| `tool:bg_delegate` | `feature:delegate` | yes |
+| `tool:bg_result` | `any(feature:delegate,feature:fusion)` | yes |
+| `tool:bg_run_pi_attested` | `feature:attested` | yes |
+| `tool:fusion_investigate` | `feature:fusion` | yes |
+| `tool:fusion_reason` | `feature:fusion` | yes |
+| `tool:fusion_research` | `feature:fusion` | yes |
+| `tool:fusion_validate` | `feature:fusion` | yes |
+| `shortcut:ctrl+alt+b` | `dock:ctrl+alt+b` | no |
+| `shortcut:shift+down` | `dock:shift+down` | yes |
+| `renderer:fusion-result` | `feature:fusion` | yes |
+| `workflow:investigate` | `feature:fusion` | yes |
+| `workflow:reason` | `feature:fusion` | yes |
+| `workflow:research` | `feature:fusion` | yes |
+| `workflow:validate` | `feature:fusion` | yes |
+
 Full owner map and generated contracts live in [docs/INDEX.md](docs/INDEX.md).
 <!-- pi-docs:end name="readme-public-surfaces" -->
 
-
-
+“Available by default” means after Pi has initialized extensions. Normal TUI/RPC/print/JSON modes do this; SDK embedders must provide a counted `bindExtensions()` binding and ensure post-reload binding. Bare `createAgentSession()` and empty/mode-only reload are blocked by the current public host lifecycle API. See [Getting started](docs/getting-started.md#sdk-embedding-requirement).
 
 ## Why use it?
 
@@ -62,7 +83,7 @@ Full owner map and generated contracts live in [docs/INDEX.md](docs/INDEX.md).
 | Ask a second agent to inspect the repo with the current conversation as context | `bg_delegate` starts one read/search/list child, isolated from ambient extensions by default; `bg_result` verifies the committed result before returning it. |
 | Compare model perspectives without exposing arbitrary parent context | Fusion children receive only the workflow input and fixed tool policy; no silent route substitution or fallback is used on delegate/Fusion paths. |
 | Produce local evidence for a direct Pi run | `bg_run_pi_attested` records local same-user-writable artifacts and hashes after a successful structured child Pi task. |
-| Use Anthropic subscription OAuth consistently | The globally loaded provider applies attribution and exact-match sanitization; `/claude-cache` shows or changes session cache retention. |
+| Use Anthropic subscription OAuth consistently | The default ambient provider applies attribution and exact-match sanitization; `/claude-cache` shows or changes session cache retention. Isolated package-owned Anthropic children always use the mandatory child entrypoint. |
 
 ## Install
 
@@ -99,7 +120,7 @@ Local paths are loaded from disk without copying; use the path to this package f
 
    `/bg` starts a tracked shell task and returns the task id plus output path. User-launched `/bg` tasks notify in the UI but do not automatically wake a follow-up model turn.
 
-3. Open the footer dock with **Shift↓** or list tasks:
+3. Open the footer dock with the default **Shift↓** binding or list tasks:
 
    ```text
    /jobs
@@ -135,6 +156,27 @@ Local paths are loaded from disk without copying; use the path to this package f
 
 More walkthrough detail: [Getting started](docs/getting-started.md).
 
+## Select capabilities and avoid shortcut conflicts
+
+The default remains the complete historical surface. To run only process tasks, set:
+
+```bash
+PI_BG_FEATURES=process pi
+```
+
+`PI_BG_FEATURES` accepts a strict unique comma-separated set from `process,delegate,fusion,attested,attribution`; `process` is mandatory. `bg_result` is derived and appears exactly once when delegate or Fusion is enabled. Disabled tools, commands, renderers, and ambient attribution are absent from registration and remain absent after reload.
+
+Choose the dock key independently:
+
+```bash
+PI_BG_DOCK_SHORTCUT=ctrl+alt+b pi  # avoid a Shift+Down owner
+PI_BG_DOCK_SHORTCUT=off pi         # use /tasks or /bg-tasks
+```
+
+Accepted values are exactly `shift+down` (default), `ctrl+alt+b`, and `off`. Invalid settings fail startup with `pi_bg_config_invalid`; they do not silently restore defaults. `/tasks`, `/bg-tasks`, and the separate `Ctrl+Alt+C` clear fallback remain available. These flags select functionality; they do not claim a cold-start performance improvement.
+
+Full contract: [Configuration](docs/operations/configuration.md) and [Shortcuts and dock](docs/reference/shortcuts-and-dock.md).
+
 ## Pick the right workflow
 
 | Workflow | Blocking? | Context | Tools/network/write boundary | Best for | Expected behavior |
@@ -166,7 +208,7 @@ See [Choose a workflow](docs/choose-a-workflow.md) for a decision tree and trade
 
 Expected: returns immediately with a task id, PID when available, and `.pi/tasks/...output`. The command runs as an ordinary local shell command with your user permissions; it can invoke networked tools or paid services if the command itself does so.
 
-If `bg_run` starts an Anthropic child `pi`, keep normal extension discovery enabled. Do not add `--no-extensions` unless the command also supplies this package's `extensions/anthropic-attribution.ts` via `-e`/`--extension`; `bg_run` does not rewrite arbitrary shell argv.
+If `bg_run` starts an Anthropic child `pi`, keep normal extension discovery enabled when ambient attribution is enabled. Do not add `--no-extensions` unless the command also supplies this package's always-on `extensions/anthropic-attribution-child.ts` via `-e`/`--extension`; `bg_run` does not rewrite arbitrary shell argv.
 
 ### `bg_delegate`: context-seeded read-only investigation
 
@@ -263,11 +305,11 @@ Use with `fusion_validate` for advisory read-only review.
   <img src="docs/assets/footer-dock.svg" alt="Illustration of the pi-background-tasks footer dock with running and completed tasks" width="760">
 </p>
 
-When tasks are running or unseen completions exist, the footer shows a compact `bg ...` segment. Press **Shift↓** to open the focused bottom dock. Use `/bg-clear` to acknowledge finished-task footer notices in any terminal.
+When tasks are running or unseen completions exist, the footer shows a compact `bg ...` segment. Press the configured **Shift↓** (default) or **Ctrl+Alt+B** binding to open the focused bottom dock, or use `/tasks` when the key is off. Use `/bg-clear` to acknowledge finished-task footer notices in any terminal.
 
 | Control | Action |
 |---|---|
-| `Shift↓` | Open the dock |
+| configured `Shift↓` / `Ctrl+Alt+B`, or `/tasks` | Open the dock |
 | `/bg-clear` | Clear finished-task notices |
 | `↑` / `↓`, `PageUp` / `PageDown` | Move through list or scroll output tail |
 | `Enter` / `→` | Inspect details |
@@ -299,7 +341,7 @@ Agent tasks launched through `pi -p ...` or `pi --mode json ...` and marked `isA
 - Shell jobs are tracked by the package, but they are not sandboxed. Treat commands as local processes with your permissions and credentials.
 - Delegate and Fusion child Pi processes are route-pinned where applicable; delegate/Fusion paths do not silently substitute routes.
 - Fusion uses direct child `pi --mode text` processes, not direct completion APIs. Frontier Fusion routes are admitted only through Pi Anthropic or Codex subscription OAuth; metered frontier API credentials are rejected before child creation.
-- Normal installations globally load the package-owned Claude Code OAuth attribution/sanitization provider for Anthropic sessions; non-Anthropic sessions are unchanged. Isolated Fusion, delegate, and attested Anthropic children load the same package entrypoint explicitly. It requests `ttl: "1h"` on system/tool/conversation cache breakpoints before serialization and preserves provider-reported `cacheWrite1h` evidence. Set `PI_CACHE_RETENTION=short|none|long` or use `/claude-cache` to choose explicitly; malformed attribution, policy, cache evidence, or non-OAuth credentials fail before transport. Provider usage is preserved verbatim, but subscription OAuth can report `cacheWrite1h = 0` even when a unique cache remains readable beyond five minutes; treat positive `cacheWrite1h` as definitive and zero as inconclusive on that channel. Anthropic budgeting follows the provider's 200K subscription policy.
+- Normal installations load a feature-aware ambient Claude Code OAuth attribution/sanitization entrypoint for parent Anthropic sessions; non-Anthropic sessions are unchanged. The default enables it, while omitting `attribution` removes its provider/hooks and `/claude-cache`. Isolated Fusion, delegate, and attested Anthropic children load the separate always-on child entrypoint explicitly before their guard/governor, regardless of that ambient flag. It requests `ttl: "1h"` on system/tool/conversation cache breakpoints before serialization and preserves provider-reported `cacheWrite1h` evidence. Set `PI_CACHE_RETENTION=short|none|long` or use `/claude-cache` when ambient attribution is enabled; malformed attribution, policy, cache evidence, or non-OAuth credentials fail before transport. Provider usage is preserved verbatim, but subscription OAuth can report `cacheWrite1h = 0` even when a unique cache remains readable beyond five minutes; treat positive `cacheWrite1h` as definitive and zero as inconclusive on that channel. Anthropic budgeting follows the provider's 200K subscription policy.
 - Fusion research fetches only caller-supplied public `http(s)` URLs with bounded retrieval. It is not web search and not a secret-exfiltration boundary.
 - Attestation sidecars are local, unsigned, same-user-writable evidence. They are useful for downstream local gates, but not cryptographic proof against local compromise, a compromised Pi binary, or a compromised provider.
 - Metadata, attestations, delegate/Fusion artifacts, and configuration replacements use write/fsync/rename durability patterns. Failed/cancelled stored Fusion runs also have a manifest-bound `failure-summary.json` containing bounded no-answer evidence metadata and artifact refs only; `bg_result` returns it as an answer-free typed terminal view after integrity checks. Ordinary task output is closed and drained before terminal publication but is not explicitly fsynced. POSIX directory entries are fsynced after atomic replacement; Windows lacks the same portable directory-entry crash-durability guarantee.

@@ -1146,7 +1146,7 @@ void describe('fusion Pi child runner', () => {
   });
 
   void it('loads package-owned Anthropic attribution/sanitization before the runtime governor', () => {
-    const attribution = () => '/pkg/extensions/anthropic-attribution.ts';
+    const attribution = () => '/pkg/extensions/anthropic-attribution-child.ts';
     const claude = buildFusionPiChildArgv(
       resolvedModel('anthropic', 'claude-opus-5'),
       'system',
@@ -1158,7 +1158,10 @@ void describe('fusion Pi child runner', () => {
       if (value === '--extension') acc.push(claude[index + 1] ?? '');
       return acc;
     }, []);
-    assert.deepEqual(extensionArgs, ['/pkg/extensions/anthropic-attribution.ts', 'extension.js']);
+    assert.deepEqual(extensionArgs, [
+      '/pkg/extensions/anthropic-attribution-child.ts',
+      'extension.js',
+    ]);
     assert.equal(extensionArgs.at(-1), 'extension.js');
   });
 
@@ -1181,7 +1184,10 @@ void describe('fusion Pi child runner', () => {
 
   void it('resolves the package-owned global attribution extension and fails loudly if absent', () => {
     const attribution = resolveAnthropicAttributionExtensionPath();
-    assert.match(attribution.replaceAll('\\', '/'), /extensions\/anthropic-attribution\.ts$/);
+    assert.match(
+      attribution.replaceAll('\\', '/'),
+      /extensions\/anthropic-attribution-child\.ts$/,
+    );
     assert.equal(existsSync(attribution), true);
     assert.throws(
       () => resolveAnthropicAttributionExtensionPath(import.meta.url, () => false),

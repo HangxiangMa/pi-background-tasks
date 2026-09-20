@@ -35,7 +35,7 @@ import type { BgTask, BgTaskSnapshot } from '../../src/core/common.js';
 import type { TaskkillOutcome, WindowsKillPhase } from '../../src/core/windows-taskkill.js';
 import type { AttestedGitSpawn } from '../../src/core/attested-pi-run.js';
 import { BackgroundTaskExtensionServiceClosedError } from '../../src/core/extension-api.js';
-import { registerDelegateExtension } from '../../src/delegate-extension.js';
+import { registerBackgroundResultExtension } from '../../src/delegate-extension.js';
 import { FusionArtifactStore } from '../../src/core/fusion/artifacts.js';
 import { defaultFusionModelConfig } from '../../src/core/fusion/config.js';
 import {
@@ -2872,11 +2872,7 @@ setInterval(() => {}, 1000);
         },
         setActiveTools() {},
       });
-      registerDelegateExtension(pi, {
-        startDelegateTask: async () => {
-          throw new Error('bg_delegate is not used by this retention regression');
-        },
-        snapshot: (task) => h.registry.snapshot(task),
+      registerBackgroundResultExtension(pi, {
         resolveTask: (idOrPrefix) => h.registry.resolveTask(idOrPrefix),
         claimFusionUsage: (task) => h.registry.claimFusionUsage(task),
       });

@@ -20,7 +20,9 @@ It does **not** claim ownership of shared `common`, `registry`, `pi-launch`, or 
 
 ## Behavioral contract
 
-Delegation provides one background child Pi agent, one directive, one pinned route, and read-only inspection tools. The parent gets a launch receipt immediately and later retrieves a verified answer through `bg_result`.
+Delegation provides one background child Pi agent, one directive, one pinned route, and read-only inspection tools. It is registered only when `PI_BG_FEATURES` includes `delegate`. The parent gets a launch receipt immediately and later retrieves a verified answer through `bg_result`.
+
+`bg_result` is a shared derived surface, not part of the delegate toggle: it is registered exactly once when delegate or Fusion is enabled. Delegate-only and Fusion-only configurations therefore retain the correct verifier/retrieval path, while process-only has neither a producer nor `bg_result`.
 
 The design deliberately separates:
 
@@ -66,7 +68,7 @@ The child launch:
 - extension discovery disabled by default in `extensionMode:"isolated"`;
 - extension discovery deliberately enabled only by `extensionMode:"ambient"`;
 - non-Anthropic children explicitly load the package-owned child guard in both modes;
-- Anthropic children explicitly load package attribution/sanitization first, then the child guard, in both modes.
+- Anthropic children explicitly load the always-on `extensions/anthropic-attribution-child.ts` safety entrypoint first, then the child guard, in both modes, regardless of the parent ambient-attribution capability.
 
 Ambient mode exists for providers registered by user/project Pi extensions. It omits only `--no-extensions`; it accepts no caller-supplied extension paths and performs no provider fallback or route substitution. Ambient discovery executes arbitrary trusted-location extension code in the child process. That code has Node process privileges and is not sandboxed by Pi's model-visible tool allowlist, so ambient mode deliberately weakens the inspect-only process-isolation guarantee. It must not be described as safe or equivalent to isolated mode.
 

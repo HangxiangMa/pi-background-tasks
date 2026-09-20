@@ -5,7 +5,7 @@ mode: authored
 review_policy: behavioral
 stability: stable
 covers_surfaces: []
-covers_sources: [extensions/background-tasks.ts, src/core/update-check.ts, src/extension.ts, src/ui/background-tasks-manager.ts]
+covers_sources: [extensions/background-tasks.ts, src/core/config.ts, src/core/update-check.ts, src/extension.ts, src/ui/background-tasks-manager.ts]
 ---
 # Host UI and telemetry
 
@@ -13,12 +13,15 @@ This subsystem owns the extension entrypoint, command/tool registration, footer 
 
 ## Entrypoint and registration
 
-`extensions/background-tasks.ts` re-exports `src/extension.ts`. The extension registers:
+`extensions/background-tasks.ts` re-exports `src/extension.ts`. Before creating the registry or registering a surface, the extension strictly parses the shared capability/shortcut configuration. `process` is mandatory and registers:
 
 - commands: `/bg`, `/tasks`, `/bg-tasks`, `/bg-clear`, `/bg-update`, `/jobs`, `/logs`, `/kill`;
-- tools: `bg_run`, `bg_status`, `bg_logs`, `bg_kill` plus package-owned advanced tools documented elsewhere;
-- shortcuts: `shift+down` and `ctrl+alt+c`;
-- renderer: `background-task-notification`.
+- tools: `bg_run`, `bg_status`, `bg_logs`, `bg_kill`;
+- shortcut: the selected dock key (`shift+down`, `ctrl+alt+b`, or none for `off`) plus unconditional `ctrl+alt+c`;
+- renderer: `background-task-notification`;
+- the task UI and EventBus service.
+
+Delegate, Fusion, attested-run, and ambient attribution registrations are independently selected by `PI_BG_FEATURES`. `bg_result` is derived and registered once iff delegate or Fusion is enabled. Disabled package registrations are absent rather than merely inactive. Active-tool cleanup is delegated to Pi's registration rebuild: a stale package name with no current definition is dropped, while an active definition from another extension remains active even when it uses a disabled package capability name such as `bg_delegate` or the retired `fusion_brainstorm`. The package does not perform name-wide subtraction. The default selection preserves the complete historical surface. Capability flags alone make no startup-performance claim.
 
 ## Agent-visible shell guidance
 
@@ -36,7 +39,7 @@ When visible, the footer label includes counts in this order:
 2. failed,
 3. stopped (`killed`),
 4. done (`completed`),
-5. entry hint (`focused` while the dock is open, otherwise `Shift↓`),
+5. entry hint (`focused` while the dock is open, otherwise `Shift↓`, `CtrlAltB`, or `/tasks` from the parsed dock setting),
 6. `/bg-clear` hint when there are unseen finished tasks **and the dock is closed**,
 7. optional update segment.
 
@@ -44,7 +47,7 @@ A finished badge is cleared when that task's detail view is opened, or when `/bg
 
 ## Task manager UI
 
-`/tasks`, `/bg-tasks`, and `Shift+Down` open the same overlay. Non-interactive contexts receive an error notification directing users to `/jobs`, `/logs`, `bg_status`, or `bg_logs`.
+`/tasks`, `/bg-tasks`, and the configured dock shortcut (when not `off`) open the same overlay. The two commands are unconditional process surfaces, including when the shortcut is disabled. Non-interactive contexts receive an error notification directing users to `/jobs`, `/logs`, `bg_status`, or `bg_logs`.
 
 The list view supports selection, paging, stop, confirmed stop-all, history toggle, rerun, output path, and close. Rerun is shell-task-only: typed delegate and Fusion tasks fail with guidance to relaunch through their owning tool rather than executing their display command as a shell command. The detail view shows task identity, status, runtime, output path, description, task-owned model/context/tokens/tools when reported, command, error, and an output tail.
 
