@@ -704,7 +704,18 @@ void describe('background EventBus protocol', () => {
 
       h.registry.setShuttingDown(true);
       h.close();
-      await h.registry.waitForTaskAdmissions();
+      const admissionDrain = h.registry.waitForTaskAdmissions();
+      const drainedBeforeMetadataSettled = await Promise.race([
+        admissionDrain.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
+      ]);
+      assert.equal(
+        drainedBeforeMetadataSettled,
+        false,
+        'shutdown must retain ownership of an unabortable in-flight metadata operation',
+      );
+      releaseMetadata.resolve(undefined);
+      await admissionDrain;
       const stopped = await h.registry.stopAllRunning(
         'shutdown',
         'Killed during admission ownership test',
@@ -716,7 +727,6 @@ void describe('background EventBus protocol', () => {
       );
       assert.ok(h.children[0]?.killCalls.length, 'shutdown must terminate the owned child');
 
-      releaseMetadata.resolve(undefined);
       await waitForCondition(
         () =>
           responses.some((response) => response.request_id === 'spawned-admission-shutdown'),

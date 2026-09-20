@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
@@ -20,6 +20,7 @@ import {
 import type { Api, Model } from '@earendil-works/pi-ai';
 import type { BgTask, BgTaskSnapshot } from '../../src/core/common.js';
 import type { TaskkillOutcome, WindowsKillPhase } from '../../src/core/windows-taskkill.js';
+import type { AttestedGitSpawn } from '../../src/core/attested-pi-run.js';
 import { BackgroundTaskExtensionServiceClosedError } from '../../src/core/extension-api.js';
 import { registerDelegateExtension } from '../../src/delegate-extension.js';
 import { FusionArtifactStore } from '../../src/core/fusion/artifacts.js';
@@ -96,6 +97,9 @@ interface HarnessOptions {
   maxOutputBytes?: number;
   killGraceMs?: number;
   stopWaitMs?: number;
+  taskAdmissionTimeoutMs?: number;
+  attestedGitKillGraceMs?: number;
+  attestedGitSpawn?: AttestedGitSpawn;
   killProcess?: (pid: number, signal?: NodeJS.Signals | number) => boolean;
   killTree?: (
     pid: number,
@@ -157,6 +161,12 @@ async function createHarness(options: HarnessOptions = {}) {
   if (options.maxOutputBytes !== undefined) registryOptions.maxOutputBytes = options.maxOutputBytes;
   if (options.killGraceMs !== undefined) registryOptions.killGraceMs = options.killGraceMs;
   if (options.stopWaitMs !== undefined) registryOptions.stopWaitMs = options.stopWaitMs;
+  if (options.taskAdmissionTimeoutMs !== undefined)
+    registryOptions.taskAdmissionTimeoutMs = options.taskAdmissionTimeoutMs;
+  if (options.attestedGitKillGraceMs !== undefined)
+    registryOptions.attestedGitKillGraceMs = options.attestedGitKillGraceMs;
+  if (options.attestedGitSpawn !== undefined)
+    registryOptions.attestedGitSpawn = options.attestedGitSpawn;
   if (options.now !== undefined) registryOptions.now = options.now;
   if (options.killProcess !== undefined) registryOptions.killProcess = options.killProcess;
   if (options.killTree !== undefined) registryOptions.killTree = options.killTree;
@@ -280,6 +290,61 @@ async function waitFor(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Timed out waiting for ${message}`);
+}
+
+async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return Promise.race([
+    promise.then(
+      () => true,
+      () => true,
+    ),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+function pidExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !(
+      typeof error === 'object' &&
+      error !== null &&
+      Reflect.get(error, 'code') === 'ESRCH'
+    );
+  }
+}
+
+async function waitForPidExit(pid: number, label: string, timeoutMs = 1000): Promise<void> {
+  await waitFor(() => !pidExists(pid), `${label} pid ${String(pid)} exit`, timeoutMs);
+}
+
+async function filesBelow(path: string): Promise<string[]> {
+  if (!existsSync(path)) return [];
+  const files: string[] = [];
+  const visit = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const child = join(dir, entry.name);
+      if (entry.isDirectory()) await visit(child);
+      else files.push(child);
+    }
+  };
+  await visit(path);
+  return files;
 }
 
 async function readJsonEventually(path: string, timeoutMs = 1000): Promise<JsonObject> {
@@ -528,6 +593,219 @@ void describe('BackgroundTaskRegistry', () => {
       await cleanup(h.root);
     }
   });
+
+  void it('waits for cancelled pre-insertion managed work to settle before releasing admission', async () => {
+    const h = await createHarness();
+    const enteredEnsure = deferred<void>();
+    const releaseEnsure = deferred<void>();
+    const completion = deferred<void>();
+    const originalEnsureRuntimeDir = h.registry.ensureRuntimeDir.bind(h.registry);
+    let cancels = 0;
+    h.registry.ensureRuntimeDir = async (ctx) => {
+      enteredEnsure.resolve(undefined);
+      await releaseEnsure.promise;
+      return originalEnsureRuntimeDir(ctx);
+    };
+    try {
+      const start = h.registry.startManagedTask(h.ctx, {
+        id: 'reason-managedcleanup000000000000000000',
+        name: 'managed cleanup admission',
+        command: 'fusion_reason',
+        isAgent: true,
+        completion: completion.promise,
+        cancel: () => {
+          cancels += 1;
+        },
+        notifyOnCompletion: false,
+        triggerOnCompletion: false,
+        fusion: {
+          runId: 'reason-managedcleanup000000000000000000',
+          workflow: 'reason',
+          artifactDir: '.pi/fusion/managed-cleanup',
+          artifactDirAbs: join(h.cwd, '.pi', 'fusion', 'managed-cleanup'),
+          state: 'initializing',
+          usageDelivered: false,
+        },
+      });
+      await enteredEnsure.promise;
+
+      h.registry.setShuttingDown(true);
+      const drain = h.registry.waitForTaskAdmissions();
+      releaseEnsure.resolve(undefined);
+      await waitFor(() => cancels === 1, 'managed preflight cancellation');
+      assert.equal(
+        await settlesWithin(drain, 30),
+        false,
+        'admission must remain owned until managed cleanup completion settles',
+      );
+      assert.equal(
+        await settlesWithin(start, 30),
+        false,
+        'starter must remain unsettled until managed cleanup completion settles',
+      );
+
+      completion.resolve(undefined);
+      await assert.rejects(start, /admission|closed/i);
+      await drain;
+      assert.equal(h.registry.allTasks().length, 0);
+      assert.equal(h.children.length, 0);
+    } finally {
+      releaseEnsure.resolve(undefined);
+      completion.resolve(undefined);
+      h.registry.ensureRuntimeDir = originalEnsureRuntimeDir;
+      h.registry.setShuttingDown(true);
+      await cleanup(h.root);
+    }
+  });
+
+  void it('enforces the admission-owned deadline while Git is running', async () => {
+    if (process.platform === 'win32') return;
+    const gitChild = new FakeChild(9101);
+    const gitSignals: NodeJS.Signals[] = [];
+    let gitSpawns = 0;
+    const h = await createHarness({
+      modelRegistry: oauthRegistry(),
+      taskAdmissionTimeoutMs: 20,
+      attestedGitKillGraceMs: 5,
+      attestedGitSpawn: (_command, _args, options) => {
+        gitSpawns += 1;
+        assert.equal(options.detached, process.platform !== 'win32');
+        return gitChild;
+      },
+      killProcess: (_pid, signal) => {
+        if (typeof signal === 'string') gitSignals.push(signal);
+        if (signal === 'SIGKILL') queueMicrotask(() => gitChild.close(null, 'SIGKILL'));
+        return true;
+      },
+    });
+    try {
+      const start = h.registry.startAttestedPiTask(h.ctx, {
+        name: 'deadline Git admission',
+        provider: 'openai-codex',
+        model: 'gpt-5.5',
+        prompt: 'write report.md',
+        reportPath: 'report.md',
+      });
+      await assert.rejects(
+        start,
+        (error: unknown) =>
+          typeof error === 'object' &&
+          error !== null &&
+          Reflect.get(error, 'code') === 'pi_background_tasks_admission_timeout',
+      );
+      await h.registry.waitForTaskAdmissions();
+      assert.equal(gitSpawns, 1);
+      assert.deepEqual(gitSignals, ['SIGTERM', 'SIGKILL']);
+      assert.equal(h.registry.allTasks().length, 0);
+      assert.equal(h.children.length, 0, 'deadline preflight must not spawn Pi');
+      assert.deepEqual(await filesBelow(join(h.cwd, '.pi', 'tasks')), []);
+    } finally {
+      h.registry.setShuttingDown(true);
+      await cleanup(h.root);
+    }
+  });
+
+  void it(
+    'cancels and reaps a real hanging attested Git preflight tree before admission drain',
+    { timeout: 5000 },
+    async () => {
+      if (process.platform === 'win32') return;
+      const h = await createHarness({
+        modelRegistry: oauthRegistry(),
+        taskAdmissionTimeoutMs: 2000,
+        attestedGitKillGraceMs: 25,
+      });
+      const bin = join(h.root, 'bin');
+      const gitPidPath = join(h.root, 'git.pid');
+      const descendantPidPath = join(h.root, 'git-descendant.pid');
+      await mkdir(bin, { recursive: true });
+      const fakeGit = join(bin, 'git');
+      await writeFile(
+        fakeGit,
+        `#!/usr/bin/env node
+const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+writeFileSync(process.env.PI_BG_TEST_GIT_PID_FILE, String(process.pid));
+const child = spawn('/bin/sleep', ['60'], { stdio: 'ignore' });
+writeFileSync(process.env.PI_BG_TEST_GIT_DESCENDANT_PID_FILE, String(child.pid));
+setInterval(() => {}, 1000);
+`,
+        'utf8',
+      );
+      await chmod(fakeGit, 0o755);
+
+      const oldPath = process.env['PATH'];
+      const oldGitPidPath = process.env['PI_BG_TEST_GIT_PID_FILE'];
+      const oldDescendantPidPath = process.env['PI_BG_TEST_GIT_DESCENDANT_PID_FILE'];
+      process.env['PATH'] = `${bin}:${oldPath ?? ''}`;
+      process.env['PI_BG_TEST_GIT_PID_FILE'] = gitPidPath;
+      process.env['PI_BG_TEST_GIT_DESCENDANT_PID_FILE'] = descendantPidPath;
+      let gitPid: number | undefined;
+      let descendantPid: number | undefined;
+      let assertionsComplete = false;
+      try {
+        const start = h.registry.startAttestedPiTask(h.ctx, {
+          name: 'real hanging Git admission',
+          provider: 'openai-codex',
+          model: 'gpt-5.5',
+          prompt: 'write report.md',
+          reportPath: 'report.md',
+        });
+        await waitFor(
+          () => existsSync(gitPidPath) && existsSync(descendantPidPath),
+          'fake Git process tree pid files',
+          1500,
+        );
+        gitPid = Number((await readFile(gitPidPath, 'utf8')).trim());
+        descendantPid = Number((await readFile(descendantPidPath, 'utf8')).trim());
+        assert.ok(Number.isSafeInteger(gitPid) && gitPid > 0);
+        assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
+
+        const shutdownStarted = Date.now();
+        h.registry.setShuttingDown(true);
+        const drain = h.registry.waitForTaskAdmissions();
+        const [startResult] = await withTimeout(
+          Promise.all([Promise.allSettled([start]), drain]),
+          1500,
+          'attested start/admission drain exceeded 1500ms',
+        );
+        assert.equal(startResult[0]?.status, 'rejected');
+        assert.ok(Date.now() - shutdownStarted < 1500);
+        await waitForPidExit(gitPid, 'fake Git root');
+        await waitForPidExit(descendantPid, 'fake Git descendant');
+        assert.equal(h.registry.allTasks().length, 0, 'preflight must not register a task');
+        assert.equal(h.children.length, 0, 'preflight must not spawn Pi');
+        assert.deepEqual(
+          await filesBelow(join(h.cwd, '.pi', 'tasks')),
+          [],
+          'cancelled preflight must leave no task artifacts',
+        );
+        assertionsComplete = true;
+      } finally {
+        // Rescue is failure-only. A passing regression must prove production
+        // cancellation reaped both processes without help from the test.
+        if (!assertionsComplete) {
+          for (const pid of [descendantPid, gitPid]) {
+            if (pid === undefined || !pidExists(pid)) continue;
+            try {
+              process.kill(pid, 'SIGKILL');
+            } catch {
+              // Already exited.
+            }
+          }
+        }
+        if (oldPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = oldPath;
+        if (oldGitPidPath === undefined) delete process.env['PI_BG_TEST_GIT_PID_FILE'];
+        else process.env['PI_BG_TEST_GIT_PID_FILE'] = oldGitPidPath;
+        if (oldDescendantPidPath === undefined)
+          delete process.env['PI_BG_TEST_GIT_DESCENDANT_PID_FILE'];
+        else process.env['PI_BG_TEST_GIT_DESCENDANT_PID_FILE'] = oldDescendantPidPath;
+        h.registry.setShuttingDown(true);
+        await cleanup(h.root);
+      }
+    },
+  );
 
   void it('preserves full shell command bytes except surrounding whitespace', async () => {
     const h = await createHarness({ platform: 'linux' });

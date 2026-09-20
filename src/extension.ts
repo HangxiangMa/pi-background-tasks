@@ -524,9 +524,9 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     if (shutdownCleanupStarted) return;
     shutdownCleanupStarted = true;
     try {
-      // Admission closure races asynchronous preflight, so this drain cannot be
-      // held open by a late ensureRuntimeDir continuation. Any admitted child is
-      // already inserted synchronously before spawn and is visible below.
+      // Admission closure aborts cooperative preflight and the drain retains
+      // ownership until subprocess/file/managed cleanup settles. Any admitted
+      // child is inserted synchronously before spawn and is visible below.
       await registry.waitForTaskAdmissions();
       const running = registry.allTasks().filter((task) => task.status === 'running');
       if (running.length === 0) return;

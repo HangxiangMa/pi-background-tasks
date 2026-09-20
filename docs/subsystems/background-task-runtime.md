@@ -22,7 +22,9 @@ The runtime owns task identity, shell invocation, process lifecycle, bounded log
 
 ## Task admission
 
-Every registry starter (ordinary, managed, delegate, and attested Pi) holds a counted admission lease. Session shutdown closes admissions one way before cleanup. Runtime-directory preflight races the closure signal, every later asynchronous preflight boundary rechecks admission, and insertion plus spawn have immediate checks with no yielding gap between them. Shutdown drains accepted admissions before taking its running-task snapshot. Therefore a preflight paused across closure cannot insert or spawn, while a child that spawned before closure was already inserted and is owned by shutdown cleanup. Interrupted managed preflight invokes its cancellation callback; interrupted file preflight closes streams and removes its partial task files.
+Every registry starter (ordinary, managed, delegate, and attested Pi) holds a counted admission scope with a one-way `AbortSignal` and a 30 second overall preflight deadline. Session shutdown closes admissions and aborts every live scope before cleanup. Cooperative preflight receives that signal; all other started operations remain tracked until they settle. Insertion plus spawn retain immediate checks with no yielding gap between them. Shutdown drains accepted admissions before taking its running-task snapshot. Therefore a preflight crossing closure cannot insert or spawn, while a child that spawned before closure was already inserted and is owned by shutdown cleanup.
+
+Interrupted managed work is cancelled and its workflow/child cleanup promise is awaited before the lease is released; if it was already inserted, terminal finalization remains registry-owned. Interrupted wrapper/durable-file preflight awaits opened-handle/stream cleanup and removes owned partial task files. Node does not provide physical cancellation for every filesystem syscall: such a syscall remains admission-owned and shutdown waits for its settlement rather than racing it and allowing late artifact work. Cleanup failures are surfaced; they are not treated as successful cancellation.
 
 ## Starting managed tasks
 
@@ -72,7 +74,7 @@ Synchronous emission has its own in-flight settlement phase. Reentrant shutdown/
 
 Only `running` tasks can be stopped. Managed tasks invoke their task-owned cancellation callback and wait for workflow settlement; process tasks use the platform paths below.
 
-Session shutdown atomically closes task admission and terminal publication before managed-workflow cleanup starts, drains admission leases, then applies the normal stop paths. Pending publication is abandoned, not reported as delivered. Registry admission/publication closure is one-way: session replacement receives a fresh registry, while the old registry cannot be reopened by late lifecycle, admission, or gate continuations.
+Session shutdown atomically closes task admission and terminal publication before managed-workflow cleanup starts, aborts admission-owned cancellable work, drains admission cleanup, then applies the normal stop paths. Pending publication is abandoned, not reported as delivered. Registry admission/publication closure is one-way: session replacement receives a fresh registry, while the old registry cannot be reopened by late lifecycle, admission, or gate continuations.
 
 POSIX stop path:
 

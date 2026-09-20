@@ -136,7 +136,7 @@ If a synchronous terminal listener calls `close()` while emission is on the stac
 
 ## Operations
 
-- `run` starts a background task through the registry and returns a `BgTaskSnapshot`. Task admission is one-way closed at shutdown; asynchronous preflight rechecks closure before insertion/spawn, and a request crossing closure cannot return success.
+- `run` starts a background task through the registry and returns a `BgTaskSnapshot`. Task admission is one-way closed at shutdown; each accepted admission has cancellation plus an overall bounded preflight deadline, and shutdown drains its owned cleanup before taking the running-task snapshot. A request crossing closure cannot insert/spawn or return success.
 - `status` returns `{ tasks }`; with `taskId`, the array has one resolved task or errors loudly.
 - `logs` returns bounded log details plus `text`; full bytes stay in `.pi/tasks/...output`.
 - `kill` stops a running task and returns `{ task, message }` after the stop path.
