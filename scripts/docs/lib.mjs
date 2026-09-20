@@ -351,7 +351,143 @@ function resolveIdentifierValue(ts, root, rel, name, cache, stack = []) {
   throw new DocsGateError(`${rel} references unsupported or non-literal identifier ${name}`);
 }
 
+function frozenObjectLiteral(ts, info, expression, context) {
+  const value = stripAsConst(ts, expression);
+  if (
+    !ts.isCallExpression(value) ||
+    value.arguments.length !== 1 ||
+    !ts.isPropertyAccessExpression(value.expression) ||
+    value.expression.expression.getText(info.sf) !== 'Object' ||
+    value.expression.name.text !== 'freeze'
+  ) {
+    throw new DocsGateError(`${context} must return an Object.freeze(...) value`);
+  }
+  const object = stripAsConst(ts, value.arguments[0]);
+  if (!ts.isObjectLiteralExpression(object)) {
+    throw new DocsGateError(`${context} Object.freeze argument must be an object literal`);
+  }
+  return object;
+}
+
+function topLevelConstInitializers(ts, fn) {
+  const declarations = new Map();
+  for (const statement of fn.body?.statements ?? []) {
+    if (
+      !ts.isVariableStatement(statement) ||
+      (statement.declarationList.flags & ts.NodeFlags.Const) === 0
+    ) {
+      continue;
+    }
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && declaration.initializer) {
+        declarations.set(declaration.name.text, declaration.initializer);
+      }
+    }
+  }
+  return declarations;
+}
+
+function assertImmutableVariantParser(ts, root, rel, cache) {
+  const info = moduleInfo(ts, root, rel, cache);
+  const parser = findExportedFunction(
+    ts,
+    root,
+    rel,
+    'parseBackgroundTasksConfig',
+    cache,
+  );
+  if (parser.rel !== rel || !parser.node.body) {
+    throw new DocsGateError(`${rel} variant parser must be a local function with a block body`);
+  }
+  const parserReturns = parser.node.body.statements.filter(ts.isReturnStatement);
+  if (parserReturns.length !== 1 || parserReturns[0].expression === undefined) {
+    throw new DocsGateError(`${rel} variant parser must have one explicit immutable return`);
+  }
+  const returnedConfig = frozenObjectLiteral(
+    ts,
+    info,
+    parserReturns[0].expression,
+    `${rel} parseBackgroundTasksConfig`,
+  );
+  const returnedKeys = [];
+  for (const property of returnedConfig.properties) {
+    if (!ts.isShorthandPropertyAssignment(property)) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, property, ts)} variant parser return fields must be immutable shorthand bindings`,
+      );
+    }
+    returnedKeys.push(property.name.text);
+  }
+  if (JSON.stringify(returnedKeys) !== JSON.stringify(['features', 'dockShortcut'])) {
+    throw new DocsGateError(
+      `${rel} variant parser must freeze exactly the features and dockShortcut bindings`,
+    );
+  }
+
+  const parserBindings = topLevelConstInitializers(ts, parser.node);
+  const featuresInitializer = stripAsConst(ts, parserBindings.get('features'));
+  if (
+    !featuresInitializer ||
+    !ts.isCallExpression(featuresInitializer) ||
+    !ts.isIdentifier(stripAsConst(ts, featuresInitializer.expression))
+  ) {
+    throw new DocsGateError(`${rel} variant parser features binding must call a local parser`);
+  }
+  const featuresParserName = stripAsConst(ts, featuresInitializer.expression).text;
+  const featuresParser = info.localFunctions.get(featuresParserName);
+  if (!featuresParser?.body || !parserBindings.has('dockShortcut')) {
+    throw new DocsGateError(`${rel} variant parser must bind local feature and dock parsers`);
+  }
+  const featureReturns = featuresParser.body.statements.filter(ts.isReturnStatement);
+  if (featureReturns.length !== 1 || featureReturns[0].expression === undefined) {
+    throw new DocsGateError(`${rel} feature parser must have one explicit immutable return`);
+  }
+  const returnedFeatures = frozenObjectLiteral(
+    ts,
+    info,
+    featureReturns[0].expression,
+    `${rel} ${featuresParserName}`,
+  );
+  const featureProperties = new Map();
+  for (const property of returnedFeatures.properties) {
+    if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name)) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, property, ts)} feature parser fields must be explicit assignments`,
+      );
+    }
+    featureProperties.set(property.name.text, stripAsConst(ts, property.initializer));
+  }
+  if (
+    JSON.stringify([...featureProperties.keys()]) !== JSON.stringify(DOCS_FEATURE_VALUES) ||
+    featureProperties.get('process')?.kind !== ts.SyntaxKind.TrueKeyword
+  ) {
+    throw new DocsGateError(`${rel} feature parser must freeze the exact finite feature record`);
+  }
+  let selectedBinding;
+  for (const feature of DOCS_FEATURE_VALUES.slice(1)) {
+    const initializer = featureProperties.get(feature);
+    if (
+      !initializer ||
+      !ts.isCallExpression(initializer) ||
+      initializer.arguments.length !== 1 ||
+      !ts.isPropertyAccessExpression(initializer.expression) ||
+      initializer.expression.name.text !== 'has' ||
+      !ts.isIdentifier(stripAsConst(ts, initializer.expression.expression)) ||
+      !ts.isStringLiteral(initializer.arguments[0]) ||
+      initializer.arguments[0].text !== feature
+    ) {
+      throw new DocsGateError(`${rel} feature parser field ${feature} is not structurally validated`);
+    }
+    const binding = stripAsConst(ts, initializer.expression.expression).text;
+    selectedBinding ??= binding;
+    if (binding !== selectedBinding) {
+      throw new DocsGateError(`${rel} feature parser fields must read one validated selection set`);
+    }
+  }
+}
+
 function variantContractFromModule(ts, root, rel, cache) {
+  assertImmutableVariantParser(ts, root, rel, cache);
   const read = (name) => resolveIdentifierValue(ts, root, rel, name, cache);
   const featureValues = read('PI_BG_FEATURE_VALUES');
   const defaultFeatures = read('PI_BG_DEFAULT_FEATURES');
@@ -773,6 +909,66 @@ function collectRegistrationsInFunction(
       `${lineOf(info.sf, condition, ts)} unrecognized finite variant condition`,
     );
   };
+  const isAllowedConfigBindingUse = (node) => {
+    if (
+      ts.isVariableDeclaration(node.parent) &&
+      node.parent.name === node &&
+      configBindings.has(node.text)
+    ) {
+      return true;
+    }
+    const directAccess = node.parent;
+    if (
+      ts.isPropertyAccessExpression(directAccess) &&
+      directAccess.expression === node &&
+      directAccess.name.text === 'dockShortcut' &&
+      ts.isCallExpression(directAccess.parent) &&
+      directAccess.parent.arguments.length === 1 &&
+      directAccess.parent.arguments[0] === directAccess
+    ) {
+      const callee = calleeIdentifier(directAccess.parent.expression);
+      const imported = callee && info.imports.get(callee.text);
+      const parserImport = [...info.imports.values()].find(
+        (candidate) => candidate.exported === 'parseBackgroundTasksConfig',
+      );
+      if (
+        imported?.exported === 'dockShortcutFooterHint' &&
+        parserImport?.rel === imported.rel
+      ) {
+        return true;
+      }
+    }
+    let current = node;
+    while (current.parent && current.parent !== fn) {
+      const parent = current.parent;
+      if (ts.isIfStatement(parent) && parent.expression === current) {
+        if (
+          !ts.isBlock(fn.body) ||
+          parent.parent !== fn.body ||
+          !ts.isBlock(parent.thenStatement) ||
+          parent.elseStatement !== undefined
+        ) {
+          return false;
+        }
+        finiteAvailability(parent.expression);
+        return true;
+      }
+      if (
+        ts.isPropertyAccessExpression(parent) ||
+        ts.isParenthesizedExpression(parent) ||
+        ts.isAsExpression(parent) ||
+        ts.isTypeAssertionExpression(parent) ||
+        ts.isNonNullExpression(parent) ||
+        ts.isSatisfiesExpression(parent) ||
+        ts.isBinaryExpression(parent)
+      ) {
+        current = parent;
+        continue;
+      }
+      return false;
+    }
+    return false;
+  };
   const isDirectCallTarget = (node) => {
     let current = node;
     while (
@@ -928,6 +1124,30 @@ function collectRegistrationsInFunction(
     scan(rootNode);
     return unsafe;
   };
+
+  for (const parameter of fn.parameters ?? []) {
+    if (!parameter.initializer) continue;
+    let hasRegistrationAccess = false;
+    const scanInitializer = (node) => {
+      if (
+        ts.isPropertyAccessExpression(node) &&
+        (node.name.text.startsWith('register') || node.name.text === 'events')
+      ) {
+        hasRegistrationAccess = true;
+      }
+      ts.forEachChild(node, scanInitializer);
+    };
+    scanInitializer(parameter.initializer);
+    if (
+      (ts.isIdentifier(parameter.name) && parameter.name.text === piParamName) ||
+      expressionContainsUnsafePiUse(parameter.initializer) ||
+      hasRegistrationAccess
+    ) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, parameter, ts)} registration-owning parameter initializer must not alias or derive the Pi registration host`,
+      );
+    }
+  }
 
   const validateToolWrapper = (node) => {
     if (!node.name || !node.body || node.parameters.length !== 1) {
@@ -1142,6 +1362,167 @@ function collectRegistrationsInFunction(
     return found;
   };
 
+  const allowedClaimGuardReturns = new Set();
+  if (fn.body && ts.isBlock(fn.body)) {
+    const constInitializers = topLevelConstInitializers(ts, fn);
+    for (const [statementIndex, statement] of fn.body.statements.entries()) {
+      if (!ts.isIfStatement(statement) || statement.elseStatement !== undefined) continue;
+      const condition = unwrapExpression(statement.expression);
+      if (
+        !ts.isBinaryExpression(condition) ||
+        condition.operatorToken.kind !== ts.SyntaxKind.GreaterThanToken ||
+        !ts.isNumericLiteral(unwrapExpression(condition.right)) ||
+        Number(unwrapExpression(condition.right).text) !== 0
+      ) {
+        continue;
+      }
+      const lengthAccess = unwrapExpression(condition.left);
+      if (
+        !ts.isPropertyAccessExpression(lengthAccess) ||
+        lengthAccess.name.text !== 'length' ||
+        !ts.isIdentifier(unwrapExpression(lengthAccess.expression))
+      ) {
+        continue;
+      }
+      const acknowledgements = unwrapExpression(lengthAccess.expression).text;
+      const acknowledgementInitializer = constInitializers.get(acknowledgements);
+      const acknowledgementArray =
+        acknowledgementInitializer && unwrapExpression(acknowledgementInitializer);
+      if (
+        !acknowledgementArray ||
+        !ts.isArrayLiteralExpression(acknowledgementArray) ||
+        acknowledgementArray.elements.length !== 0
+      ) {
+        continue;
+      }
+
+      const guardedReturn = ts.isReturnStatement(statement.thenStatement)
+        ? statement.thenStatement
+        : ts.isBlock(statement.thenStatement) && statement.thenStatement.statements.length === 1 &&
+            ts.isReturnStatement(statement.thenStatement.statements[0])
+          ? statement.thenStatement.statements[0]
+          : undefined;
+      if (!guardedReturn || guardedReturn.expression !== undefined) continue;
+
+      const candidate = fn.body.statements[statementIndex - 1];
+      if (!candidate || !ts.isExpressionStatement(candidate)) continue;
+      const emit = unwrapExpression(candidate.expression);
+      if (
+        !ts.isCallExpression(emit) ||
+        emit.arguments.length !== 2 ||
+        !ts.isPropertyAccessExpression(unwrapExpression(emit.expression)) ||
+        unwrapExpression(emit.expression).name.text !== 'emit'
+      ) {
+        continue;
+      }
+      const eventsAccess = unwrapExpression(emit.expression).expression;
+      if (
+        !ts.isPropertyAccessExpression(eventsAccess) ||
+        eventsAccess.name.text !== 'events' ||
+        !isPiHostExpression(eventsAccess.expression)
+      ) {
+        continue;
+      }
+      const probeArgument = unwrapExpression(emit.arguments[1]);
+      if (!ts.isIdentifier(probeArgument)) continue;
+      const probeInitializer = constInitializers.get(probeArgument.text);
+      const probeObject = probeInitializer && unwrapExpression(probeInitializer);
+      if (!probeObject || !ts.isObjectLiteralExpression(probeObject)) continue;
+      const acknowledgeProperty = probeObject.properties.find(
+        (property) =>
+          ts.isPropertyAssignment(property) &&
+          ((ts.isIdentifier(property.name) && property.name.text === 'acknowledge') ||
+            (ts.isStringLiteral(property.name) && property.name.text === 'acknowledge')),
+      );
+      if (!acknowledgeProperty || !ts.isPropertyAssignment(acknowledgeProperty)) continue;
+      const callback = unwrapExpression(acknowledgeProperty.initializer);
+      if (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) continue;
+      const callbackStatement = ts.isBlock(callback.body)
+        ? callback.body.statements.length === 1
+          ? callback.body.statements[0]
+          : undefined
+        : undefined;
+      const appendExpression = callbackStatement && ts.isExpressionStatement(callbackStatement)
+        ? unwrapExpression(callbackStatement.expression)
+        : !ts.isBlock(callback.body)
+          ? unwrapExpression(callback.body)
+          : undefined;
+      if (
+        !appendExpression ||
+        !ts.isCallExpression(appendExpression) ||
+        appendExpression.arguments.length !== 1 ||
+        appendExpression.arguments[0].kind !== ts.SyntaxKind.TrueKeyword ||
+        !ts.isPropertyAccessExpression(unwrapExpression(appendExpression.expression)) ||
+        unwrapExpression(appendExpression.expression).name.text !== 'push' ||
+        !ts.isIdentifier(
+          unwrapExpression(unwrapExpression(appendExpression.expression).expression),
+        ) ||
+        unwrapExpression(unwrapExpression(appendExpression.expression).expression).text !==
+          acknowledgements
+      ) {
+        continue;
+      }
+      let acknowledgementUses = 0;
+      let probeUses = 0;
+      const countGuardBindings = (node) => {
+        if (ts.isIdentifier(node) && node.text === acknowledgements) acknowledgementUses += 1;
+        if (ts.isIdentifier(node) && node.text === probeArgument.text) probeUses += 1;
+        ts.forEachChild(node, countGuardBindings);
+      };
+      countGuardBindings(fn.body);
+      if (acknowledgementUses === 3 && probeUses === 2) {
+        allowedClaimGuardReturns.add(guardedReturn);
+      }
+    }
+  }
+
+  const sessionStartRegistrationCallback = (node) => {
+    const call = node.parent;
+    if (!ts.isCallExpression(call) || call.arguments[1] !== node) return undefined;
+    const access = directRegistrationAccess(call.expression);
+    if (access?.name.text !== 'on') return undefined;
+    const eventName = call.arguments[0] && unwrapExpression(call.arguments[0]);
+    if (
+      !eventName ||
+      (!ts.isStringLiteral(eventName) && !ts.isNoSubstitutionTemplateLiteral(eventName)) ||
+      eventName.text !== 'session_start'
+    ) {
+      return undefined;
+    }
+    let ownsRegistrations = false;
+    const scan = (child) => {
+      if (ownsRegistrations) return;
+      if (child !== node && ts.isFunctionLike(child)) return;
+      if (
+        ts.isPropertyAccessExpression(child) &&
+        child.name.text.startsWith('register')
+      ) {
+        ownsRegistrations = true;
+        return;
+      }
+      if (ts.isCallExpression(child)) {
+        const callee = calleeIdentifier(child.expression);
+        if (
+          callee &&
+          info.imports.has(callee.text) &&
+          isPiHostExpression(child.arguments[0])
+        ) {
+          ownsRegistrations = true;
+          return;
+        }
+      }
+      ts.forEachChild(child, scan);
+    };
+    scan(node.body);
+    if (!ownsRegistrations) return undefined;
+    if (!ts.isBlock(node.body)) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, node, ts)} registration-owning session_start callback must have a block body`,
+      );
+    }
+    return registrationAvailability(call, fn.body, 'registration-owning session_start callback');
+  };
+
   function visit(node) {
     if (node !== fn && ts.isFunctionLike(node)) {
       if (
@@ -1151,12 +1532,49 @@ function collectRegistrationsInFunction(
       ) {
         return;
       }
+      const callbackAvailability = sessionStartRegistrationCallback(node);
+      if (callbackAvailability !== undefined) {
+        collectRegistrationsInFunction(
+          ts,
+          root,
+          rel,
+          node,
+          piParamName,
+          cache,
+          regs,
+          visitedFns,
+          callbackAvailability,
+        );
+        return;
+      }
       if (containsUnsupportedNestedRegistration(node)) {
         throw new DocsGateError(
           `${lineOf(info.sf, node, ts)} unsupported nested registration helper or invocation`,
         );
       }
       return;
+    }
+    if (
+      ts.isReturnStatement(node) &&
+      !allowedClaimGuardReturns.has(node)
+    ) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, node, ts)} registration-owning scope contains unsupported early return control flow`,
+      );
+    }
+    if (ts.isThrowStatement(node)) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, node, ts)} registration-owning scope contains unsupported throw control flow`,
+      );
+    }
+    if (
+      ts.isIdentifier(node) &&
+      configBindings.has(node.text) &&
+      !isAllowedConfigBindingUse(node)
+    ) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, node, ts)} finite config binding ${node.text} escapes its validated availability condition`,
+      );
     }
     if (
       ts.isIdentifier(node) &&
@@ -1197,6 +1615,15 @@ function collectRegistrationsInFunction(
     if (ts.isElementAccessExpression(node) && isPiHostExpression(node.expression)) {
       throw new DocsGateError(
         `${lineOf(info.sf, node, ts)} element access on the Pi registration host is unsupported`,
+      );
+    }
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      node.name.text.startsWith('register') &&
+      !isPiHostExpression(node.expression)
+    ) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, node, ts)} registration method ${node.name.text} uses an unsupported registration host binding`,
       );
     }
     if (ts.isPropertyAccessExpression(node) && isPiHostExpression(node.expression)) {

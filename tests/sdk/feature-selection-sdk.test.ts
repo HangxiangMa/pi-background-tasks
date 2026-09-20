@@ -28,6 +28,8 @@ const ambientAttributionPath = resolve('extensions/anthropic-attribution.ts');
 const childAttributionPath = resolve('extensions/anthropic-attribution-child.ts');
 const backgroundPath = resolve('extensions/background-tasks.ts');
 const shortcutOwnerPath = resolve('tests/fixtures/shortcut-owner.ts');
+const featureToolCollisionsPath = resolve('tests/fixtures/feature-tool-collisions.ts');
+const attributionCopyPath = resolve('tests/fixtures/anthropic-attribution-copy.ts');
 const FEATURE_ENV_KEYS = ['PI_BG_FEATURES', 'PI_BG_DOCK_SHORTCUT'] as const;
 const roots: string[] = [];
 const originalEnv = new Map<string, string | undefined>(
@@ -148,11 +150,20 @@ interface SessionHarness {
   session: AgentSession;
   loader: DefaultResourceLoader;
   eventBus: EventBus;
+  modelRuntime: ModelRuntime;
   cwd: string;
   agentDir: string;
 }
 
-async function makeSession(extraPaths: string[] = []): Promise<SessionHarness> {
+interface SessionHarnessOptions {
+  setupModelRuntime?: (runtime: ModelRuntime) => void;
+  onExtensionError?: (error: { event: string; error: string }) => void;
+}
+
+async function makeSession(
+  extraPaths: string[] = [],
+  options: SessionHarnessOptions = {},
+): Promise<SessionHarness> {
   const { cwd, agentDir } = await makeRoot('pi-bg-feature-session-');
   const settingsManager = SettingsManager.inMemory();
   const eventBus = createEventBus();
@@ -174,6 +185,7 @@ async function makeSession(extraPaths: string[] = []): Promise<SessionHarness> {
     authPath: join(agentDir, 'auth.json'),
     modelsPath: null,
   });
+  options.setupModelRuntime?.(modelRuntime);
   const created = await createAgentSession({
     cwd,
     agentDir,
@@ -185,9 +197,15 @@ async function makeSession(extraPaths: string[] = []): Promise<SessionHarness> {
   });
   assert.deepEqual(created.extensionsResult.errors, []);
   await created.session.bindExtensions({
-    onError: (error) => assert.fail(`extension error: ${error.event}: ${error.error}`),
+    onError: (error) => {
+      if (options.onExtensionError) {
+        options.onExtensionError(error);
+        return;
+      }
+      assert.fail(`extension error: ${error.event}: ${error.error}`);
+    },
   });
-  return { session: created.session, loader, eventBus, cwd, agentDir };
+  return { session: created.session, loader, eventBus, modelRuntime, cwd, agentDir };
 }
 
 function sessionInventory(session: AgentSession): RegistrationInventory {
@@ -280,14 +298,17 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
       const enabled = optional.filter((_feature, index) => (mask & (1 << index)) !== 0);
       const features = new Set<string>(['process', ...enabled]);
       configure([...features].join(','), undefined);
-      const { result } = await loadPackage();
-      assert.deepEqual(result.errors, [], `load errors for ${[...features].join(',')}`);
-      const actual = inventory(result);
-      assert.deepEqual(actual, expectedInventory(features), `inventory for ${[...features].join(',')}`);
-      assert.equal(
-        actual.tools.filter((name) => name === 'bg_result').length,
-        features.has('delegate') || features.has('fusion') ? 1 : 0,
-      );
+      const { session } = await makeSession();
+      try {
+        const actual = sessionInventory(session);
+        assert.deepEqual(actual, expectedInventory(features), `inventory for ${[...features].join(',')}`);
+        assert.equal(
+          actual.tools.filter((name) => name === 'bg_result').length,
+          features.has('delegate') || features.has('fusion') ? 1 : 0,
+        );
+      } finally {
+        await closeSession(session);
+      }
     }
   });
 
@@ -352,6 +373,217 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
         0,
       ) >= 3,
     );
+  });
+
+  void it('restores a preexisting host provider by public registration and stream identity', async () => {
+    configure('process,attribution', 'off');
+    function hostStream(): never {
+      throw new Error('host stream marker');
+    }
+    let hostProviderBefore: ReturnType<ModelRuntime['getProvider']>;
+    const { session, modelRuntime } = await makeSession([], {
+      setupModelRuntime: (runtime) => {
+        runtime.registerProvider('anthropic', {
+          api: 'anthropic-messages',
+          streamSimple: hostStream,
+        });
+        hostProviderBefore = runtime.getProvider('anthropic');
+      },
+    });
+    try {
+      assert.notEqual(
+        modelRuntime.getRegisteredProviderConfig('anthropic')?.streamSimple,
+        hostStream,
+        'package provider must be installed while attribution is enabled',
+      );
+      configure('process', 'off');
+      await session.reload();
+      assert.equal(
+        modelRuntime.getRegisteredProviderConfig('anthropic')?.streamSimple,
+        hostStream,
+        'the exact preexisting dynamic host stream must be restored',
+      );
+      assert.ok(hostProviderBefore, 'fixture must capture the preexisting effective provider');
+      assert.ok(modelRuntime.getProvider('anthropic'), 'restored host provider must remain effective');
+    } finally {
+      await closeSession(session);
+    }
+  });
+
+  void it('restores a preexisting native provider object by exact public identity', async () => {
+    configure('process,attribution', 'off');
+    let nativeProvider: ReturnType<ModelRuntime['getProvider']>;
+    const { session, modelRuntime } = await makeSession([], {
+      setupModelRuntime: (runtime) => {
+        nativeProvider = runtime.getProvider('anthropic');
+        assert.ok(nativeProvider);
+        runtime.registerNativeProvider(nativeProvider);
+      },
+    });
+    try {
+      assert.equal(modelRuntime.getRegisteredNativeProvider('anthropic'), undefined);
+      configure('process', 'off');
+      await session.reload();
+      assert.equal(modelRuntime.getRegisteredNativeProvider('anthropic'), nativeProvider);
+      assert.equal(modelRuntime.getProvider('anthropic'), nativeProvider);
+    } finally {
+      await closeSession(session);
+    }
+  });
+
+  void it('does not remove a provider owner installed after this attribution instance', async () => {
+    configure('process,attribution', 'off');
+    function laterStream(): never {
+      throw new Error('later owner marker');
+    }
+    const { session, modelRuntime } = await makeSession();
+    let shutdown = false;
+    try {
+      modelRuntime.registerProvider('anthropic', {
+        api: 'anthropic-messages',
+        streamSimple: laterStream,
+      });
+      assert.equal(modelRuntime.getRegisteredProviderConfig('anthropic')?.streamSimple, laterStream);
+      await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+      shutdown = true;
+      assert.equal(
+        modelRuntime.getRegisteredProviderConfig('anthropic')?.streamSimple,
+        laterStream,
+        'later dynamic owner must survive package shutdown',
+      );
+      assert.ok(modelRuntime.getProvider('anthropic'), 'later provider must remain effective');
+    } finally {
+      if (!shutdown) await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+      session.dispose();
+    }
+  });
+
+  void it('publishes no attribution owner or command when immediate provider installation fails', async () => {
+    configure('process,attribution', 'off');
+    function hostStream(): never {
+      throw new Error('failure host marker');
+    }
+    let packageRegistrationFailures = 0;
+    const extensionErrors: Array<{ event: string; error: string }> = [];
+    const { session, modelRuntime, eventBus } = await makeSession([], {
+      setupModelRuntime: (runtime) => {
+        runtime.registerProvider('anthropic', {
+          api: 'anthropic-messages',
+          streamSimple: hostStream,
+        });
+        const realRegister = runtime.registerProvider.bind(runtime);
+        const rejectingRegister: ModelRuntime['registerProvider'] = (providerId, providerConfig) => {
+          if (providerId === 'anthropic' && providerConfig.streamSimple !== hostStream) {
+            packageRegistrationFailures += 1;
+            throw new Error('fixture rejects package provider registration');
+          }
+          realRegister(providerId, providerConfig);
+        };
+        runtime.registerProvider = rejectingRegister;
+      },
+      onExtensionError: (error) => extensionErrors.push(error),
+    });
+    try {
+      let claimAcks = 0;
+      eventBus.emit('pi-anthropic-attribution:claim:v1', {
+        schema_version: 'pi-anthropic-attribution.claim.v1',
+        acknowledge: () => {
+          claimAcks += 1;
+        },
+      });
+      assert.equal(packageRegistrationFailures, 1);
+      assert.ok(
+        extensionErrors.some(
+          (error) => error.event === 'session_start' && /fixture rejects/.test(error.error),
+        ),
+        `expected session_start installation error: ${JSON.stringify(extensionErrors)}`,
+      );
+      assert.equal(modelRuntime.getRegisteredProviderConfig('anthropic')?.streamSimple, hostStream);
+      assert.equal(
+        session.extensionRunner
+          .getRegisteredCommands()
+          .some((command) => command.invocationName === 'claude-cache'),
+        false,
+      );
+      assert.equal(claimAcks, 0, 'failed installation must not publish attribution ownership');
+      await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+      assert.equal(
+        modelRuntime.getRegisteredProviderConfig('anthropic')?.streamSimple,
+        hostStream,
+        'failed installer cleanup must leave the host provider untouched',
+      );
+    } finally {
+      session.dispose();
+    }
+  });
+
+  void it('preserves active external tools that collide with disabled package capability names', async () => {
+    configure('process', 'off');
+    const { session } = await makeSession([featureToolCollisionsPath]);
+    try {
+      const expected = ['bg_delegate', 'fusion_brainstorm', 'external_feature_control'];
+      for (const name of expected) {
+        assert.ok(session.getToolDefinition(name), `${name} must remain registered`);
+        assert.ok(session.getActiveToolNames().includes(name), `${name} must remain active`);
+      }
+      const byName = new Map(session.getAllTools().map((tool) => [tool.name, tool]));
+      for (const name of expected) {
+        assert.match(
+          byName.get(name)?.sourceInfo.path ?? '',
+          /feature-tool-collisions\.ts$/u,
+          `${name} must retain external source provenance`,
+        );
+      }
+    } finally {
+      await closeSession(session);
+    }
+  });
+
+  void it('keeps an independent ambient copy inert after one successful owner installs', async () => {
+    configure('process,attribution', 'off');
+    const { session, eventBus } = await makeSession([attributionCopyPath]);
+    try {
+      const cacheCommands = session.extensionRunner
+        .getRegisteredCommands()
+        .filter((command) => command.name === 'claude-cache');
+      assert.equal(cacheCommands.length, 1, 'duplicate copies must expose one cache command');
+      let claimAcks = 0;
+      eventBus.emit('pi-anthropic-attribution:claim:v1', {
+        schema_version: 'pi-anthropic-attribution.claim.v1',
+        acknowledge: () => {
+          claimAcks += 1;
+        },
+      });
+      assert.equal(claimAcks, 1, 'duplicate copies must publish one successful owner');
+    } finally {
+      await closeSession(session);
+    }
+  });
+
+  void it('rebuilds one successful attribution claim across enabled-disabled-enabled reload', async () => {
+    configure(undefined, 'shift+down');
+    const { session, eventBus } = await makeSession();
+    const claimCount = (): number => {
+      let count = 0;
+      eventBus.emit('pi-anthropic-attribution:claim:v1', {
+        schema_version: 'pi-anthropic-attribution.claim.v1',
+        acknowledge: () => {
+          count += 1;
+        },
+      });
+      return count;
+    };
+    try {
+      assert.equal(claimCount(), 1);
+      configure('process', 'off');
+      await session.reload();
+      assert.equal(claimCount(), 0);
+      configure('process,attribution', 'ctrl+alt+b');
+      await session.reload();
+      assert.equal(claimCount(), 1);
+    } finally {
+      await closeSession(session);
+    }
   });
 
   void it('rebuilds exact registrations and active tools across a real AgentSession reload', async () => {

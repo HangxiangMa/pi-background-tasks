@@ -92,6 +92,78 @@ void describe('docs package integration contract', () => {
     assert.match(text('docs/operations/configuration.md'), /PI_BG_DOCK_SHORTCUT/);
   });
 
+  void it('evaluates the exact manifest inventory for all 48 feature and dock profiles', () => {
+    const manifest = JSON.parse(text('docs/manifest.json')) as {
+      public_surfaces: Record<
+        string,
+        Array<{ id: string; availability: string; default_available: boolean }>
+      >;
+    };
+    const surfaces = Object.values(manifest.public_surfaces).flat();
+    const always = new Set(
+      surfaces.filter((surface) => surface.availability === 'always').map((surface) => surface.id),
+    );
+    assert.equal(always.size, 15);
+    const byFeature = new Map<string, ReadonlySet<string>>([
+      ['delegate', new Set(['tool:bg_delegate'])],
+      [
+        'fusion',
+        new Set([
+          'command:fusion',
+          'command:fusion-models',
+          'tool:fusion_investigate',
+          'tool:fusion_reason',
+          'tool:fusion_research',
+          'tool:fusion_validate',
+          'renderer:fusion-result',
+          'workflow:investigate',
+          'workflow:reason',
+          'workflow:research',
+          'workflow:validate',
+        ]),
+      ],
+      ['attested', new Set(['tool:bg_run_pi_attested'])],
+      ['attribution', new Set(['command:claude-cache'])],
+    ]);
+    const optional = [...byFeature.keys()];
+    const docks = ['shift+down', 'ctrl+alt+b', 'off'] as const;
+    for (let mask = 0; mask < 1 << optional.length; mask += 1) {
+      const selected = new Set(
+        optional.filter((_feature, index) => (mask & (1 << index)) !== 0),
+      );
+      for (const dock of docks) {
+        const expected = new Set(always);
+        for (const feature of selected) {
+          for (const id of byFeature.get(feature) ?? []) expected.add(id);
+        }
+        if (selected.has('delegate') || selected.has('fusion')) expected.add('tool:bg_result');
+        if (dock !== 'off') expected.add(`shortcut:${dock}`);
+
+        const actual = surfaces
+          .filter((surface) => {
+            if (surface.availability === 'always') return true;
+            if (surface.availability === 'any(feature:delegate,feature:fusion)') {
+              return selected.has('delegate') || selected.has('fusion');
+            }
+            if (surface.availability.startsWith('feature:')) {
+              return selected.has(surface.availability.slice('feature:'.length));
+            }
+            if (surface.availability.startsWith('dock:')) {
+              return surface.availability === `dock:${dock}`;
+            }
+            assert.fail(`unsupported availability ${surface.availability}`);
+          })
+          .map((surface) => surface.id)
+          .sort();
+        assert.deepEqual(
+          actual,
+          [...expected].sort(),
+          `manifest profile mask=${String(mask)} dock=${dock}`,
+        );
+      }
+    }
+  });
+
   void it('pins reviewed runtime and generated artifact semantics', () => {
     const contracts = text('docs/reference/runtime-contracts.md');
     assert.match(contracts, /candidate-<slot>\.attempt-<n>/);

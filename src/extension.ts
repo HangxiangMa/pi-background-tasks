@@ -46,21 +46,11 @@ import {
   type BackgroundTaskForUi,
   type TaskManagerResult,
 } from './ui/background-tasks-manager.js';
-import {
-  FUSION_INVESTIGATE_TOOL_NAME,
-  FUSION_REASON_TOOL_NAME,
-  FUSION_RESEARCH_TOOL_NAME,
-  FUSION_VALIDATE_TOOL_NAME,
-  registerFusionExtension,
-} from './fusion-extension.js';
+import { registerFusionExtension } from './fusion-extension.js';
 import {
   registerBackgroundResultExtension,
   registerDelegateExtension,
 } from './delegate-extension.js';
-import {
-  DELEGATE_RESULT_TOOL_NAME,
-  DELEGATE_TOOL_NAME,
-} from './core/delegate/types.js';
 import {
   dockShortcutFooterHint,
   parseBackgroundTasksConfig,
@@ -88,17 +78,6 @@ const PACKAGE_VERSION = packageInfo.version;
 const LIGHT_BLUE_BG = '\x1b[48;2;183;223;255m';
 const LIGHT_BLUE_FG = '\x1b[38;2;11;70;110m';
 const ANSI_RESET = '\x1b[0m';
-const FEATURE_CONTROLLED_TOOL_NAMES = Object.freeze([
-  DELEGATE_TOOL_NAME,
-  DELEGATE_RESULT_TOOL_NAME,
-  'bg_run_pi_attested',
-  FUSION_REASON_TOOL_NAME,
-  FUSION_INVESTIGATE_TOOL_NAME,
-  FUSION_RESEARCH_TOOL_NAME,
-  FUSION_VALIDATE_TOOL_NAME,
-  'fusion_brainstorm',
-]);
-
 function lightBlue(value: string): string {
   return `${LIGHT_BLUE_BG}${LIGHT_BLUE_FG}${value}${ANSI_RESET}`;
 }
@@ -285,25 +264,6 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       claimFusionUsage: (task) => registry.claimFusionUsage(task),
     });
   }
-
-  pi.on('session_start', () => {
-    const enabled = new Set<string>();
-    if (config.features.delegate) enabled.add(DELEGATE_TOOL_NAME);
-    if (config.features.delegate || config.features.fusion)
-      enabled.add(DELEGATE_RESULT_TOOL_NAME);
-    if (config.features.attested) enabled.add('bg_run_pi_attested');
-    if (config.features.fusion) {
-      enabled.add(FUSION_REASON_TOOL_NAME);
-      enabled.add(FUSION_INVESTIGATE_TOOL_NAME);
-      enabled.add(FUSION_RESEARCH_TOOL_NAME);
-      enabled.add(FUSION_VALIDATE_TOOL_NAME);
-    }
-    const next = pi
-      .getActiveTools()
-      .filter((name) => !FEATURE_CONTROLLED_TOOL_NAMES.includes(name) || enabled.has(name));
-    for (const name of enabled) if (!next.includes(name)) next.push(name);
-    pi.setActiveTools(next);
-  });
 
   function unseenFinishedTasks(): BgTask[] {
     return registry

@@ -21,7 +21,7 @@ This subsystem owns the extension entrypoint, command/tool registration, footer 
 - renderer: `background-task-notification`;
 - the task UI and EventBus service.
 
-Delegate, Fusion, attested-run, and ambient attribution registrations are independently selected by `PI_BG_FEATURES`. `bg_result` is derived and registered once iff delegate or Fusion is enabled. Disabled registrations are absent rather than merely inactive. A final session-start reconciliation removes stale advanced active-tool names and adds only enabled, actually registered names after reload. The default selection preserves the complete historical surface. Capability flags alone make no startup-performance claim.
+Delegate, Fusion, attested-run, and ambient attribution registrations are independently selected by `PI_BG_FEATURES`. `bg_result` is derived and registered once iff delegate or Fusion is enabled. Disabled package registrations are absent rather than merely inactive. Active-tool cleanup is delegated to Pi's registration rebuild: a stale package name with no current definition is dropped, while an active definition from another extension remains active even when it uses a disabled package capability name such as `bg_delegate` or the retired `fusion_brainstorm`. The package does not perform name-wide subtraction. The default selection preserves the complete historical surface. Capability flags alone make no startup-performance claim.
 
 ## Footer status
 

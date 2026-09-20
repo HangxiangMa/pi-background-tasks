@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -181,13 +181,7 @@ mustThrow(
   () => assertRegistrationFixture(`export default function x(pi){ function registerTool(options: any): void { pi.registerTool({ ...options }); } registerTool({ ${validToolFields} }); }`),
   /must not use object spread/,
 );
-const finiteVariantConfig = `
-export const PI_BG_FEATURE_VALUES = Object.freeze(['process', 'delegate', 'fusion', 'attested', 'attribution'] as const);
-export const PI_BG_DEFAULT_FEATURES = PI_BG_FEATURE_VALUES;
-export const PI_BG_DOCK_SHORTCUT_VALUES = Object.freeze(['shift+down', 'ctrl+alt+b', 'off'] as const);
-export const PI_BG_DEFAULT_DOCK_SHORTCUT = 'shift+down';
-export function parseBackgroundTasksConfig(){ return {} as any; }
-`;
+const finiteVariantConfig = readFileSync(resolve('src/core/config.ts'), 'utf8');
 assert.deepEqual(
   assertRegistrationFixture({
     entry: 'entry.ts',
@@ -217,7 +211,7 @@ mustThrow(
     entry: 'entry.ts',
     files: {
       'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); if (config.dockShortcut === 'ctrl+alt+b') { pi.registerShortcut('ctrl+alt+b', {}); } }",
-      'config.ts': finiteVariantConfig.replace("'ctrl+alt+b', 'off'", "'ctrl+alt+b', 'off', 'super+x'"),
+      'config.ts': finiteVariantConfig.replace("  'off',\n] as const", "  'off',\n  'super+x',\n] as const"),
     },
   }),
   /variant enum drift/,
@@ -264,7 +258,137 @@ mustThrow(
       'config.ts': finiteVariantConfig,
     },
   }),
-  /unrecognized finite variant condition|immediate top-level statement/,
+  /unrecognized finite variant condition|immediate top-level statement|finite config binding/,
+);
+
+const hiddenAliasRuntime = [];
+function hiddenAliasRegistrar(pi, host = pi) {
+  host.registerCommand('hidden-default-alias', {});
+}
+hiddenAliasRegistrar({
+  registerCommand: (name) => hiddenAliasRuntime.push(`command:${name}`),
+});
+assert.deepEqual(hiddenAliasRuntime, ['command:hidden-default-alias']);
+mustThrow(
+  'imported registrar parameter default host alias',
+  () => assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; import { registerFeature } from './feature.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); if (config.features.delegate) { registerFeature(pi); } }",
+      'config.ts': finiteVariantConfig,
+      'feature.ts': "export function registerFeature(pi, host = pi){ host.registerCommand('hidden-default-alias', {}); }",
+    },
+  }),
+  /parameter initializer|registration host|Pi registration host/,
+);
+
+const earlyReturnRuntime = [];
+function earlyReturnRegistrar(pi, enabled) {
+  if (!enabled) return;
+  pi.registerCommand('never-registered', {});
+}
+earlyReturnRegistrar(
+  { registerCommand: (name) => earlyReturnRuntime.push(`command:${name}`) },
+  false,
+);
+assert.deepEqual(earlyReturnRuntime, []);
+assert.deepEqual(
+  assertRegistrationFixture(
+    "export default function x(pi){ pi.registerCommand('handler-return', { handler(){ if (Math.random() > 2) return; return Promise.resolve(); } }); }",
+  ),
+  ['command:handler-return'],
+  'returns inside non-registration handlers remain outside the finite registration grammar',
+);
+assert.deepEqual(
+  assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; import { registerFeature } from './feature.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); if (config.features.attribution) { pi.on('session_start', (_event, _ctx) => { registerFeature(pi); }); } }",
+      'config.ts': finiteVariantConfig,
+      'feature.ts': `export function registerFeature(pi){
+        const acknowledgements = [];
+        const probe = { acknowledge: () => { acknowledgements.push(true); } };
+        pi.events.emit('fixture:claim', probe);
+        if (acknowledgements.length > 0) return;
+        pi.registerCommand('claimed-owner', {});
+      }`,
+    },
+  }),
+  ['command:claimed-owner'],
+  'the exact synchronous duplicate-owner claim guard remains supported in a session activation scope',
+);
+mustThrow(
+  'mutated duplicate-owner guard is not a general early-return waiver',
+  () => assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; import { registerFeature } from './feature.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); if (config.features.attribution) { pi.on('session_start', (_event, _ctx) => { registerFeature(pi); }); } }",
+      'config.ts': finiteVariantConfig,
+      'feature.ts': `export function registerFeature(pi){
+        const acknowledgements = [true];
+        const probe = { acknowledge: () => { acknowledgements.push(true); } };
+        pi.events.emit('fixture:claim', probe);
+        if (acknowledgements.length > 0) return;
+        pi.registerCommand('invented-owner', {});
+      }`,
+    },
+  }),
+  /early return|control flow|return/,
+);
+mustThrow(
+  'imported registrar early return before registration',
+  () => assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; import { registerFeature } from './feature.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); if (config.features.delegate) { registerFeature(pi, false); } }",
+      'config.ts': finiteVariantConfig,
+      'feature.ts': "export function registerFeature(pi, enabled){ if (!enabled) return; pi.registerCommand('never-registered', {}); }",
+    },
+  }),
+  /early return|control flow|return/,
+);
+
+const mutatedConfigRuntime = [];
+let mutatedConfigRuntimeError;
+try {
+  const runtimeConfig = Object.freeze({ features: Object.freeze({ delegate: true }) });
+  Object.defineProperty(runtimeConfig.features, 'delegate', { value: false });
+  if (runtimeConfig.features.delegate) {
+    mutatedConfigRuntime.push('command:startup-never-reaches-registration');
+  }
+} catch (error) {
+  mutatedConfigRuntimeError = error instanceof Error ? error.name : String(error);
+}
+assert.deepEqual(mutatedConfigRuntime, []);
+assert.equal(mutatedConfigRuntimeError, 'TypeError');
+mustThrow(
+  'finite config mutation attempt before registration',
+  () => assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); Object.defineProperty(config.features, 'delegate', { value: false }); if (config.features.delegate) { pi.registerCommand('startup-never-reaches-registration', {}); } }",
+      'config.ts': finiteVariantConfig,
+    },
+  }),
+  /finite config binding|mutation|escape/,
+);
+
+mustThrow(
+  'mutable parser cannot authorize finite config binding',
+  () => assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); if (config.features.delegate) { pi.registerCommand('mutable-parser-surface', {}); } }",
+      'config.ts': `
+export const PI_BG_FEATURE_VALUES = Object.freeze(['process', 'delegate', 'fusion', 'attested', 'attribution'] as const);
+export const PI_BG_DEFAULT_FEATURES = PI_BG_FEATURE_VALUES;
+export const PI_BG_DOCK_SHORTCUT_VALUES = Object.freeze(['shift+down', 'ctrl+alt+b', 'off'] as const);
+export const PI_BG_DEFAULT_DOCK_SHORTCUT = 'shift+down';
+export function parseBackgroundTasksConfig(){ return { features: { process: true, delegate: true, fusion: true, attested: true, attribution: true }, dockShortcut: 'shift+down' }; }
+`,
+    },
+  }),
+  /immutable|Object\.freeze|parser/,
 );
 
 mustThrow(
