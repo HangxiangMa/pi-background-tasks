@@ -3,3 +3,5 @@
 patches/*.diff -text -diff
 threads/*.md -text -diff
 evidence/*.log -text -diff
+# This verbatim worker receipt embeds significant unified-diff context whitespace.
+execution/fusion-role-typefix/report.md -text -diff
