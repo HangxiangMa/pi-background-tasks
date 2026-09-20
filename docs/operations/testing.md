@@ -65,7 +65,7 @@ From current `package.json`:
 
 ### Cold-load measurement discipline
 
-The cold-load driver starts a new Node process for every sample and gives each worker isolated project, agent, session, HOME, and temporary roots with offline/telemetry suppression. It records raw samples plus median, p90, median absolute deviation, minimum, and maximum for direct delegate/Fusion facade imports, real SDK package loading, first delegate/Fusion launch and subtype result verification with deterministic fake children, and first model-selector invocation with mocked UI. One warm-up is excluded and at least 30 measured samples are expected for comparative evidence.
+The cold-load driver starts a new Node process for every sample and gives each worker isolated project, agent, session, HOME, and temporary roots with offline/telemetry suppression. It records raw samples plus median, p90, median absolute deviation, minimum, and maximum for direct delegate/Fusion facade imports; no-extension, process-only, and default-full real SDK loading; first delegate/Fusion launch and subtype result verification with deterministic fake children; and first model-selector invocation with mocked UI. One warm-up is excluded and at least 30 measured samples are expected for comparative evidence.
 
 Here, **cold** means a fresh process and empty JavaScript/Jiti module cache. It does not mean a flushed filesystem cache. Baseline and candidate must use the same driver and worker bytes, Node/Pi/dependency tree, host, features, and root conditions. If worktree limits force sequential baseline-then-candidate collection rather than simultaneous AB/BA, record that host-drift risk; do not fabricate interleaving. There is no machine-specific pass threshold.
 

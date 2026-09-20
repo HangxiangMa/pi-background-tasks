@@ -10,6 +10,8 @@ const DEFAULT_WORKER = join(here, 'benchmark-cold-load-worker.mjs');
 const SCENARIOS = Object.freeze([
   'delegate-facade-import',
   'fusion-facade-import',
+  'sdk-no-extension-load',
+  'sdk-process-only-load',
   'sdk-default-load',
   'delegate-first',
   'fusion-first',
@@ -29,6 +31,7 @@ function parseArgs(argv) {
     else if (key === '--worker' && value) out.worker = resolve(value);
     else if (key === '--node' && value) out.node = resolve(value);
     else if (key === '--scratch' && value) out.scratch = resolve(value);
+    else if (key === '--scenarios' && value) out.scenarios = value.split(',').filter(Boolean);
     else if (key === '--help') out.help = true;
     else throw new Error(`unknown or incomplete argument: ${key ?? '(missing)'}`);
     if (key !== '--help') index += 1;
@@ -41,13 +44,18 @@ function parseArgs(argv) {
   if (!Number.isSafeInteger(out.warmups) || out.warmups < 0) throw new Error('--warmups must be a non-negative integer');
   out.node ??= process.execPath;
   out.scratch ??= join(dirname(out.output), `benchmark-${out.label}-scratch`);
+  out.scenarios ??= [...SCENARIOS];
+  for (const scenario of out.scenarios) {
+    if (!SCENARIOS.includes(scenario)) throw new Error(`unknown scenario: ${scenario}`);
+  }
   return out;
 }
 
 function help() {
   console.log(`Usage: node scripts/benchmark-cold-load.mjs \\
   --root <package-root> --label <baseline|candidate> --output <receipt.json> \\
-  [--samples 30] [--warmups 1] [--node /path/to/node] [--scratch /owned/path]
+  [--samples 30] [--warmups 1] [--node /path/to/node] [--scratch /owned/path] \\
+  [--scenarios sdk-process-only-load,...]
 
 Cold means a fresh Node process with an empty JS/Jiti module cache. It does not
 flush the host filesystem cache. Timing is evidence only; there is no CI threshold.`);
@@ -161,6 +169,8 @@ async function main() {
     source_format: 'TypeScript source loaded through Pi/Jiti; no compiled package distribution',
     package_entrypoints: packageJson.pi?.extensions ?? [],
     features: {
+      'sdk-no-extension-load': '(no package entrypoint)',
+      'sdk-process-only-load': 'process',
       'sdk-default-load': 'process,delegate,fusion,attested,attribution',
       'delegate-first': 'process,delegate',
       'fusion-first': 'process,fusion',
@@ -182,7 +192,8 @@ async function main() {
       'Process-only still statically imports facade source through src/extension.ts in P1a.',
     ],
   };
-  const samples = Object.fromEntries(SCENARIOS.map((scenario) => [scenario, []]));
+  const scenarios = args.scenarios;
+  const samples = Object.fromEntries(scenarios.map((scenario) => [scenario, []]));
   let sequence = 0;
   const execute = async (scenario, warmup, round) => {
     const sampleRoot = join(args.scratch, 'samples', `${String(sequence).padStart(4, '0')}-${scenario}`);
@@ -199,10 +210,10 @@ async function main() {
     await rm(sampleRoot, { recursive: true, force: true });
   };
   for (let warmup = 0; warmup < args.warmups; warmup += 1) {
-    for (const scenario of SCENARIOS) await execute(scenario, true, warmup);
+    for (const scenario of scenarios) await execute(scenario, true, warmup);
   }
   for (let round = 0; round < args.samples; round += 1) {
-    const order = round % 2 === 0 ? SCENARIOS : [...SCENARIOS].reverse();
+    const order = round % 2 === 0 ? scenarios : [...scenarios].reverse();
     for (const scenario of order) {
       process.stderr.write(`[benchmark ${args.label}] round ${String(round + 1)}/${String(args.samples)} ${scenario}\n`);
       await execute(scenario, false, round);
@@ -212,7 +223,7 @@ async function main() {
     schema_version: 'pi-background-tasks.cold-load-benchmark.v1',
     provenance,
     scenarios: Object.fromEntries(
-      SCENARIOS.map((scenario) => [scenario, {
+      scenarios.map((scenario) => [scenario, {
         statistics: metricSummaries(samples[scenario]),
         raw: samples[scenario],
       }]),
@@ -220,7 +231,7 @@ async function main() {
   };
   await writeFile(args.output, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
   await rm(args.scratch, { recursive: true, force: true });
-  console.log(JSON.stringify({ output: args.output, scenarios: Object.fromEntries(SCENARIOS.map((scenario) => [scenario, receipt.scenarios[scenario].statistics])) }, null, 2));
+  console.log(JSON.stringify({ output: args.output, scenarios: Object.fromEntries(scenarios.map((scenario) => [scenario, receipt.scenarios[scenario].statistics])) }, null, 2));
 }
 
 await main();
