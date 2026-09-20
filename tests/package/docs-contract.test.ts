@@ -58,7 +58,14 @@ void describe('docs package integration contract', () => {
 
     assert.match(text('docs/commands/task-manager.md'), /exact task id opens detail view/);
     assert.match(text('docs/api/eventbus-v1.md'), /at least once under emission failure/);
-    assert.match(text('docs/api/eventbus-v1.md'), /later requests are not handled/);
+    assert.match(
+      text('docs/api/eventbus-v1.md'),
+      /requests first emitted after close are not handled and receive no service response/,
+    );
+    assert.match(
+      text('docs/api/eventbus-v1.md'),
+      /request already accepted before close may receive one error response, but never a post-close success/,
+    );
     assert.match(text('docs/subsystems/background-task-runtime.md'), /rather than issuing `fsync`/);
     assert.match(
       text('docs/subsystems/background-task-runtime.md'),
