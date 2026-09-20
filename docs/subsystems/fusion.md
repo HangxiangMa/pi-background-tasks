@@ -59,7 +59,7 @@ All workflows use the same orchestrator shape:
 7. run a no-tool merger;
 8. durably commit `merged.md` plus manifest-bound `result.json`, then publish terminal task state.
 
-Do not describe Fusion as unconditionally exactly five model calls. A completed run may use five or six child invocations, while preflight failures use zero; candidate failures, cancellation, spawn retry, output caps, or invalid repair alter observed attempts.
+The five slots are role assignments, not a guarantee of five distinct models or of five provider calls. An ordinary success uses five child invocations (three candidates, one evaluator, one merger); the one permitted evaluator repair makes six. Fatal preflight launches zero children. Failed or cancelled waves may create or complete fewer children, a transient pre-creation spawn failure may be retried once, and a child agent loop may make multiple provider requests. Attempt and provider-request counts therefore remain runtime facts, not values inferred from the slot count.
 
 Candidate tool policies are fixed by workflow:
 
@@ -71,6 +71,27 @@ Candidate tool policies are fixed by workflow:
 | validate    |            `inspect` | `read`, `grep`, `find`, `ls`                     |
 
 Evaluator, evaluator-repair, and merger always use capability `reason` and empty tool lists. Tool-enabled children run with built-in tools disabled and an explicit allowlist plus a denylist that includes shell/write/edit, Fusion recursion, and background/delegate tools.
+
+### Model roles, fan-in, and latency
+
+Candidate 1/2/3 are independent child attempts, not assigned specialties. The orchestrator gives all three the same canonical input, candidate system instruction, workflow capability, and fixed candidate-tool policy, then starts their promises as one parallel wave. Tool-enabled candidates can make different investigative choices, but no slot is pre-designated as researcher, critic, or writer. Different capable routes may improve diversity without guaranteeing it; duplicate routes are valid but can yield similar answers. On a successful wave, evaluation cannot start until all three settle, so the slowest candidate determines wave latency.
+
+The evaluator receives the canonical input plus all three completed responses after their slot identities have been randomly mapped to anonymous A/B/C labels. It has no tools and must emit the closed `pi-background-tasks.fusion-evaluation.v1` structure: exactly three assessments plus agreements, conflicts, and a constrained synthesis plan (with validation accounting only for `fusion_validate`). It neither ranks a winner nor emits the final answer. If parsing or schema validation fails, the evaluation repair uses the same configured and resolved evaluator model. That single repair receives the complete original blind input, the invalid evaluator output, and bounded validation errors; another invalid result terminates the run.
+
+The merger receives the canonical input, all three anonymous candidate responses, and the validated evaluation. It has no tools and is the last model stage. For reason, investigate, and research, its output is the sole final answer; candidate and evaluator responses are never returned directly. For `fusion_validate`, the host subsequently renders the final report from the validated finding accounting, preventing raw merger prose from adding or dropping findings.
+
+The normal-path critical path is `preflight → max(candidate 1, candidate 2, candidate 3) → evaluator → merger`; repair inserts another evaluator-model stage before merger. Its stage fan-in is:
+
+| Stage | Prompt fan-in | Route/timing consequence |
+| --- | --- | --- |
+| Candidate | Candidate system prompt + canonical input | Three parallel routes; the slowest successful candidate gates evaluation. |
+| Evaluator | Evaluator system prompt + canonical input + all three bounded candidate outputs | First sequential stage; schema reliability matters because invalid output triggers the sole repair. |
+| Evaluation repair | Repair system prompt + original blind evaluator input + invalid evaluator output + bounded errors | Conditional, same evaluator route, and potentially the largest prompt. |
+| Merger | Merger system prompt + canonical input + all three candidate outputs + validated evaluation | Final sequential stage and normally the greatest synthesis/context burden. |
+
+Budget planning reserves upstream output contracts for every fan-in stage and records worst-case reservation pressure as warnings; immediately before each child launch, the exact rendered prompt must fit that role's route. A nominally stronger model with a smaller usable context window can therefore be an invalid choice. Quality-first routing favors capable, genuinely diverse candidates, a strong schema-following evaluator, and the strongest available long-context synthesizer for merger. Speed-first routing avoids a slow candidate outlier, uses a fast schema-reliable evaluator to avoid repair, and keeps the sequential merger fast. In both cases frontier routes remain subscription OAuth only; duplicates and `$current` are valid, and metered APIs are not a tradeoff option.
+
+See the user-facing [model-selection guide](../commands/fusion-models.md), [budgets and output contracts](#budgets-and-output-contracts), and the configured [Fusion runtime limits](../operations/configuration.md#fusion-runtime-limits).
 
 ## Validation specifics
 
