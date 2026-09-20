@@ -1232,6 +1232,26 @@ export class BackgroundTaskRegistry {
     return Object.freeze(tasks);
   }
 
+  async waitForReloadHostSettlement(timeoutMs = this.stopWaitMs): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const unsettled = [...this.tasks.values()].filter(
+        (task) =>
+          task.reloadExecution?.phase === 'terminal' &&
+          (task.reloadHostNotificationSettled !== true ||
+            task.terminalPublicationState === 'pending'),
+      );
+      if (unsettled.length === 0) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error(
+          `Timed out waiting for reload shell host settlement: ${unsettled.map((task) => task.id).join(', ')}`,
+        );
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(10, remaining)));
+    }
+  }
+
   releaseReloadActivation(lease: ReloadShellActivationLeaseV1): void {
     if (this.reloadShellOwner === undefined) return;
     if (this.reloadShellLease !== lease || !this.reloadShellOwner.isCurrentLease(lease)) return;

@@ -39,7 +39,16 @@ These flags select functionality only. They do not claim to reduce cold-start im
 
 Normal Pi TUI, RPC, print, and JSON modes provide lifecycle bindings that initialize post-bind package resources and cause `session_start` to run after reload. An SDK host must call `bindExtensions()` with at least one binding Pi counts (UI context, command-context actions, shutdown handling, or `onError`). With only `{}` or `{ mode: "print" }`, the first explicit bind initializes resources, but `reload()` does not emit the rebuilt runner's `session_start`; the host must explicitly bind again after every `reload()`.
 
-Bare `createAgentSession()` without `bindExtensions()` leaves ambient attribution, `/claude-cache`, its lifecycle hooks/owner claim, and session-start context services uninitialized. This remains a host API blocker pending a guaranteed post-bind/reload callback or owner-token provider registration; the package does not use a private fallback. The generated availability tables describe this initialized-host contract and are not a pre-bind availability guarantee.
+Bare `createAgentSession()` without `bindExtensions()` leaves ambient attribution, `/claude-cache`, its lifecycle hooks/owner claim, and session-start context services uninitialized. This remains a host API blocker pending a guaranteed post-bind/reload callback or owner-token provider registration; the package does not use a private fallback. It also means an opted shell cannot be claimed after an empty/mode-only SDK reload unless the embedder explicitly binds again. Direct `AgentSession.dispose()` invalidates without `session_shutdown`; extension-bearing SDK hosts must use `AgentSessionRuntime.dispose()` or another awaited host shutdown path. The generated availability tables describe this initialized-host contract and are not a pre-bind availability guarantee.
+
+## Opt-in reload survival
+
+Reload survival is a per-launch field/flag, not a global environment setting:
+
+- `bg_run({ isAgent:false, surviveReload:true, ... })`
+- `/bg --survive-reload ...`
+
+Omitted/false keeps default kill-on-reload behavior. Survival is supported only for ordinary shell tasks across a real same-process Pi reload with the exact session id and canonical cwd. Agent, managed, delegate, Fusion, attested, EventBus-v1, new/resume/fork/clone/quit, crash, and process-restart paths do not opt in. The live execution retains its launch-time shell policy, timeout deadline, output cap, and cumulative bytes even if environment/config changes before reload; a dock rerun is new work and uses current configuration.
 
 ## Update check
 

@@ -16,6 +16,7 @@ import {
   type CreateAgentSessionRuntimeFactory,
   type EventBus,
 } from '@earendil-works/pi-coding-agent';
+import type { BgTaskSnapshot } from '../../src/core/common.js';
 import {
   BG_REQUEST_CHANNEL,
   BG_REQUEST_SCHEMA,
@@ -95,8 +96,80 @@ async function bindSession(session: AgentSession): Promise<void> {
   await session.bindExtensions({ onError: () => undefined });
 }
 
+function pidExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !(
+      typeof error === 'object' &&
+      error !== null &&
+      Reflect.get(error, 'code') === 'ESRCH'
+    );
+  }
+}
+
+function isTaskSnapshot(value: unknown): value is BgTaskSnapshot {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const status = Reflect.get(value, 'status');
+  return (
+    typeof Reflect.get(value, 'id') === 'string' &&
+    typeof Reflect.get(value, 'command') === 'string' &&
+    (status === 'running' || status === 'completed' || status === 'failed' || status === 'killed') &&
+    typeof Reflect.get(value, 'outputPath') === 'string' &&
+    typeof Reflect.get(value, 'cwd') === 'string' &&
+    typeof Reflect.get(value, 'startTime') === 'number' &&
+    typeof Reflect.get(value, 'bytesWritten') === 'number' &&
+    typeof Reflect.get(value, 'isAgent') === 'boolean' &&
+    typeof Reflect.get(value, 'surviveReload') === 'boolean' &&
+    typeof Reflect.get(value, 'notified') === 'boolean' &&
+    typeof Reflect.get(value, 'notifyOnCompletion') === 'boolean' &&
+    typeof Reflect.get(value, 'triggerOnCompletion') === 'boolean'
+  );
+}
+
+async function runSurvivor(session: AgentSession, name: string): Promise<BgTaskSnapshot> {
+  const tool = session.getToolDefinition('bg_run');
+  assert.ok(tool, 'bg_run must be registered');
+  const args = {
+    name,
+    command: `node -e ${JSON.stringify('setTimeout(() => {}, 10000)')}`,
+    isAgent: false,
+    surviveReload: true,
+    notifyOnCompletion: false,
+    triggerOnCompletion: false,
+  };
+  const prepared = tool.prepareArguments ? tool.prepareArguments(args) : args;
+  const value = await tool.execute(
+    `call-${name}`,
+    prepared,
+    undefined,
+    undefined,
+    session.extensionRunner.createContext(),
+  );
+  const result = record(value, 'bg_run result');
+  const details = record(result['details'], 'bg_run details');
+  const task = details['task'];
+  assert.ok(isTaskSnapshot(task), 'bg_run task must be a snapshot');
+  assert.equal(task.surviveReload, true);
+  assert.equal(task.status, 'running');
+  assert.equal(typeof task.pid, 'number');
+  return task;
+}
+
+async function assertLifecycleKilled(task: BgTaskSnapshot, label: string): Promise<void> {
+  assert.equal(typeof task.pid, 'number');
+  const pid = task.pid;
+  if (pid === undefined) throw new Error(`${label} task has no pid`);
+  const deadline = Date.now() + 3000;
+  while (pidExists(pid) && Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
+  assert.equal(pidExists(pid), false, `${label} must kill the opted process rather than transfer it`);
+}
+
 void describe('real Pi session lifecycle SDK integration', { concurrency: false }, () => {
-  void it('uses AgentSessionRuntime new/switch/dispose with one EventBus and fresh extension bindings', async () => {
+  void it('uses AgentSessionRuntime new/switch/fork/clone/dispose with one EventBus and fresh extension bindings', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-bg-runtime-lifecycle-'));
     const cwd = join(root, 'project');
     const agentDir = join(root, 'agent');
@@ -191,6 +264,7 @@ void describe('real Pi session lifecycle SDK integration', { concurrency: false 
 
       const firstRunner = runtime.session.extensionRunner;
       const firstContext = firstRunner.createContext();
+      const newSurvivor = await runSurvivor(runtime.session, 'runtime-new-survivor');
       const firstTask = await runTask(
         eventBus,
         'runtime-new-running',
@@ -201,9 +275,11 @@ void describe('real Pi session lifecycle SDK integration', { concurrency: false 
       assert.throws(() => firstContext.cwd, /stale after session replacement or reload/u);
       await new Promise((resolveWait) => setTimeout(resolveWait, 100));
       assert.equal(terminals.includes(firstTask), false, 'newSession must suppress old terminals');
+      await assertLifecycleKilled(newSurvivor, 'newSession');
 
       const secondRunner = runtime.session.extensionRunner;
       const secondContext = secondRunner.createContext();
+      const switchSurvivor = await runSurvivor(runtime.session, 'runtime-switch-survivor');
       const secondTask = await runTask(
         eventBus,
         'runtime-switch-running',
@@ -214,13 +290,36 @@ void describe('real Pi session lifecycle SDK integration', { concurrency: false 
       assert.throws(() => secondContext.cwd, /stale after session replacement or reload/u);
       await new Promise((resolveWait) => setTimeout(resolveWait, 100));
       assert.equal(terminals.includes(secondTask), false, 'switchSession must suppress old terminals');
+      await assertLifecycleKilled(switchSurvivor, 'switchSession');
+
+      const forkEntryId = runtime.session.sessionManager.appendMessage({
+        role: 'user',
+        content: 'fork lifecycle fixture',
+        timestamp: Date.now(),
+      });
+      const forkRunner = runtime.session.extensionRunner;
+      const forkSurvivor = await runSurvivor(runtime.session, 'runtime-fork-survivor');
+      await runtime.fork(forkEntryId);
+      assert.notEqual(runtime.session.extensionRunner, forkRunner);
+      await assertLifecycleKilled(forkSurvivor, 'fork');
+
+      const cloneEntryId = runtime.session.sessionManager.appendMessage({
+        role: 'user',
+        content: 'clone lifecycle fixture',
+        timestamp: Date.now(),
+      });
+      const cloneRunner = runtime.session.extensionRunner;
+      const cloneSurvivor = await runSurvivor(runtime.session, 'runtime-clone-survivor');
+      await runtime.fork(cloneEntryId, { position: 'at' });
+      assert.notEqual(runtime.session.extensionRunner, cloneRunner);
+      await assertLifecycleKilled(cloneSurvivor, 'clone');
 
       const quickTask = await runTask(eventBus, 'runtime-fresh-quick', 'echo runtime-fresh');
       await waitForTerminal(terminals, quickTask);
       assert.equal(
         responses.filter((response) => response['request_id'] === 'runtime-fresh-quick').length,
         1,
-        'only the current runtime may answer the shared EventBus request',
+        'only the current runtime may answer after lifecycle replacements',
       );
       assert.equal(
         terminals.filter((taskId) => taskId === quickTask).length,
@@ -230,6 +329,7 @@ void describe('real Pi session lifecycle SDK integration', { concurrency: false 
 
       const disposeRunner = runtime.session.extensionRunner;
       const disposeContext = disposeRunner.createContext();
+      const disposeSurvivor = await runSurvivor(runtime.session, 'runtime-dispose-survivor');
       const disposeTask = await runTask(
         eventBus,
         'runtime-dispose-running',
@@ -240,6 +340,7 @@ void describe('real Pi session lifecycle SDK integration', { concurrency: false 
       assert.throws(() => disposeContext.cwd, /stale after session replacement or reload/u);
       await new Promise((resolveWait) => setTimeout(resolveWait, 100));
       assert.equal(terminals.includes(disposeTask), false, 'dispose must suppress old terminals');
+      await assertLifecycleKilled(disposeSurvivor, 'AgentSessionRuntime.dispose');
 
       eventBus.emit(BG_REQUEST_CHANNEL, {
         schema_version: BG_REQUEST_SCHEMA,

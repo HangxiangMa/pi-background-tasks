@@ -11,7 +11,7 @@ covers_sources: []
 
 <!-- pi-docs:begin name="tool-contract-bg_run" generator="scripts/docs/generate.mjs" -->
 - Label: **Background Run**
-- Source: `src/extension.ts:754`
+- Source: `src/extension.ts:920`
 - Availability: `always`
 - Available by default: **yes**
 - Description: Start a named long-running shell command in the background and return immediately with a task ID and output path. By default, completed, failed, or killed terminal state is delivered automatically as <background-task-notification> and starts a follow-up agent turn; do not sleep or poll merely to wait. Output is written to .pi/tasks and model-visible logs are bounded to 50.0KB.
@@ -24,6 +24,7 @@ covers_sources: []
 | `isAgent` | yes | `boolean` | Required. Set true only when this background task launches an LLM/agent process, such as a child `pi -p ...` or `pi --mode json ...`, so Pi-agent telemetry can be collected. Set false for scripts, tests, servers, sleeps, and ordinary shell commands. |  |
 | `name` | yes | `string` | Short human-readable task name shown in the bg footer dock. Required; use 2-6 words, not the raw command. |  |
 | `notifyOnCompletion` | no | `boolean` | Whether to deliver the durable terminal notification. Default: true; disable only when deliberately taking over completion monitoring. |  |
+| `surviveReload` | no | `boolean` | Opt in to retaining this exact ordinary isAgent:false shell execution across a real same-process Pi reload. Default: false. Unsupported for agent, managed, delegate, Fusion, and attested tasks. |  |
 | `timeoutSeconds` | no | `number` | Optional timeout; task is failed and killed when exceeded |  |
 | `triggerOnCompletion` | no | `boolean` | Whether that notification should automatically trigger a follow-up agent turn. Default: true for bg_run; requires notifyOnCompletion. |  |
 
@@ -52,6 +53,10 @@ covers_sources: []
     },
     "notifyOnCompletion": {
       "description": "Whether to deliver the durable terminal notification. Default: true; disable only when deliberately taking over completion monitoring.",
+      "type": "boolean"
+    },
+    "surviveReload": {
+      "description": "Opt in to retaining this exact ordinary isAgent:false shell execution across a real same-process Pi reload. Default: false. Unsupported for agent, managed, delegate, Fusion, and attested tasks.",
       "type": "boolean"
     },
     "timeoutSeconds": {
@@ -92,6 +97,7 @@ Optional fields:
 - `timeoutSeconds: number`
 - `notifyOnCompletion: boolean`
 - `triggerOnCompletion: boolean`
+- `surviveReload: boolean` — opt in only for ordinary `isAgent:false` shell work that must keep the same live execution across a supported real reload.
 
 Legacy argument preparation can derive a missing `name` from `description` or `command`, but the public schema remains strict and requires `name`, `command`, and `isAgent`.
 
@@ -107,6 +113,7 @@ For an Anthropic child `pi`, keep normal extension discovery enabled when parent
 - `triggerOnCompletion`: `true`.
 - `timeoutSeconds`: absent means no timeout.
 - `isAgent`: no default in the tool contract; callers must provide a boolean. It is not inferred from command text.
+- `surviveReload`: `false`. True is valid only with `isAgent:false` and never changes the default for other launches.
 
 ## Shell selection and guidance
 
@@ -120,6 +127,8 @@ Inherited Nu, fish, csh, and unknown shells remain the default when selected thr
 
 The tool returns a task id, current `running` status, pid if known, output path, completion-delivery guidance, and structured task details including the actual shell policy. Terminal statuses are exactly `completed`, `failed`, or `killed`. With default delivery, terminal state is sent as `<background-task-notification>` and starts a follow-up agent turn; after launching, do not sleep or poll merely to wait.
 
+An opted ordinary task crosses a supported real same-process reload as the same living child, task id, PID, launch nonce, completion id, output path/stream, shell policy, absolute timeout, launch-time cap, cumulative byte count, and tree authority. Completion in the hostless gap queues for the fresh activation. Status/logs/kill/commands/dock continue against that same object. Hard crash/process restart, new/resume/fork/clone/quit, and SDK reload without a fresh counted binding are not survival paths.
+
 ## Examples
 
 ```json
@@ -132,6 +141,10 @@ The tool returns a task id, current `running` status, pid if known, output path,
 
 ```json
 {"name":"Manual server","command":"npm run dev","isAgent":false,"notifyOnCompletion":false,"triggerOnCompletion":false}
+```
+
+```json
+{"name":"Reload-safe watcher","command":"npm run watch","isAgent":false,"surviveReload":true}
 ```
 
 ## Output/result
@@ -148,7 +161,7 @@ Automatic follow-up turn: enabled.
 ...
 ```
 
-Structured details include `task`, a snapshot with command, status, output path, cwd, timing, pid, byte count, `isAgent`, delivery flags, the non-secret `shellPolicy` (`policy`, `executable`, `argvPrefix`, `dialect`) for ordinary shell tasks, telemetry fields when available, and error when present.
+Structured details include `task`, a snapshot with command, status, output path, cwd, timing, pid, byte count, `isAgent`, `surviveReload`, optional non-authoritative `reloadSurvival` audit facts, delivery flags, the non-secret `shellPolicy` (`policy`, `executable`, `argvPrefix`, `dialect`) for ordinary shell tasks, telemetry fields when available, and error when present.
 
 ## Errors
 
@@ -157,6 +170,8 @@ Structured details include `task`, a snapshot with command, status, output path,
 - Missing `isAgent`: loud error explaining true/false use.
 - Empty command at execution: `Background command is empty`.
 - Invalid explicit POSIX shell mode/path or an unavailable requested Bash/sh route fails loudly without fallback.
+- A malformed survival value fails as `pi_bg_survive_reload_invalid`; true with `isAgent:true` fails as `pi_bg_survive_reload_requires_non_agent`, both before side effects.
+- Missing/stale/conflicting/incompatible activation ownership fails with a stable `pi_bg_reload_owner_*` code. A handoff that receives no compatible claimant reaches fixed-deadline cleanup as `pi_bg_reload_handoff_expired`.
 - Shell/spawn/timeout/output-cap failures become loud task failures.
 
 ## Runtime artifacts

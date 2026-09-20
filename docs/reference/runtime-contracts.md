@@ -55,14 +55,14 @@ This generated registry lists production environment-variable references, runtim
 | `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` | remove | `src/core/fusion/pi-child.ts:100` |
 | `AZURE_OPENAI_ENDPOINT` | remove | `src/core/fusion/pi-child.ts:100` |
 | `AZURE_OPENAI_RESOURCE_NAME` | remove | `src/core/fusion/pi-child.ts:100` |
-| `ComSpec` | read | `src/core/common.ts:832`<br>`src/core/common.ts:850` |
+| `ComSpec` | read | `src/core/common.ts:1047`<br>`src/core/common.ts:1065` |
 | `OPENAI_API_KEY` | remove | `src/core/attested-pi-run.ts:240`<br>`src/core/fusion/pi-child.ts:100` |
 | `OPENAI_BASE_URL` | remove | `src/core/attested-pi-run.ts:240`<br>`src/core/fusion/pi-child.ts:100` |
 | `OPENROUTER_API_KEY` | remove | `src/core/attested-pi-run.ts:240`<br>`src/core/fusion/pi-child.ts:100` |
 | `OPENROUTER_BASE_URL` | remove | `src/core/attested-pi-run.ts:240`<br>`src/core/fusion/pi-child.ts:100` |
-| `path` | read | `src/core/common.ts:748` |
-| `Path` | read | `src/core/common.ts:748` |
-| `PATH` | read | `src/core/common.ts:748`<br>`src/core/common.ts:802`<br>`src/core/pi-launch.ts:425` |
+| `path` | read | `src/core/common.ts:963` |
+| `Path` | read | `src/core/common.ts:963` |
+| `PATH` | read | `src/core/common.ts:1017`<br>`src/core/common.ts:963`<br>`src/core/pi-launch.ts:425` |
 | `PI_ANTHROPIC_ACCOUNT_CONFIG_PATH` | read | `src/core/anthropic-attribution.ts:893` |
 | `PI_API_BASE_URL` | remove | `src/core/attested-pi-run.ts:240`<br>`src/core/fusion/pi-child.ts:100` |
 | `PI_API_KEY` | remove | `src/core/attested-pi-run.ts:240`<br>`src/core/fusion/pi-child.ts:100` |
@@ -72,16 +72,16 @@ This generated registry lists production environment-variable references, runtim
 | `PI_BG_DELEGATE_SEED_PATH` | read, write | `src/core/delegate/launch.ts:354`<br>`src/delegate-child-extension.ts:385` |
 | `PI_BG_DELEGATE_SEED_SHA256` | read, write | `src/core/delegate/launch.ts:355`<br>`src/delegate-child-extension.ts:386` |
 | `PI_BG_DELEGATE_TASK_ID` | read, write | `src/core/delegate/launch.ts:356`<br>`src/delegate-child-extension.ts:387` |
-| `PI_BG_DISABLE_PI_TELEMETRY` | read | `src/core/registry.ts:270` |
-| `PI_BG_DISABLE_UPDATE_CHECK` | read | `src/extension.ts:503` |
+| `PI_BG_DISABLE_PI_TELEMETRY` | read | `src/core/registry.ts:283` |
+| `PI_BG_DISABLE_UPDATE_CHECK` | read | `src/extension.ts:649` |
 | `PI_BG_DOCK_SHORTCUT` | read | `src/core/config.ts:113` |
 | `PI_BG_FEATURES` | read | `src/core/config.ts:112` |
-| `PI_BG_MAX_OUTPUT_BYTES` | read | `src/core/registry.ts:78` |
-| `PI_BG_POSIX_SHELL` | read | `src/core/common.ts:870` |
-| `PI_BG_POSIX_SHELL_PATH` | read | `src/core/common.ts:880` |
-| `PI_BG_REGISTRY_URL` | read | `src/extension.ts:512` |
-| `PI_BG_SHELL` | read | `src/core/common.ts:827` |
-| `PI_BG_SHELL_PATH` | read | `src/core/common.ts:828` |
+| `PI_BG_MAX_OUTPUT_BYTES` | read | `src/core/registry.ts:90` |
+| `PI_BG_POSIX_SHELL` | read | `src/core/common.ts:1085` |
+| `PI_BG_POSIX_SHELL_PATH` | read | `src/core/common.ts:1095` |
+| `PI_BG_REGISTRY_URL` | read | `src/extension.ts:658` |
+| `PI_BG_SHELL` | read | `src/core/common.ts:1042` |
+| `PI_BG_SHELL_PATH` | read | `src/core/common.ts:1043` |
 | `PI_CACHE_RETENTION` | read, write | `src/core/anthropic-attribution.ts:658`<br>`src/core/anthropic-attribution.ts:669`<br>`src/core/fusion/claude-cache.ts:57`<br>`src/core/fusion/pi-child.ts:273`<br>`src/core/fusion/pi-child.ts:274` |
 | `PI_FUSION_CANDIDATE_OUTPUT_RECOVERY_PATH` | read, remove, write | `src/core/fusion/pi-child.ts:100`<br>`src/core/fusion/pi-child.ts:1879`<br>`src/fusion-child-extension.ts:599` |
 | `PI_FUSION_RESEARCH_ENABLED` | read, remove, write | `src/core/fusion/pi-child.ts:100`<br>`src/core/fusion/pi-child.ts:1902`<br>`src/fusion-child-extension.ts:608` |
@@ -89,14 +89,14 @@ This generated registry lists production environment-variable references, runtim
 | `PI_FUSION_SOURCE_POLICY_SHA256` | read, remove, write | `src/core/fusion/pi-child.ts:100`<br>`src/core/fusion/pi-child.ts:1904`<br>`src/fusion-child-extension.ts:556` |
 | `PI_FUSION_TOOL_CALL_LOG_PATH` | read, remove, write | `src/core/fusion/pi-child.ts:100`<br>`src/core/fusion/pi-child.ts:1891`<br>`src/fusion-child-extension.ts:598` |
 | `PI_MODEL` | remove | `src/core/delegate/launch.ts:330`<br>`src/core/fusion/pi-child.ts:100` |
-| `PI_OFFLINE` | read | `src/extension.ts:504` |
+| `PI_OFFLINE` | read | `src/extension.ts:650` |
 | `PI_PROVIDER` | remove | `src/core/delegate/launch.ts:330`<br>`src/core/fusion/pi-child.ts:100` |
 | `PI_REASONING_LEVEL` | remove | `src/core/delegate/launch.ts:330`<br>`src/core/fusion/pi-child.ts:100` |
 | `PI_SESSION_FILE` | remove | `src/core/delegate/launch.ts:330`<br>`src/core/fusion/pi-child.ts:100` |
 | `PI_SESSION_ID` | remove | `src/core/delegate/launch.ts:330`<br>`src/core/fusion/pi-child.ts:100` |
 | `PI_SKIP_VERSION_CHECK` | write | `src/core/delegate/launch.ts:352`<br>`src/core/fusion/pi-child.ts:272` |
 | `PIPELINE_ANTHROPIC_ATTRIBUTION_AUDIT_PATH` | read | `src/core/anthropic-attribution.ts:1170` |
-| `SHELL` | read | `src/core/common.ts:887` |
+| `SHELL` | read | `src/core/common.ts:1102` |
 | `SystemRoot` | read | `src/core/windows-taskkill.ts:96` |
 | `WINDIR` | read | `src/core/windows-taskkill.ts:101` |
 
@@ -116,7 +116,7 @@ This generated registry lists production environment-variable references, runtim
 | delegate-artifact | `spill/<receipt-named-file>` | `src/core/delegate/artifacts.ts:54` |
 | directory | `.pi/delegate/<session-id>-<pid>/<task-id>/` | `src/core/delegate/artifacts.ts:160` |
 | directory | `.pi/fusion/<session-id>-<pid>/<run-id>/` | `src/core/fusion/artifacts.ts:563` |
-| directory | `.pi/tasks/<session-id>-<pid>/` | `src/core/registry.ts:1081` |
+| directory | `.pi/tasks/<session-id>-<pid>/` | `src/core/registry.ts:1284` |
 | fusion-artifact | `<attempt-prefix> = candidate-<slot>.attempt-<n> \| evaluation.attempt-<n> \| merge.attempt-<n>` | `src/core/fusion/artifacts.ts:248` |
 | fusion-artifact | `<attempt-prefix>.calibration-violation.json` | `src/core/fusion/artifacts.ts:263` |
 | fusion-artifact | `<attempt-prefix>.events.jsonl` | `src/core/fusion/artifacts.ts:804` |
@@ -137,8 +137,8 @@ This generated registry lists production environment-variable references, runtim
 | fusion-artifact | `result.json` | `src/core/fusion/artifacts.ts:647` |
 | fusion-artifact | `source-policy.private.json` | `src/core/fusion/artifacts.ts:690` |
 | task-file | `.pi/tasks/<session-id>-<pid>/<task-id>.attestation.json` | `src/core/attested-pi-run.ts:1042` |
-| task-file | `.pi/tasks/<session-id>-<pid>/<task-id>.json` | `src/core/registry.ts:1217` |
-| task-file | `.pi/tasks/<session-id>-<pid>/<task-id>.output` | `src/core/registry.ts:1216` |
+| task-file | `.pi/tasks/<session-id>-<pid>/<task-id>.json` | `src/core/registry.ts:1478` |
+| task-file | `.pi/tasks/<session-id>-<pid>/<task-id>.output` | `src/core/registry.ts:1477` |
 | task-file | `.pi/tasks/<session-id>-<pid>/<task-id>.pi-events.jsonl` | `src/core/attested-pi-run.ts:1039` |
 | task-file | `.pi/tasks/<session-id>-<pid>/<task-id>.pi-telemetry-wrapper.cjs` | `src/core/attested-pi-run.ts:1041` |
 | task-file | `.pi/tasks/<session-id>-<pid>/<task-id>.stderr` | `src/core/attested-pi-run.ts:1040` |
@@ -193,6 +193,8 @@ This generated registry lists production environment-variable references, runtim
 | `pi-background-tasks.fusion-validation-candidate-contract-event.v1` | `src/core/fusion/types.ts:31` |
 | `pi-background-tasks.fusion-validation-candidate.v1` | `src/core/fusion/types.ts:18` |
 | `pi-background-tasks.input-token-calibration.v1` | `src/core/context/token-budget.ts:18` |
+| `pi-background-tasks.reload-shell-owner.v1` | `src/core/reload-shell-owner.ts:36` |
+| `pi-background-tasks.reload-shell.v1` | `src/core/reload-shell-owner.ts:934` |
 
 ### Status vocabularies
 

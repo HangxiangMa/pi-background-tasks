@@ -22,9 +22,9 @@ Every registration-owning function, imported registrar, and supported activation
 - Public surfaces available by default: 31
 - Finite feature values: `process`, `delegate`, `fusion`, `attested`, `attribution`
 - Finite dock shortcut values: `shift+down`, `ctrl+alt+b`, `off`
-- Governed production sources: 53
+- Governed production sources: 54
 - Tool contracts extracted: 11
-- Schema IDs extracted: 46
+- Schema IDs extracted: 48
 - Environment variable references extracted: 54
 - Behavioral attestation receipts not passing: 9
 - Receipt store: `docs/attestations.json`

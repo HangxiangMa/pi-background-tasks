@@ -51,9 +51,11 @@ If either completion flag was intentionally disabled, manual inspection is allow
 
 ## Failures and suppression
 
-Completion notification receipt and terminal EventBus publication are independent facts. EventBus publication can be pending, delivered, or abandoned without changing durable task status or `notified`. At the retention boundary, an oldest pending publication is abandoned and disposed before that old task is pruned; it cannot evict a newer notified Fusion result before `bg_result` retrieval. If the EventBus service alone is disposed, an otherwise enabled notification may still be sent; during Pi session shutdown/reload, notifications are suppressed while running tasks are killed and old-activation EventBus publication is abandoned.
+Completion notification receipt and terminal EventBus publication are independent facts. EventBus publication can be pending, delivered, or abandoned without changing durable task status or `notified`. At the retention boundary, an oldest pending publication is abandoned and disposed before that old task is pruned; it cannot evict a newer notified Fusion result before `bg_result` retrieval. If the EventBus service alone is disposed, an otherwise enabled notification may still be sent. During ordinary Pi shutdown, notifications are suppressed and old publication is abandoned.
 
-If notification send fails, the task resets `notified:false` and logs the error; it does not silently pretend delivery happened. Likewise, EventBus abandonment is never recorded as successful publication.
+A live opted ordinary reload survivor is different: detach transfers its logical publication ledger and notification latch without sending through the old host. Completion during the gap queues. The fresh activation resumes at the same cumulative EventBus attempt count and sends at most one successful host notification; a reload never resets `notified`. Physical EventBus delivery remains at-least-once under listener failure and consumers still deduplicate by task id.
+
+If notification send fails, the task resets `notified:false` and logs the error; it does not silently pretend delivery happened. Likewise, EventBus abandonment—including `reload_handoff_expired` when no fresh activation claims an owner—never becomes successful publication or rewrites the real terminal status.
 
 ## Related docs
 
