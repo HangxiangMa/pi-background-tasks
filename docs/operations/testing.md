@@ -71,6 +71,8 @@ Here, **cold** means a fresh process and empty JavaScript/Jiti module cache. It 
 
 The benchmark exercises source TypeScript, not a compiled distribution. It supports no native-Windows or compiled-Bun speed claim without separate runs. P1a also leaves a deliberate process-only limitation: `src/extension.ts` statically imports light delegate/Fusion facade source even when their registrars are disabled. Remaining extension/dock/attested startup seams and any precompiled packaging decision belong to later work.
 
+The package gate separately walks literal deferred imports and verifies every target is under the shipped `src/` closure. A packed-copy regression then removes one verifier/producer module from an otherwise real tarball: package startup and immediate inventory still work, the first producer invocation fails with the bounded module-specific error, and no delegate artifact is created. This characterizes damaged payload behavior without weakening the real payload-closure check.
+
 Do not run full/default/root suites for documentation-only edits unless the operator explicitly asks. If the operator restricts verification to focused checks, report that `docs:verify`/attestation were not run.
 
 ## Evidence that must be preserved
