@@ -188,7 +188,7 @@ void describe('non-target anthropic-messages forwarding (#19)', () => {
     ).result();
 
     assert.equal(result.stopReason, 'toolUse', result.errorMessage);
-    assert.equal(Reflect.get(result.usage, 'reasoning'), 5);
+    assert.equal(result.usage.reasoning, 5);
     assert.equal(result.responseId, 'minimax-rich-response');
     assert.equal(result.rawStopReason, 'tool_use');
     assert.deepEqual(result.content, [
@@ -223,13 +223,13 @@ void describe('non-target anthropic-messages forwarding (#19)', () => {
       if ('partial' in event) {
         partials.push(event.partial);
         if (event.type === 'start') {
-          Reflect.set(event.partial, 'providerThinkingLevel', 'provider-native-high');
-          Reflect.set(event.partial, 'endTurn', true);
+          event.partial.providerThinkingLevel = 'provider-native-high';
+          event.partial.endTurn = true;
         }
         if (event.type === 'toolcall_start') {
           const block = event.partial.content[event.contentIndex];
           assert.ok(block);
-          Reflect.set(block, 'namespace', 'provider.tools');
+          block['namespace'] = 'provider.tools';
         }
       }
       if (event.type === 'done') terminal = event.message;
@@ -240,11 +240,11 @@ void describe('non-target anthropic-messages forwarding (#19)', () => {
     assert.ok(partials.every((partial) => partial === partials[0]));
     assert.strictEqual(result, terminal);
     assert.strictEqual(result, partials[0]);
-    assert.equal(Reflect.get(result, 'providerThinkingLevel'), 'provider-native-high');
-    assert.equal(Reflect.get(result, 'endTurn'), true);
+    assert.equal(result.providerThinkingLevel, 'provider-native-high');
+    assert.equal(result.endTurn, true);
     const toolCall = result.content.find((block) => block['type'] === 'toolCall');
     assert.ok(toolCall);
-    assert.equal(Reflect.get(toolCall, 'namespace'), 'provider.tools');
+    assert.equal(toolCall['namespace'], 'provider.tools');
   });
 
   void it('settles an adapter error event and result with the same message', async (t: TestContext) => {

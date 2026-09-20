@@ -7,9 +7,17 @@ import {
 import {
   Type,
   normalizeContext,
+  type AssistantMessage,
+  type Model,
 } from '/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js';
 
-const models = [
+type JsonObject = Record<string, unknown>;
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+const models: Array<Model<'anthropic-messages'>> = [
   {
     id: 'MiniMax-M3',
     name: 'MiniMax M3',
@@ -38,7 +46,7 @@ const models = [
       supportsMidConvoEffort: true,
     },
   },
-] as const;
+];
 
 function response(id: string, model: string): Response {
   const events = [
@@ -71,9 +79,11 @@ function response(id: string, model: string): Response {
   );
 }
 
+const agentDir = process.env['PI_CODING_AGENT_DIR'];
+if (!agentDir) throw new Error('PI_CODING_AGENT_DIR is required for the isolated fixture');
 const loader = new DefaultResourceLoader({
   cwd: process.cwd(),
-  agentDir: process.env['PI_CODING_AGENT_DIR'],
+  agentDir,
   settingsManager: SettingsManager.inMemory(),
   additionalExtensionPaths: [resolve('extensions/anthropic-attribution.ts')],
   noExtensions: true,
@@ -93,22 +103,29 @@ const transport = registration.config.streamSimple;
 assert.equal(typeof transport, 'function');
 if (!transport) throw new TypeError('installed Pi 0.86 provider registration lacks streamSimple');
 
-const requests = [];
+interface CapturedRequest {
+  readonly url: string;
+  readonly headers: Headers;
+  readonly payload: JsonObject;
+}
+
+const requests: CapturedRequest[] = [];
 globalThis.fetch = async (input, init) => {
   const body = init?.body;
   if (typeof body !== 'string') throw new TypeError('forwarded request body must be a string');
-  const payload = JSON.parse(body);
-  const model = String(Reflect.get(payload, 'model'));
+  const parsed: unknown = JSON.parse(body);
+  if (!isJsonObject(parsed)) throw new TypeError('forwarded request payload must be an object');
+  const model = String(Reflect.get(parsed, 'model'));
   requests.push({
     url: input instanceof Request ? input.url : String(input),
     headers: new Headers(init?.headers),
-    payload,
+    payload: parsed,
   });
   return response(`pi086-${String(requests.length)}`, model);
 };
 
-const callbackProviders = [];
-const results = [];
+const callbackProviders: string[] = [];
+const results: AssistantMessage[] = [];
 for (const model of models) {
   const context = normalizeContext({
     systemPrompt: `Pi 0.86 normalized system for ${model.provider}`,
@@ -127,8 +144,9 @@ for (const model of models) {
       },
     ],
   });
-  assert.equal(context.messages[0]?.role, 'system');
-  assert.equal(context.messages[0]?.toolsAdded?.[0]?.name, 'inspect_state');
+  const leading = context.messages[0];
+  assert.ok(leading && leading.role === 'system');
+  assert.equal(leading.toolsAdded?.[0]?.name, 'inspect_state');
   const result = await transport(model, context, {
     apiKey: `${model.provider}-offline-key`,
     cacheRetention: 'none',
@@ -171,7 +189,9 @@ assert.deepEqual(callbackProviders, [
   'payload:kimi-coding',
   'response:kimi-coding',
 ]);
-assert.equal(Reflect.get(results[1], 'providerThinkingLevel'), 'high');
+const kimiResult = results[1];
+assert.ok(kimiResult);
+assert.equal(kimiResult.providerThinkingLevel, 'high');
 loaded.runtime.invalidate('installed Pi 0.86 forwarding fixture complete');
 process.stdout.write(`${JSON.stringify({
   ok: true,
@@ -181,5 +201,5 @@ process.stdout.write(`${JSON.stringify({
   fetchCalls: requests.length,
   normalizedSystemAndTools: true,
   reasoningUsage: results.map((result) => Reflect.get(result.usage, 'reasoning')),
-  kimiProviderThinkingLevel: Reflect.get(results[1], 'providerThinkingLevel'),
+  kimiProviderThinkingLevel: kimiResult.providerThinkingLevel,
 })}\n`);

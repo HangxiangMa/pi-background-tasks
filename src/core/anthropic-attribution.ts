@@ -482,6 +482,7 @@ export interface AssistantMessageLike {
     cacheRead: number;
     cacheWrite: number;
     cacheWrite1h?: number;
+    reasoning?: number;
     totalTokens: number;
     cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
   };
@@ -489,6 +490,8 @@ export interface AssistantMessageLike {
   timestamp: number;
   responseModel?: string;
   responseId?: string;
+  providerThinkingLevel?: string;
+  endTurn?: boolean;
   diagnostics?: PiAssistantDiagnosticLike[];
   deferred?: unknown;
   errorMessage?: string;
