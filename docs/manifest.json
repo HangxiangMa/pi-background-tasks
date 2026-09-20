@@ -1,16 +1,15 @@
 {
   "attestation_state": [
     {
-      "authored_body_sha256": "sha256:8b8a883eb261dd221d348724fb43ae13fac19eb52a30f688d55ff80b2039be98",
+      "authored_body_sha256": "sha256:1b49d8001c09af758141d0ef062ecceb11e372c717250357bdbf5ed8c7e4c462",
       "covers_sources": [
         "src/core/extension-api.ts"
       ],
       "doc_id": "api/eventbus-v1",
-      "notes": "Reviewed EventBus channels, closed schemas, operations, request correlation and rejection, close unsubscribe behavior, terminal ordering, latched publication, retry semantics, and at-least-once deduplication guidance.",
       "rel": "docs/api/eventbus-v1.md",
       "required": true,
       "reviewer": "gpt-5.5-final-eventbus-reviewer",
-      "state": "pass"
+      "state": "stale-authored-prose"
     },
     {
       "authored_body_sha256": "sha256:810591c82ced086e1622be9b037db88c8a667856580895dc90cd5af54c6e2107",
@@ -38,7 +37,7 @@
       "state": "missing"
     },
     {
-      "authored_body_sha256": "sha256:0840d793b8c18869f9a3bb8a72beeb602824ed1a580161f3456126af8af9b459",
+      "authored_body_sha256": "sha256:c08ee21acbcd5aa84b31c05f38b5aa7f79826cd6c0ccc6f2c2097a2fa5bd7fc5",
       "covers_sources": [
         "src/core/attested-pi-run.ts"
       ],
@@ -49,7 +48,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:253948c8b1f4dd339b0c1eeabd6e8addf584fe208a0f71c3a7f094921ff4547f",
+      "authored_body_sha256": "sha256:39d2de630b8bfff4b2724c3dbbf960e5d08d62845049d1aec8022956b55fad30",
       "covers_sources": [
         "src/core/common.ts",
         "src/core/registry.ts",
@@ -62,7 +61,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:db149e43190515e52a39831942576881c4b0e5358933247a90d8b52c44a3c9eb",
+      "authored_body_sha256": "sha256:3ff0739e8eb5cc0ff95a7a1e0738428ad98691d8144648b76c1e5f9bf30e1193",
       "covers_sources": [
         "src/core/durable-fs.ts",
         "src/core/pi-launch.ts"
@@ -127,7 +126,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:caa46c3699124e0860a6f53f1bf6d31506e7eb8ad89c1871a5efeecc21a1d413",
+      "authored_body_sha256": "sha256:e9552f882dc7813d6b58f756da290a91515c8c2039a710f8f478d156abea5a20",
       "covers_sources": [
         "extensions/background-tasks.ts",
         "src/core/update-check.ts",
@@ -874,28 +873,28 @@
         "id": "command:bg",
         "kind": "command",
         "name": "bg",
-        "source": "src/extension.ts:517"
+        "source": "src/extension.ts:554"
       },
       {
         "description": "Clear finished background task footer notices",
         "id": "command:bg-clear",
         "kind": "command",
         "name": "bg-clear",
-        "source": "src/extension.ts:559"
+        "source": "src/extension.ts:596"
       },
       {
         "description": "Open the background task manager UI",
         "id": "command:bg-tasks",
         "kind": "command",
         "name": "bg-tasks",
-        "source": "src/extension.ts:551"
+        "source": "src/extension.ts:588"
       },
       {
         "description": "Show how to update pi-background-tasks to the latest published version",
         "id": "command:bg-update",
         "kind": "command",
         "name": "bg-update",
-        "source": "src/extension.ts:567"
+        "source": "src/extension.ts:604"
       },
       {
         "description": "Show or set Claude cache retention for this session (short, long, default)",
@@ -923,28 +922,28 @@
         "id": "command:jobs",
         "kind": "command",
         "name": "jobs",
-        "source": "src/extension.ts:605"
+        "source": "src/extension.ts:642"
       },
       {
         "description": "Stop a running background task: /kill <id>",
         "id": "command:kill",
         "kind": "command",
         "name": "kill",
-        "source": "src/extension.ts:649"
+        "source": "src/extension.ts:686"
       },
       {
         "description": "Show bounded output from a background task: /logs <id> [maxBytes]",
         "id": "command:logs",
         "kind": "command",
         "name": "logs",
-        "source": "src/extension.ts:618"
+        "source": "src/extension.ts:655"
       },
       {
         "description": "Open the Claude-like background task manager UI",
         "id": "command:tasks",
         "kind": "command",
         "name": "tasks",
-        "source": "src/extension.ts:543"
+        "source": "src/extension.ts:580"
       }
     ],
     "eventbus": [
@@ -972,7 +971,7 @@
         "id": "renderer:background-task-notification",
         "kind": "renderer",
         "name": "background-task-notification",
-        "source": "src/extension.ts:426"
+        "source": "src/extension.ts:450"
       },
       {
         "id": "renderer:fusion-result",
@@ -987,14 +986,14 @@
         "id": "shortcut:ctrl+alt+c",
         "kind": "shortcut",
         "name": "ctrl+alt+c",
-        "source": "src/extension.ts:597"
+        "source": "src/extension.ts:634"
       },
       {
         "description": "Open focused background task footer dock",
         "id": "shortcut:shift+down",
         "kind": "shortcut",
         "name": "shift+down",
-        "source": "src/extension.ts:590"
+        "source": "src/extension.ts:627"
       }
     ],
     "tool": [
@@ -1107,7 +1106,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:908"
+        "source": "src/extension.ts:945"
       },
       {
         "description": "Read bounded output from a background task for deliberate inspection; this is not a waiting primitive. Output is capped at 50.0KB for model safety and points to the full output file when truncated.",
@@ -1141,7 +1140,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:863"
+        "source": "src/extension.ts:900"
       },
       {
         "description": "Retrieve a hash-verified result from a bg_delegate or background Fusion task. Never blocks: a running task returns a typed not-ready result. Oversized answers are never truncated.",
@@ -1228,7 +1227,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:682"
+        "source": "src/extension.ts:719"
       },
       {
         "description": "Opt-in evidence-oriented direct Pi spawn. Launches exactly one `pi --mode json` child, records raw Pi events/stderr, hashes prompt/report/output, observes OAuth through ModelRegistry, and emits a strict attestation sidecar only after successful completion.",
@@ -1289,7 +1288,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:767"
+        "source": "src/extension.ts:804"
       },
       {
         "description": "Inspect one background task or list all running/recent background tasks. This is a point-in-time inspection tool, not a waiting primitive.",
@@ -1313,7 +1312,7 @@
           "required": [],
           "type": "object"
         },
-        "source": "src/extension.ts:832"
+        "source": "src/extension.ts:869"
       },
       {
         "description": "Start a five-model Fusion investigation as a tracked background task and return immediately after durable preflight. Retrieve the verified result with bg_result after notification. Candidate children run in clean bounded read-only contexts.",
