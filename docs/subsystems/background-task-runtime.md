@@ -5,7 +5,7 @@ mode: authored
 review_policy: behavioral
 stability: stable
 covers_surfaces: []
-covers_sources: [src/core/common.ts, src/core/registry.ts, src/core/windows-taskkill.ts]
+covers_sources: [src/core/common.ts, src/core/registry.ts, src/core/shell-policy.ts, src/core/windows-taskkill.ts]
 ---
 # Background task runtime
 
@@ -16,7 +16,7 @@ The runtime owns task identity, shell invocation, process lifecycle, bounded log
 - Task statuses are exactly `running`, `completed`, `failed`, and `killed`.
 - Terminal statuses are exactly `completed`, `failed`, and `killed`.
 - Runtime directory: `.pi/tasks/<session-id>-<pid>/` under the project cwd.
-- Per task: `<task-id>.output` and `<task-id>.json`; some agent modes may add wrapper or attestation files.
+- Per task: `<task-id>.output` and `<task-id>.json`; some agent modes may add wrapper or attestation files. Ordinary shell-task snapshots and metadata include the non-secret activation shell facts (`policy`, `executable`, `argvPrefix`, and `dialect`) used for that launch.
 - In-memory recent retention prunes oldest finished tasks over the limit while preserving running tasks and newest-result recency. If the oldest finished task still owns pending publication, pruning first abandons and disposes that publication as `retention_limit`; pending gates cannot force eviction of a newer result or grow retained finished tasks without bound.
 - `resolveTask` accepts exact ids or unambiguous prefixes and fails loudly for empty, unknown, or ambiguous ids.
 
@@ -42,9 +42,19 @@ Default delivery at registry level is `notifyOnCompletion:true` and `triggerOnCo
 
 ## Shell policy
 
-POSIX uses `$SHELL` when set, otherwise `/bin/sh`, with `-c <command>`.
+One immutable policy is resolved per extension activation and shared by actual registry spawns and the agent-visible guidance hook. Mutating shell-selection environment variables cannot change that activation; `/reload` creates a new activation and resolves them again.
 
-Windows defaults to `cmd.exe` or `ComSpec`, with args `['/d','/s','/c','"<command>"']` and `windowsVerbatimArguments:true`. `PI_BG_SHELL=cmd|bash` can select a shell; `PI_BG_SHELL_PATH` is accepted only with `PI_BG_SHELL` and must be an absolute `.exe`/`.com` path. `PI_BG_SHELL=bash` without a path searches PATH for `bash.exe` or `bash.com`; unresolved or invalid shell settings fail before creating a task.
+On non-Windows platforms, `PI_BG_POSIX_SHELL` accepts exactly `inherit`, `bash`, or `sh` and defaults to `inherit`:
+
+- `inherit` preserves compatibility: use a non-empty `$SHELL`, otherwise `/bin/sh`, with `-c <command>`. The inherited executable is not replaced or turned into a login shell.
+- `bash` checks executable `/bin/bash` first, then checks `bash` in `PATH` order.
+- `sh` checks executable `/bin/sh` first, then checks `sh` in `PATH` order.
+
+`PI_BG_POSIX_SHELL_PATH` is accepted only with explicit `bash` or `sh`. It must be a non-empty absolute path whose target is a regular executable file. A bad explicit path fails without falling back to search. The selected path is passed as the spawn executable and is never interpolated into the command. Bash and sh use `-c`, never `-lc`.
+
+Inherited basename `bash` is classified as Bash. Reviewed Bourne-family shells (`sh`, `dash`, `ash`, `ksh`, `ksh93`, `mksh`, `pdksh`, `zsh`, `yash`, and `posh`) are classified as POSIX-function compatible. Nu, fish, csh/tcsh, and unknown names are reported as `user-non-posix`; they are never mislabeled as POSIX or Bash. This classification does not validate or replace an inherited executable, preserving existing spawn-failure behavior.
+
+Windows ignores both POSIX variables. It defaults to `cmd.exe` or `ComSpec`, with args `['/d','/s','/c','"<command>"']` and `windowsVerbatimArguments:true`. `PI_BG_SHELL=cmd|bash` can select a shell; `PI_BG_SHELL_PATH` is accepted only with `PI_BG_SHELL` and must be an absolute `.exe`/`.com` path. `PI_BG_SHELL=bash` without a path searches PATH for `bash.exe` or `bash.com`; unresolved or invalid Windows shell settings fail before creating a task. Existing structured argv behavior is unchanged.
 
 ## Logs and output caps
 
@@ -56,7 +66,7 @@ Model-visible log reads use bounded file reads capped by `MAX_LOG_BYTES` (curren
 
 Telemetry is task-owned. It is parsed from task output/control lines when the task reports it; it is never copied from the parent session. Optional telemetry includes context usage, token usage, tool usage, and model. Malformed optional telemetry is ignored without clearing prior task state; unknown wrapped-agent JSON is written to the transcript rather than silently dropped.
 
-`isAgent` explicitly controls telemetry wrapping. If `isAgent:false`, a `pi -p` command is treated as an ordinary command. If `isAgent:true` and the POSIX command contains an interceptable `pi -p`, `pi --print`, or `pi --mode json` invocation, the runtime writes a wrapper and converts Pi JSON events into task-owned metrics and human transcript lines. Path-qualified `pi` commands are not intercepted. On Windows cmd, telemetry wrapping is unavailable and the task records `win32-cmd-cannot-safely-intercept-pi-argv`.
+`isAgent` explicitly controls telemetry wrapping. If `isAgent:false`, a `pi -p` command is treated as an ordinary command. If `isAgent:true`, the command contains an interceptable `pi -p`, `pi --print`, or `pi --mode json` invocation, and the resolved policy supports POSIX function syntax, the runtime writes a wrapper and converts Pi JSON events into task-owned metrics and human transcript lines. Path-qualified `pi` commands are not intercepted. Capability, not a generic “non-Windows” label, controls injection: Windows cmd records `win32-cmd-cannot-safely-intercept-pi-argv`, while an inherited Nu/fish/csh/unknown shell records `user-non-posix-shell-cannot-safely-intercept-pi-argv`. Neither route receives a Bash/POSIX function wrapper.
 
 ## Finalization and completion
 
@@ -106,4 +116,4 @@ Windows never falls back to root-only `child.kill` for tree termination. The tas
 
 ## Source ownership/reference
 
-Primary source ownership for this document is `src/core/common.ts`, `src/core/registry.ts`, and `src/core/windows-taskkill.ts`.
+Primary source ownership for this document is `src/core/common.ts`, `src/core/registry.ts`, `src/core/shell-policy.ts`, and `src/core/windows-taskkill.ts`.

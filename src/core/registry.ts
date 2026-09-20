@@ -16,8 +16,10 @@ import {
   normalizeTaskName,
   parseAgentActivity,
   parseJsonText,
+  resolveShellPolicy,
   sanitizePathSegment,
-  shellInvocation,
+  shellInvocationForPolicy,
+  shellPolicySnapshot,
   shellQuote,
   snapshot,
   taskDisplayName,
@@ -26,6 +28,7 @@ import {
   type BgTaskSnapshot,
   type JsonObject,
   type KillKind,
+  type ResolvedShellPolicy,
   type StartAttestedPiTaskOptions,
   type StartDelegateTaskOptions,
   type StartManagedTaskOptions,
@@ -125,6 +128,8 @@ interface TaskAdmission {
 }
 export const WIN32_CMD_PI_TELEMETRY_UNAVAILABLE_REASON =
   'win32-cmd-cannot-safely-intercept-pi-argv';
+export const NON_POSIX_SHELL_PI_TELEMETRY_UNAVAILABLE_REASON =
+  'user-non-posix-shell-cannot-safely-intercept-pi-argv';
 
 export interface BackgroundTaskModelRegistry
   extends Pick<ExtensionContext['modelRegistry'], 'getAll'> {
@@ -222,6 +227,7 @@ export interface BackgroundTaskRegistryOptions {
   killTree?: KillTreeFn;
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
+  shellPolicy?: ResolvedShellPolicy;
   makeTaskId?: () => string;
   now?: () => number;
   maxOutputBytes?: number;
@@ -802,6 +808,8 @@ export class BackgroundTaskRegistry {
   private readonly killTree: KillTreeFn;
   private readonly platform: NodeJS.Platform;
   private readonly env: NodeJS.ProcessEnv;
+  private shellPolicy: ResolvedShellPolicy | undefined;
+  private readonly shellPolicyEnv: NodeJS.ProcessEnv | undefined;
   private readonly makeTaskIdFn: () => string;
   private readonly now: () => number;
   private readonly maxOutputBytes: number;
@@ -835,6 +843,8 @@ export class BackgroundTaskRegistry {
     this.killProcess = options.killProcess ?? process.kill.bind(process);
     this.platform = options.platform ?? process.platform;
     this.env = options.env ?? process.env;
+    this.shellPolicy = options.shellPolicy;
+    this.shellPolicyEnv = options.shellPolicy === undefined ? { ...this.env } : undefined;
     this.killTree =
       options.killTree ??
       ((pid, phase, signal) => {
@@ -872,6 +882,18 @@ export class BackgroundTaskRegistry {
 
   isShuttingDown(): boolean {
     return this.shuttingDown;
+  }
+
+  private resolvedShellPolicy(): ResolvedShellPolicy {
+    const existing = this.shellPolicy;
+    if (existing !== undefined) return existing;
+    const resolved = resolveShellPolicy(
+      this.platform,
+      this.shellPolicyEnv ?? this.env,
+      process.cwd(),
+    );
+    this.shellPolicy = resolved;
+    return resolved;
   }
 
   private static positiveTimeout(
@@ -1180,10 +1202,11 @@ export class BackgroundTaskRegistry {
     this.assertTaskAdmissionOpen('a background task', admission);
 
     const isAgent = options.isAgent ?? false;
-    const baseInvocation = shellInvocation(normalizedCommand, this.platform, this.env);
+    const shellPolicy = this.resolvedShellPolicy();
+    const baseInvocation = shellInvocationForPolicy(normalizedCommand, shellPolicy);
     const piTelemetryRequested = isAgent && commandMayLaunchPiAgent(normalizedCommand, this.env);
     const piTelemetryLaunch =
-      piTelemetryRequested && baseInvocation.dialect === 'posix'
+      piTelemetryRequested && shellPolicy.supportsPosixFunctionWrapper
         ? resolvePiLaunch({ platform: this.platform })
         : undefined;
 
@@ -1196,7 +1219,7 @@ export class BackgroundTaskRegistry {
     let commandToSpawn = normalizedCommand;
     let wrapperAbsPath: string | undefined;
     try {
-      if (piTelemetryRequested && baseInvocation.dialect === 'posix') {
+      if (piTelemetryRequested && shellPolicy.supportsPosixFunctionWrapper) {
         if (piTelemetryLaunch === undefined)
           throw new Error('Pi telemetry launch spec was not resolved');
         wrapperAbsPath = join(dir.abs, `${id}.pi-telemetry-wrapper.cjs`);
@@ -1220,7 +1243,7 @@ export class BackgroundTaskRegistry {
     const invocation =
       commandToSpawn === normalizedCommand
         ? baseInvocation
-        : shellInvocation(commandToSpawn, this.platform, this.env);
+        : shellInvocationForPolicy(commandToSpawn, shellPolicy);
     const timeoutSeconds =
       typeof options.timeoutSeconds === 'number' &&
       Number.isFinite(options.timeoutSeconds) &&
@@ -1258,11 +1281,16 @@ export class BackgroundTaskRegistry {
       terminalPublicationState: 'pending',
       terminalPublishAttempts: 0,
       terminalPublicationGate: options.terminalPublicationGate,
+      shellPolicy: shellPolicySnapshot(shellPolicy),
       waiters: [],
     };
     if (commandToSpawn !== normalizedCommand) task.telemetryWrapped = true;
-    if (piTelemetryRequested && baseInvocation.dialect !== 'posix')
-      task.telemetryUnavailableReason = WIN32_CMD_PI_TELEMETRY_UNAVAILABLE_REASON;
+    if (piTelemetryRequested && !shellPolicy.supportsPosixFunctionWrapper) {
+      task.telemetryUnavailableReason =
+        shellPolicy.dialect === 'cmd'
+          ? WIN32_CMD_PI_TELEMETRY_UNAVAILABLE_REASON
+          : NON_POSIX_SHELL_PI_TELEMETRY_UNAVAILABLE_REASON;
+    }
     this.assertTaskAdmissionOpen('a background task', admission);
     this.tasks.set(id, task);
 

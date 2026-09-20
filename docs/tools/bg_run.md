@@ -11,7 +11,7 @@ covers_sources: []
 
 <!-- pi-docs:begin name="tool-contract-bg_run" generator="scripts/docs/generate.mjs" -->
 - Label: **Background Run**
-- Source: `src/extension.ts:719`
+- Source: `src/extension.ts:726`
 - Description: Start a named long-running shell command in the background and return immediately with a task ID and output path. By default, completed, failed, or killed terminal state is delivered automatically as <background-task-notification> and starts a follow-up agent turn; do not sleep or poll merely to wait. Output is written to .pi/tasks and model-visible logs are bounded to 50.0KB.
 - Root schema: `object`
 
@@ -106,9 +106,17 @@ For an Anthropic child `pi`, keep normal extension discovery enabled. Do not pas
 - `timeoutSeconds`: absent means no timeout.
 - `isAgent`: no default in the tool contract; callers must provide a boolean. It is not inferred from command text.
 
+## Shell selection and guidance
+
+The extension resolves one immutable shell selection per activation. Before the model generates a command, agent guidance states the exact executable, dialect, and argument shape used by `bg_run`. The same facts appear in the returned task's `shellPolicy` and durable metadata. Guidance never includes the full environment.
+
+The compatible POSIX default is `PI_BG_POSIX_SHELL=inherit`: use non-empty `SHELL`, otherwise `/bin/sh`, with `-c`. To deliberately request the Bash syntax models commonly generate, set `PI_BG_POSIX_SHELL=bash` before starting or reloading Pi. `PI_BG_POSIX_SHELL=sh` selects portable sh. An optional `PI_BG_POSIX_SHELL_PATH` is valid only for explicit Bash/sh and must be an absolute regular executable. Bash/sh use `-c`, not a login shell. See [Configuration](../operations/configuration.md) for exact `/bin`-then-`PATH` search and validation.
+
+Inherited Nu, fish, csh, and unknown shells remain the default when selected through `SHELL`, but are labeled `user-non-posix`, not POSIX or Bash. Their guidance says not to generate Bash syntax and gives explicit Bash remediation. Windows keeps its separate `PI_BG_SHELL` policy and ignores the POSIX variables.
+
 ## Lifecycle
 
-The tool returns a task id, current `running` status, pid if known, output path, and completion-delivery guidance. Terminal statuses are exactly `completed`, `failed`, or `killed`. With default delivery, terminal state is sent as `<background-task-notification>` and starts a follow-up agent turn; after launching, do not sleep or poll merely to wait.
+The tool returns a task id, current `running` status, pid if known, output path, completion-delivery guidance, and structured task details including the actual shell policy. Terminal statuses are exactly `completed`, `failed`, or `killed`. With default delivery, terminal state is sent as `<background-task-notification>` and starts a follow-up agent turn; after launching, do not sleep or poll merely to wait.
 
 ## Examples
 
@@ -138,7 +146,7 @@ Automatic follow-up turn: enabled.
 ...
 ```
 
-Structured details include `task`, a snapshot with command, status, output path, cwd, timing, pid, byte count, `isAgent`, delivery flags, telemetry fields when available, and error when present.
+Structured details include `task`, a snapshot with command, status, output path, cwd, timing, pid, byte count, `isAgent`, delivery flags, the non-secret `shellPolicy` (`policy`, `executable`, `argvPrefix`, `dialect`) for ordinary shell tasks, telemetry fields when available, and error when present.
 
 ## Errors
 
@@ -146,11 +154,12 @@ Structured details include `task`, a snapshot with command, status, output path,
 - Missing command: `bg_run requires command string`.
 - Missing `isAgent`: loud error explaining true/false use.
 - Empty command at execution: `Background command is empty`.
+- Invalid explicit POSIX shell mode/path or an unavailable requested Bash/sh route fails loudly without fallback.
 - Shell/spawn/timeout/output-cap failures become loud task failures.
 
 ## Runtime artifacts
 
-Creates `.pi/tasks/<session-id>-<pid>/<task-id>.output` and `.json`. If `isAgent:true` and the command matches an interceptable POSIX `pi -p`, `pi --print`, or `pi --mode json` invocation, a temporary telemetry wrapper file is also written in the task directory.
+Creates `.pi/tasks/<session-id>-<pid>/<task-id>.output` and `.json`; the JSON records the actual ordinary-task shell policy. If `isAgent:true`, the command matches an interceptable `pi -p`, `pi --print`, or `pi --mode json` invocation, and the resolved shell supports POSIX function syntax, a temporary telemetry wrapper file is also written in the task directory. Unknown/non-POSIX inherited shells are left unwrapped with a diagnostic.
 
 ## Safety boundaries
 

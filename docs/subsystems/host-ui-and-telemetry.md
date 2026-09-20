@@ -20,6 +20,12 @@ This subsystem owns the extension entrypoint, command/tool registration, footer 
 - shortcuts: `shift+down` and `ctrl+alt+c`;
 - renderer: `background-task-notification`.
 
+## Agent-visible shell guidance
+
+A dedicated `before_agent_start` hook adds the activation's actual background-shell executable, dialect, and `-c`/cmd argument shape before the model generates a command. The hook uses an independently replaceable prompt section when the host supports structured sections and a chained, idempotent section on older supported hosts. It preserves guidance added by other background-feature hooks in either registration order.
+
+An inherited Nu, fish, csh, or unknown shell is explicitly described as `user-non-posix`, with instructions not to assume Bash syntax and remediation to set `PI_BG_POSIX_SHELL=bash` before startup or `/reload`. The guidance contains only resolved launch facts, not the process environment or credentials. The registry receives the same immutable selection; task snapshots and metadata make that match observable.
+
 ## Footer status
 
 The footer widget is updated on task changes and once per second while a session is active. If there are no running tasks and no unseen finished tasks, the background-task footer is cleared unless an update segment is available.

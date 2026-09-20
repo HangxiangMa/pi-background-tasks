@@ -1,6 +1,6 @@
-import { statSync, type WriteStream } from 'node:fs';
+import { accessSync, constants, statSync, type WriteStream } from 'node:fs';
 import { open } from 'node:fs/promises';
-import { extname, isAbsolute, join, win32 } from 'node:path';
+import { basename, delimiter, extname, isAbsolute, join, resolve, win32 } from 'node:path';
 import { DEFAULT_MAX_BYTES } from '@earendil-works/pi-coding-agent';
 import type { BackgroundTaskChildProcess } from './registry.js';
 import type { DelegateBudgetRouteSource, DelegateExtensionMode } from './delegate/types.js';
@@ -69,6 +69,8 @@ export interface BgTaskSnapshot {
   toolUsage?: TaskToolUsage | undefined;
   model?: string | undefined;
   telemetryUnavailableReason?: string | undefined;
+  /** Immutable non-secret shell selection for ordinary shell tasks. */
+  shellPolicy?: ShellPolicySnapshot | undefined;
   attestationPath?: string | undefined;
   delegate?: DelegateTaskFacts | undefined;
   fusion?: FusionTaskFacts | undefined;
@@ -629,7 +631,23 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-export type ShellDialect = 'cmd' | 'posix';
+export type ShellDialect = 'cmd' | 'posix' | 'user-non-posix';
+export type ShellPolicyDialect = ShellDialect | 'bash';
+export type ShellPolicyName = 'inherit' | 'bash' | 'sh' | 'cmd';
+
+/** Non-secret launch facts persisted for ordinary shell tasks. */
+export interface ShellPolicySnapshot {
+  readonly policy: ShellPolicyName;
+  readonly executable: string;
+  readonly argvPrefix: readonly string[];
+  readonly dialect: ShellPolicyDialect;
+}
+
+/** One immutable shell selection shared by guidance and every ordinary spawn in an activation. */
+export interface ResolvedShellPolicy extends ShellPolicySnapshot {
+  readonly supportsPosixFunctionWrapper: boolean;
+  readonly windowsVerbatimArguments: boolean;
+}
 
 export interface ShellInvocation {
   shell: string;
@@ -651,12 +669,43 @@ type ShellCandidateResult =
   | { readonly found: true }
   | { readonly found: false; readonly diagnostic: string };
 
+const POSIX_FUNCTION_SHELLS = new Set([
+  'sh',
+  'dash',
+  'ash',
+  'ksh',
+  'ksh93',
+  'mksh',
+  'pdksh',
+  'zsh',
+  'yash',
+  'posh',
+]);
+
 function failShellInvocation(message: string): never {
   throw new ShellInvocationError(message);
 }
 
 function shellErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function freezeShellPolicy(
+  policy: Omit<ResolvedShellPolicy, 'argvPrefix'> & { argvPrefix: readonly string[] },
+): ResolvedShellPolicy {
+  return Object.freeze({
+    ...policy,
+    argvPrefix: Object.freeze([...policy.argvPrefix]),
+  });
+}
+
+export function shellPolicySnapshot(policy: ResolvedShellPolicy): ShellPolicySnapshot {
+  return Object.freeze({
+    policy: policy.policy,
+    executable: policy.executable,
+    argvPrefix: Object.freeze([...policy.argvPrefix]),
+    dialect: policy.dialect,
+  });
 }
 
 function isWindowsExecutablePath(path: string): boolean {
@@ -714,17 +763,168 @@ function resolveWindowsBash(env: NodeJS.ProcessEnv): string {
   failShellInvocation(`PI_BG_SHELL=bash could not resolve bash.exe or bash.com on PATH${suffix}`);
 }
 
-function cmdShellInvocation(command: string, shell: string): ShellInvocation {
-  return {
-    shell,
-    args: ['/d', '/s', '/c', `"${command}"`],
-    dialect: 'cmd',
-    windowsVerbatimArguments: true,
-  };
+function validatePosixShellPath(path: string, label: string): string {
+  if (path.length === 0) failShellInvocation(`${label} is empty`);
+  if (!isAbsolute(path)) failShellInvocation(`${label} must be an absolute path`);
+  let stats: ReturnType<typeof statSync>;
+  try {
+    stats = statSync(path);
+  } catch (error) {
+    failShellInvocation(`${label} stat failed: ${shellErrorMessage(error)}`);
+  }
+  if (!stats.isFile()) failShellInvocation(`${label} must point to a regular file`);
+  try {
+    accessSync(path, constants.X_OK);
+  } catch (error) {
+    failShellInvocation(`${label} must be executable: ${shellErrorMessage(error)}`);
+  }
+  return path;
 }
 
-function posixShellInvocation(command: string, shell: string): ShellInvocation {
-  return { shell, args: ['-c', command], dialect: 'posix', windowsVerbatimArguments: false };
+function inspectPosixShellCandidate(path: string): boolean {
+  try {
+    const stats = statSync(path);
+    if (!stats.isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolvePosixExecutable(
+  name: 'bash' | 'sh',
+  env: NodeJS.ProcessEnv,
+  activationCwd: string,
+): string {
+  const binCandidate = `/bin/${name}`;
+  if (inspectPosixShellCandidate(binCandidate)) return binCandidate;
+  const pathValue = env['PATH'] ?? '';
+  for (const entry of pathValue.split(delimiter)) {
+    if (entry.length === 0) continue;
+    const directory = isAbsolute(entry) ? entry : resolve(activationCwd, entry);
+    const candidate = join(directory, name);
+    if (inspectPosixShellCandidate(candidate)) return candidate;
+  }
+  failShellInvocation(
+    `PI_BG_POSIX_SHELL=${name} could not resolve executable ${binCandidate} or ${name} on PATH`,
+  );
+}
+
+function inheritedPosixDialect(executable: string): ShellPolicyDialect {
+  const name = basename(executable).toLowerCase();
+  if (name === 'bash') return 'bash';
+  return POSIX_FUNCTION_SHELLS.has(name) ? 'posix' : 'user-non-posix';
+}
+
+/** Resolve one activation-stable policy. New POSIX variables are intentionally ignored on Windows. */
+export function resolveShellPolicy(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  activationCwd: string = process.cwd(),
+): ResolvedShellPolicy {
+  if (platform === 'win32') {
+    const requestedShell = env['PI_BG_SHELL'];
+    const requestedPath = env['PI_BG_SHELL_PATH'];
+    if (requestedShell === undefined) {
+      if (requestedPath !== undefined)
+        failShellInvocation('PI_BG_SHELL_PATH requires PI_BG_SHELL');
+      const comSpec = env['ComSpec'];
+      return freezeShellPolicy({
+        policy: 'cmd',
+        executable: comSpec && comSpec.length > 0 ? comSpec : 'cmd.exe',
+        argvPrefix: ['/d', '/s', '/c'],
+        dialect: 'cmd',
+        supportsPosixFunctionWrapper: false,
+        windowsVerbatimArguments: true,
+      });
+    }
+    if (requestedShell !== 'cmd' && requestedShell !== 'bash') {
+      failShellInvocation('PI_BG_SHELL must be exactly cmd or bash');
+    }
+    const explicitPath =
+      requestedPath !== undefined
+        ? validateWindowsShellPath(requestedPath, 'PI_BG_SHELL_PATH')
+        : undefined;
+    if (requestedShell === 'cmd') {
+      const comSpec = env['ComSpec'];
+      return freezeShellPolicy({
+        policy: 'cmd',
+        executable: explicitPath ?? (comSpec && comSpec.length > 0 ? comSpec : 'cmd.exe'),
+        argvPrefix: ['/d', '/s', '/c'],
+        dialect: 'cmd',
+        supportsPosixFunctionWrapper: false,
+        windowsVerbatimArguments: true,
+      });
+    }
+    return freezeShellPolicy({
+      policy: 'bash',
+      executable: explicitPath ?? resolveWindowsBash(env),
+      argvPrefix: ['-c'],
+      dialect: 'bash',
+      supportsPosixFunctionWrapper: true,
+      windowsVerbatimArguments: false,
+    });
+  }
+
+  const configuredPolicy = env['PI_BG_POSIX_SHELL'];
+  if (
+    configuredPolicy !== undefined &&
+    configuredPolicy !== 'inherit' &&
+    configuredPolicy !== 'bash' &&
+    configuredPolicy !== 'sh'
+  ) {
+    failShellInvocation('PI_BG_POSIX_SHELL must be exactly inherit, bash, or sh');
+  }
+  const policy = configuredPolicy ?? 'inherit';
+  const configuredPath = env['PI_BG_POSIX_SHELL_PATH'];
+  if (policy === 'inherit') {
+    if (configuredPath !== undefined) {
+      failShellInvocation(
+        'PI_BG_POSIX_SHELL_PATH requires PI_BG_POSIX_SHELL=bash or PI_BG_POSIX_SHELL=sh',
+      );
+    }
+    const inherited = env['SHELL'];
+    const executable = inherited && inherited.length > 0 ? inherited : '/bin/sh';
+    const dialect = inheritedPosixDialect(executable);
+    return freezeShellPolicy({
+      policy,
+      executable,
+      argvPrefix: ['-c'],
+      dialect,
+      supportsPosixFunctionWrapper: dialect === 'bash' || dialect === 'posix',
+      windowsVerbatimArguments: false,
+    });
+  }
+
+  const executable =
+    configuredPath !== undefined
+      ? validatePosixShellPath(configuredPath, 'PI_BG_POSIX_SHELL_PATH')
+      : resolvePosixExecutable(policy, env, activationCwd);
+  return freezeShellPolicy({
+    policy,
+    executable,
+    argvPrefix: ['-c'],
+    dialect: policy === 'bash' ? 'bash' : 'posix',
+    supportsPosixFunctionWrapper: true,
+    windowsVerbatimArguments: false,
+  });
+}
+
+export function shellInvocationForPolicy(
+  command: string,
+  policy: ResolvedShellPolicy,
+): ShellInvocation {
+  const dialect: ShellDialect = policy.dialect === 'bash' ? 'posix' : policy.dialect;
+  return {
+    shell: policy.executable,
+    args:
+      policy.dialect === 'cmd'
+        ? [...policy.argvPrefix, `"${command}"`]
+        : [...policy.argvPrefix, command],
+    dialect,
+    windowsVerbatimArguments: policy.windowsVerbatimArguments,
+  };
 }
 
 export function shellInvocation(
@@ -732,33 +932,7 @@ export function shellInvocation(
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
 ): ShellInvocation {
-  if (platform !== 'win32') {
-    const shell = env['SHELL'];
-    return posixShellInvocation(command, shell && shell.length > 0 ? shell : '/bin/sh');
-  }
-
-  const requestedShell = env['PI_BG_SHELL'];
-  const requestedPath = env['PI_BG_SHELL_PATH'];
-  if (requestedShell === undefined) {
-    if (requestedPath !== undefined) failShellInvocation('PI_BG_SHELL_PATH requires PI_BG_SHELL');
-    const comSpec = env['ComSpec'];
-    return cmdShellInvocation(command, comSpec && comSpec.length > 0 ? comSpec : 'cmd.exe');
-  }
-  if (requestedShell !== 'cmd' && requestedShell !== 'bash') {
-    failShellInvocation('PI_BG_SHELL must be exactly cmd or bash');
-  }
-  const explicitPath =
-    requestedPath !== undefined
-      ? validateWindowsShellPath(requestedPath, 'PI_BG_SHELL_PATH')
-      : undefined;
-  if (requestedShell === 'cmd') {
-    const comSpec = env['ComSpec'];
-    return cmdShellInvocation(
-      command,
-      explicitPath ?? (comSpec && comSpec.length > 0 ? comSpec : 'cmd.exe'),
-    );
-  }
-  return posixShellInvocation(command, explicitPath ?? resolveWindowsBash(env));
+  return shellInvocationForPolicy(command, resolveShellPolicy(platform, env));
 }
 
 export function normalizeMaxBytes(value: unknown, fallback = DEFAULT_LOG_BYTES): number {
@@ -792,6 +966,7 @@ export function snapshot(task: BgTask): BgTaskSnapshot {
     toolUsage: task.toolUsage,
     model: task.model,
     telemetryUnavailableReason: task.telemetryUnavailableReason,
+    shellPolicy: task.shellPolicy,
     attestationPath: task.attestationPath,
     delegate: task.delegate,
     fusion: task.fusion,

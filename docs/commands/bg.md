@@ -12,7 +12,7 @@ covers_sources: []
 <!-- pi-docs:begin name="command-contract-bg" generator="scripts/docs/generate.mjs" -->
 | Command | Description | Provenance |
 | --- | --- | --- |
-| `/bg` | Start a shell command as a tracked background task: /bg [--agent] [--name "Task name"] <command> | `src/extension.ts:554` |
+| `/bg` | Start a shell command as a tracked background task: /bg [--agent] [--name "Task name"] <command> | `src/extension.ts:561` |
 <!-- pi-docs:end name="command-contract-bg" -->
 
 Start a shell command as a tracked background task from the command line.
@@ -35,6 +35,12 @@ Use `/bg` for user-driven long-running commands where you want a footer entry, o
 - `notifyOnCompletion`: `true`.
 - `triggerOnCompletion`: `false` for `/bg`, so completion is display-only by default.
 - Task name: explicit `--name` if present, otherwise derived from the command.
+
+## Shell selection
+
+`/bg` uses the same activation-stable policy and agent-visible guidance as `bg_run`. The compatible non-Windows default remains non-empty `SHELL`, otherwise `/bin/sh`, with `-c`; it never silently switches existing users to Bash or loads login-shell startup. Set `PI_BG_POSIX_SHELL=bash` or `sh` before startup or `/reload` for deliberate automation syntax, with optional validated absolute `PI_BG_POSIX_SHELL_PATH`. See [Configuration](../operations/configuration.md) for search and validation details.
+
+Inherited Nu, fish, csh, and unknown names are reported as `user-non-posix`, not POSIX/Bash. Task metadata records the exact executable, argument prefix, and dialect used. Windows remains controlled only by its existing `PI_BG_SHELL`/`PI_BG_SHELL_PATH`/`ComSpec` policy.
 
 ## Lifecycle
 
@@ -65,11 +71,12 @@ Completion is delivered as a durable `background-task-notification` custom messa
 - Empty command: `Background command is empty`.
 - Missing or unterminated `--name`: `requires a task name`.
 - Shell/spawn errors fail the task loudly and write failure metadata.
+- Invalid or unavailable explicit POSIX Bash/sh selection rejects the launch without fallback.
 - Unknown shell policy on Windows can reject the launch before a task is created.
 
 ## Runtime artifacts
 
-Outputs and metadata are written under `.pi/tasks/<session-id>-<pid>/` as `<task-id>.output` and `<task-id>.json`. Model-visible log reads are bounded; the full output path is preserved in notices.
+Outputs and metadata are written under `.pi/tasks/<session-id>-<pid>/` as `<task-id>.output` and `<task-id>.json`. Ordinary-task metadata includes the non-secret resolved shell policy. Model-visible log reads are bounded; the full output path is preserved in notices.
 
 ## Safety boundaries
 

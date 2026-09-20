@@ -27,7 +27,18 @@ At `session_start`, the extension performs a one-shot, time-boxed npm latest-ver
 
 ### POSIX
 
-For ordinary `bg_run` and `/bg` shell commands, non-Windows platforms use `SHELL` when it is set, otherwise `/bin/sh`.
+The policy is resolved once per extension activation. Changing these variables takes effect on the next Pi start or `/reload`, not midway through an activation.
+
+| Variable | Effect |
+|---|---|
+| `PI_BG_POSIX_SHELL=inherit` | Default. Preserve the existing behavior: use non-empty `SHELL`, otherwise `/bin/sh`, with `-c`. |
+| `PI_BG_POSIX_SHELL=bash` | Select Bash explicitly. Check executable `/bin/bash` first, then `bash` in `PATH` order; fail if unavailable. |
+| `PI_BG_POSIX_SHELL=sh` | Select sh explicitly. Check executable `/bin/sh` first, then `sh` in `PATH` order; fail if unavailable. |
+| `PI_BG_POSIX_SHELL_PATH=<absolute-file>` | Optional only with `bash` or `sh`. The target must be a regular executable file. Invalid, empty, relative, or unavailable paths fail without search fallback. |
+
+Executable paths are structured spawn arguments, not interpolated command text. Bash and sh receive `-c`, never `-lc`; selecting them does not implicitly load login-shell startup files. For explicit search, `/bin` wins over `PATH`; relative `PATH` directories are resolved at activation so task cwd changes cannot retarget the selected executable.
+
+In `inherit` mode, known Bourne-family names are reported as POSIX-compatible, `bash` is reported as Bash, and Nu/fish/csh/unknown names are reported as `user-non-posix`. The inherited executable itself is intentionally not validated or replaced, preserving compatibility. Before each agent run, guidance reports the exact resolved executable/dialect/args. A non-POSIX inherited shell receives explicit `PI_BG_POSIX_SHELL=bash` remediation.
 
 ### Windows
 
@@ -39,7 +50,7 @@ Windows defaults to `cmd.exe`/`ComSpec`. The generic `SHELL` variable is ignored
 | `PI_BG_SHELL=bash` | Use POSIX-style `bash -c` on Windows. |
 | `PI_BG_SHELL_PATH=<absolute .exe/.com>` | Explicit shell path; requires `PI_BG_SHELL`. |
 
-Invalid Windows shell settings fail loudly instead of falling back. `bash` is invoked with `-c`, not `-lc`.
+Invalid Windows shell settings fail loudly instead of falling back. `bash` is invoked with `-c`, not `-lc`. `PI_BG_POSIX_SHELL` and `PI_BG_POSIX_SHELL_PATH` are ignored on Windows, even when present, so they cannot change existing cmd/Bash/ComSpec selection or structured argv behavior.
 
 ## Output and log caps
 
@@ -57,7 +68,7 @@ Bounded logs are for context safety; they point to the full local output file wh
 |---|---|
 | `PI_BG_DISABLE_PI_TELEMETRY=1` | Do not wrap shell commands that appear to launch `pi -p ...` or `pi --mode json ...` when `isAgent:true`. Raw stdout is preserved. |
 
-Telemetry wrapping is best-effort and task-owned. Missing telemetry is reported as unavailable, never as zero. Under Windows `cmd`, safe interception is unavailable and the command is left unchanged.
+Telemetry wrapping is best-effort and task-owned. Missing telemetry is reported as unavailable, never as zero. Wrapping requires a resolved shell with compatible POSIX function syntax. Under Windows `cmd` or an inherited Nu/fish/csh/unknown shell, safe interception is unavailable, the command is left unchanged, and task metadata records the reason.
 
 ## Global Anthropic attribution and caching
 

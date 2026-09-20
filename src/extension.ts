@@ -38,6 +38,10 @@ import {
 } from './core/update-check.js';
 import { BackgroundTaskRegistry } from './core/registry.js';
 import {
+  createShellPolicyGuidanceHandler,
+  initializeShellPolicy,
+} from './core/shell-policy.js';
+import {
   installBackgroundTaskExtensionApi,
   type BackgroundTaskExtensionService,
 } from './core/extension-api.js';
@@ -204,6 +208,8 @@ function renderPlainResult(result: TextToolResult, options: ToolRenderResultOpti
 }
 
 export default function backgroundTasksExtension(pi: ExtensionAPI): void {
+  const shellPolicy = initializeShellPolicy();
+  pi.on('before_agent_start', createShellPolicyGuidanceHandler(shellPolicy));
   const seenTaskIds = new Set<string>();
   let currentCtx: ExtensionContext | undefined;
   let dockOpen = false;
@@ -223,6 +229,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     publishTerminal: (task) => {
       eventService.publishTerminal(task);
     },
+    shellPolicy,
   });
   const eventService: BackgroundTaskExtensionService = installBackgroundTaskExtensionApi({
     events: pi.events,
