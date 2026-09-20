@@ -141,7 +141,9 @@ void describe('Fusion model-role documentation', () => {
       validation_errors: validationErrors,
     };
     assert.deepEqual(parseJsonText(buildEvaluationRepairPrompt(repairInput)), repairInput);
-    assert.ok(validationErrors[0].length <= 500);
+    const firstValidationError = validationErrors[0];
+    assert.ok(firstValidationError !== undefined);
+    assert.ok(firstValidationError.length <= 500);
 
     const validEvaluation = evaluation();
     assert.equal(validateFusionEvaluation(validEvaluation).ok, true);
