@@ -1,0 +1,263 @@
+▶ C1a feature selection and dock configuration
+  ✔ keeps the default full public registration surface (1001.973667ms)
+  ✖ activates the exact surface for all 16 optional-capability subsets (273.942584ms)
+  ✖ fails malformed settings before any package registration with bounded diagnostics (267.286ms)
+  ✖ keeps ambient attribution off while the explicit child entry remains mandatory (4.723916ms)
+  ✖ rebuilds exact registrations and active tools across a real AgentSession reload (543.0815ms)
+  ✖ avoids the fixture Shift+Down conflict and dispatches both encoded keys to their owners (276.124375ms)
+  ✖ registers no dock shortcut in off mode while commands and fixture dispatch still work (274.011416ms)
+  ✖ derives the actual footer hint from default, alternate, and off shortcut config (612.269167ms)
+✖ C1a feature selection and dock configuration (3254.211625ms)
+ℹ tests 8
+ℹ suites 1
+ℹ pass 1
+ℹ fail 7
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4208.154125
+
+✖ failing tests:
+
+test at tests/sdk/feature-selection-sdk.test.ts:1:7005
+✖ activates the exact surface for all 16 optional-capability subsets (273.942584ms)
+  AssertionError [ERR_ASSERTION]: inventory for process
+  + actual - expected
+
+    {
+      commands: [
+        'bg',
+        'bg-clear',
+        'bg-tasks',
+        'bg-update',
+  +     'claude-cache',
+  +     'fusion',
+  +     'fusion-models',
+        'jobs',
+        'kill',
+        'logs',
+        'tasks'
+      ],
+      renderers: [
+        'background-task-notification',
+  +     'fusion-result'
+      ],
+      shortcuts: [
+        'ctrl+alt+c',
+        'shift+down'
+      ],
+      tools: [
+  +     'bg_delegate',
+        'bg_kill',
+        'bg_logs',
+  +     'bg_result',
+        'bg_run',
+  +     'bg_run_pi_attested',
+        'bg_status',
+  +     'fusion_investigate',
+  +     'fusion_reason',
+  +     'fusion_research',
+  +     'fusion_validate'
+      ]
+    }
+
+      at TestContext.<anonymous> (/private/tmp/pi-bg-closeout-iNoltL/features/tests/sdk/feature-selection-sdk.test.ts:280:14)
+      at async Test.run (node:internal/test_runner/test:1313:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:897:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: {
+      tools: [ 'bg_delegate', 'bg_kill', 'bg_logs', 'bg_result', 'bg_run', 'bg_run_pi_attested', 'bg_status', 'fusion_investigate', 'fusion_reason', 'fusion_research', 'fusion_validate' ],
+      commands: [
+        'bg',            'bg-clear',
+        'bg-tasks',      'bg-update',
+        'claude-cache',  'fusion',
+        'fusion-models', 'jobs',
+        'kill',          'logs',
+        'tasks'
+      ],
+      shortcuts: [ 'ctrl+alt+c', 'shift+down' ],
+      renderers: [ 'background-task-notification', 'fusion-result' ]
+    },
+    expected: {
+      tools: [ 'bg_kill', 'bg_logs', 'bg_run', 'bg_status' ],
+      commands: [
+        'bg',       'bg-clear',
+        'bg-tasks', 'bg-update',
+        'jobs',     'kill',
+        'logs',     'tasks'
+      ],
+      shortcuts: [ 'ctrl+alt+c', 'shift+down' ],
+      renderers: [ 'background-task-notification' ]
+    },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/sdk/feature-selection-sdk.test.ts:1:7724
+✖ fails malformed settings before any package registration with bounded diagnostics (267.286ms)
+  AssertionError [ERR_ASSERTION]: expected load error for {"features":"","expected":{}}
+      at TestContext.<anonymous> (/private/tmp/pi-bg-closeout-iNoltL/features/tests/sdk/feature-selection-sdk.test.ts:304:14)
+      at async Test.run (node:internal/test_runner/test:1313:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:897:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at tests/sdk/feature-selection-sdk.test.ts:1:9062
+✖ keeps ambient attribution off while the explicit child entry remains mandatory (4.723916ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+
+    {
+  +   commands: [
+  +     'claude-cache'
+  +   ],
+  -   commands: [],
+      renderers: [],
+      shortcuts: [],
+      tools: []
+    }
+
+      at TestContext.<anonymous> (/private/tmp/pi-bg-closeout-iNoltL/features/tests/sdk/feature-selection-sdk.test.ts:323:12)
+      at async Test.run (node:internal/test_runner/test:1313:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:897:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { tools: [], commands: [ 'claude-cache' ], shortcuts: [], renderers: [] },
+    expected: { tools: [], commands: [], shortcuts: [], renderers: [] },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/sdk/feature-selection-sdk.test.ts:1:10040
+✖ rebuilds exact registrations and active tools across a real AgentSession reload (543.0815ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+
+    {
+      commands: [
+        'bg',
+        'bg-clear',
+        'bg-tasks',
+        'bg-update',
+  +     'claude-cache',
+  +     'fusion',
+  +     'fusion-models',
+        'jobs',
+        'kill',
+        'logs',
+        'tasks'
+      ],
+      renderers: [
+        'background-task-notification',
+  +     'fusion-result'
+      ],
+      shortcuts: [
+        'ctrl+alt+c',
+  +     'shift+down'
+      ],
+      tools: [
+  +     'bg_delegate',
+        'bg_kill',
+        'bg_logs',
+  +     'bg_result',
+        'bg_run',
+  +     'bg_run_pi_attested',
+        'bg_status',
+  +     'fusion_investigate',
+  +     'fusion_reason',
+  +     'fusion_research',
+  +     'fusion_validate'
+      ]
+    }
+
+      at TestContext.<anonymous> (/private/tmp/pi-bg-closeout-iNoltL/features/tests/sdk/feature-selection-sdk.test.ts:362:14)
+      at async Test.run (node:internal/test_runner/test:1313:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:897:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: {
+      tools: [ 'bg_delegate', 'bg_kill', 'bg_logs', 'bg_result', 'bg_run', 'bg_run_pi_attested', 'bg_status', 'fusion_investigate', 'fusion_reason', 'fusion_research', 'fusion_validate' ],
+      commands: [
+        'bg',            'bg-clear',
+        'bg-tasks',      'bg-update',
+        'claude-cache',  'fusion',
+        'fusion-models', 'jobs',
+        'kill',          'logs',
+        'tasks'
+      ],
+      shortcuts: [ 'ctrl+alt+c', 'shift+down' ],
+      renderers: [ 'background-task-notification', 'fusion-result' ]
+    },
+    expected: {
+      tools: [ 'bg_kill', 'bg_logs', 'bg_run', 'bg_status' ],
+      commands: [
+        'bg',       'bg-clear',
+        'bg-tasks', 'bg-update',
+        'jobs',     'kill',
+        'logs',     'tasks'
+      ],
+      shortcuts: [ 'ctrl+alt+c' ],
+      renderers: [ 'background-task-notification' ]
+    },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/sdk/feature-selection-sdk.test.ts:1:11288
+✖ avoids the fixture Shift+Down conflict and dispatches both encoded keys to their owners (276.124375ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+
+    [
+  -   'ctrl+alt+b',
+      'ctrl+alt+c',
+      'shift+down'
+    ]
+
+      at TestContext.<anonymous> (/private/tmp/pi-bg-closeout-iNoltL/features/tests/sdk/feature-selection-sdk.test.ts:407:14)
+      at async Test.run (node:internal/test_runner/test:1313:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:897:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [ 'ctrl+alt+c', 'shift+down' ],
+    expected: [ 'ctrl+alt+b', 'ctrl+alt+c', 'shift+down' ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/sdk/feature-selection-sdk.test.ts:1:12481
+✖ registers no dock shortcut in off mode while commands and fixture dispatch still work (274.011416ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+  true !== false
+
+      at TestContext.<anonymous> (/private/tmp/pi-bg-closeout-iNoltL/features/tests/sdk/feature-selection-sdk.test.ts:443:14)
+      at async Test.run (node:internal/test_runner/test:1313:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:897:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/sdk/feature-selection-sdk.test.ts:1:13801
+✖ derives the actual footer hint from default, alternate, and off shortcut config (612.269167ms)
+  AssertionError [ERR_ASSERTION]: footer should include CtrlAltB: [48;2;183;223;255m[38;2;11;70;110m bg 1 running · Shift↓ [0m | [48;2;183;223;255m[38;2;11;70;110m bg 1 running · Shift↓ [0m
+      at TestContext.<anonymous> (/private/tmp/pi-bg-closeout-iNoltL/features/tests/sdk/feature-selection-sdk.test.ts:493:16)
+      at async Test.run (node:internal/test_runner/test:1313:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:897:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }

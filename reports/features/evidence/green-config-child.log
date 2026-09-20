@@ -1,0 +1,35 @@
+▶ global Anthropic attribution extension
+  ✔ adds package attribution to attested Anthropic argv only (0.739917ms)
+✔ global Anthropic attribution extension (1.15ms)
+▶ background task capability configuration
+  ✔ keeps the full capability surface and Shift+Down as defaults (0.74475ms)
+  ✔ parses every optional-feature subset without adding dependencies (0.643833ms)
+  ✔ accepts only the three finite dock choices and derives their hints (0.109375ms)
+  ✔ rejects malformed values without fallback or unbounded echo (0.443417ms)
+✔ background task capability configuration (2.827375ms)
+▶ delegate child isolation
+  ✔ gives the child its own session id and task-owned session directory (0.972333ms)
+  ✔ enables only the inspect tool set by argv, not by prompt (0.377458ms)
+  ✔ explicitly denies every forbidden tool (0.0915ms)
+  ✔ disables ambient discovery and loads attribution before the package guard (0.090208ms)
+  ✔ keeps non-Anthropic argv at one explicit guard and requires attribution for Anthropic (0.768042ms)
+  ✔ ambient mode enables extension discovery but preserves every other boundary (0.135625ms)
+  ✔ refuses an unknown extension mode (0.080084ms)
+  ✔ pins provider and model explicitly and passes no api key (0.04875ms)
+  ✔ refuses an unsupported capability (0.0755ms)
+  ✔ strips parent session identity from the child environment (0.152833ms)
+  ✔ tells the child the directive is authoritative and history is untrusted (0.163625ms)
+✔ delegate child isolation (3.801ms)
+▶ fusion Pi child runner
+  ✔ loads package-owned Anthropic attribution/sanitization before the runtime governor (0.879583ms)
+  ✔ resolves the package-owned global attribution extension and fails loudly if absent (0.26675ms)
+✔ fusion Pi child runner (1.866917ms)
+✔ tests/unit/fusion-v5-core.test.ts (1077.131167ms)
+ℹ tests 19
+ℹ suites 4
+ℹ pass 19
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1166.985792

@@ -1,0 +1,18 @@
+▶ C1a feature selection and dock configuration
+  ✔ keeps the default full public registration surface (322.1665ms)
+  ✔ activates the exact surface for all 16 optional-capability subsets (3970.533792ms)
+  ✔ fails malformed settings before any package registration with bounded diagnostics (2550.147209ms)
+  ✔ keeps ambient attribution off while the explicit child entry remains mandatory (9.712166ms)
+  ✔ rebuilds exact registrations and active tools across a real AgentSession reload (774.328458ms)
+  ✔ avoids the fixture Shift+Down conflict and dispatches both encoded keys to their owners (259.670334ms)
+  ✔ registers no dock shortcut in off mode while commands and fixture dispatch still work (262.145416ms)
+  ✔ derives the actual footer hint from default, alternate, and off shortcut config (858.750334ms)
+✔ C1a feature selection and dock configuration (9008.201458ms)
+ℹ tests 8
+ℹ suites 1
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 9885.7455

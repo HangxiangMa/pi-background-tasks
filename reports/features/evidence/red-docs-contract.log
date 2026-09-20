@@ -1,0 +1,38 @@
+▶ docs package integration contract
+  ✔ declares docs scripts, prepack gates, and packaged docs payload (1.261042ms)
+  ✖ publishes finite capability and shortcut availability from runtime source (22.686209ms)
+  ✔ pins reviewed runtime and generated artifact semantics (2.928208ms)
+✖ docs package integration contract (27.307791ms)
+ℹ tests 3
+ℹ suites 1
+ℹ pass 2
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 237.167833
+
+✖ failing tests:
+
+test at tests/package/docs-contract.test.ts:1:1763
+✖ publishes finite capability and shortcut availability from runtime source (22.686209ms)
+  AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:
+
+    assert.ok(Array.isArray(manifest.default_public_surface_ids))
+
+      at TestContext.<anonymous> (/private/tmp/pi-bg-closeout-iNoltL/features/tests/package/docs-contract.test.ts:59:12)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1306:25)
+      at Suite.processPendingSubtests (node:internal/test_runner/test:897:18)
+      at Test.postRun (node:internal/test_runner/test:1447:19)
+      at Test.run (node:internal/test_runner/test:1372:12)
+      at async Promise.all (index 0)
+      at async Suite.run (node:internal/test_runner/test:1771:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }

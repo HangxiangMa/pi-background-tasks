@@ -1,0 +1,17 @@
+file:///private/tmp/pi-bg-closeout-iNoltL/features/scripts/docs/lib.mjs:650
+      throw new DocsGateError(
+            ^
+
+DocsGateError: entry.ts:1 public registration call must be an immediate top-level statement
+    at assertImmediateRegistrationCall (file:///private/tmp/pi-bg-closeout-iNoltL/features/scripts/docs/lib.mjs:650:13)
+    at visit (file:///private/tmp/pi-bg-closeout-iNoltL/features/scripts/docs/lib.mjs:1048:9)
+    at visitNode2 (/Users/lizavasilyeva/work/ai-pipeline/packages/pi-background-tasks/node_modules/typescript/lib/typescript.js:32449:18)
+    at forEachChildInExpressionStatement (/Users/lizavasilyeva/work/ai-pipeline/packages/pi-background-tasks/node_modules/typescript/lib/typescript.js:32679:12)
+    at Object.forEachChild (/Users/lizavasilyeva/work/ai-pipeline/packages/pi-background-tasks/node_modules/typescript/lib/typescript.js:32970:35)
+    at visit (file:///private/tmp/pi-bg-closeout-iNoltL/features/scripts/docs/lib.mjs:1137:8)
+    at visitNodes (/Users/lizavasilyeva/work/ai-pipeline/packages/pi-background-tasks/node_modules/typescript/lib/typescript.js:32457:22)
+    at forEachChildInBlock (/Users/lizavasilyeva/work/ai-pipeline/packages/pi-background-tasks/node_modules/typescript/lib/typescript.js:32927:10)
+    at Object.forEachChild (/Users/lizavasilyeva/work/ai-pipeline/packages/pi-background-tasks/node_modules/typescript/lib/typescript.js:32970:35)
+    at visit (file:///private/tmp/pi-bg-closeout-iNoltL/features/scripts/docs/lib.mjs:1137:8)
+
+Node.js v24.16.0

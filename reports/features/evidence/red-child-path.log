@@ -1,0 +1,37 @@
+▶ fusion Pi child runner
+  ✖ resolves the package-owned global attribution extension and fails loudly if absent (3.44825ms)
+✖ fusion Pi child runner (4.136792ms)
+ℹ tests 1
+ℹ suites 1
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1081.796958
+
+✖ failing tests:
+
+test at tests/unit/fusion-pi-child.test.ts:9:5451
+✖ resolves the package-owned global attribution extension and fails loudly if absent (3.44825ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /extensions\/anthropic-attribution-child\.ts$/. Input:
+
+  '/private/tmp/pi-bg-closeout-iNoltL/features/extensions/anthropic-attribution.ts'
+
+      at TestContext.<anonymous> (/private/tmp/pi-bg-closeout-iNoltL/features/tests/unit/fusion-pi-child.test.ts:1184:12)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1306:25)
+      at Test.start (node:internal/test_runner/test:1177:17)
+      at node:internal/test_runner/test:1769:71
+      at node:internal/per_context/primordials:466:82
+      at new Promise (<anonymous>)
+      at new SafePromise (node:internal/per_context/primordials:435:3)
+      at node:internal/per_context/primordials:466:9
+      at Array.map (<anonymous>) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: '/private/tmp/pi-bg-closeout-iNoltL/features/extensions/anthropic-attribution.ts',
+    expected: /extensions\/anthropic-attribution-child\.ts$/,
+    operator: 'match',
+    diff: 'simple'
+  }
