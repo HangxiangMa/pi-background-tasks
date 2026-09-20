@@ -67,7 +67,9 @@ The host UI displays telemetry only from task snapshots: context, model, token t
 
 ## Shutdown
 
-On session shutdown, the extension marks the registry as shutting down, clears the status interval, kills running tasks with reason `Killed during Pi session shutdown/reload`, reports cleanup failures through the UI when possible, and closes the event service.
+On session shutdown, an early synchronous lifecycle barrier permanently closes the activation's registry publication path and EventBus service, clears pending publication retry/status timers, and suppresses completion notifications. This barrier is registered before managed-workflow shutdown handlers so Fusion settlement cannot publish from the old activation while cleanup is in progress. The later cleanup handler kills running tasks with reason `Killed during Pi session shutdown/reload` and reports cleanup failures through the UI when possible.
+
+Shutdown terminal metadata and task waiters remain truthful even though old-activation EventBus publication is abandoned. Shutdown is idempotent, and a late `session_start` cannot revive the disposed instance; Pi session replacement binds a fresh extension registry/service. Kill-on-reload remains the default.
 
 ## Related docs
 

@@ -34,6 +34,7 @@ import {
   type TaskStatus,
   type TaskTokenUsage,
   type TaskToolUsage,
+  type TerminalPublicationAbandonReason,
 } from './common.js';
 import {
   ATTESTED_TASK_ID_PATTERN,
@@ -58,6 +59,7 @@ import {
   resolvePiLaunch,
   type PiLaunchSpec,
 } from './pi-launch.js';
+import { BackgroundTaskExtensionServiceClosedError } from './extension-api.js';
 import { resolveAnthropicAttributionExtensionPath } from './anthropic-attribution-path.js';
 import {
   runWindowsTaskkill,
@@ -70,7 +72,20 @@ export const MAX_OUTPUT_BYTES = Number(process.env['PI_BG_MAX_OUTPUT_BYTES'] ?? 
 export const KILL_GRACE_MS = 3000;
 export const STOP_WAIT_MS = KILL_GRACE_MS + 1500;
 export const MAX_RECENT_TASKS = 100;
+export const TERMINAL_PUBLICATION_MAX_ATTEMPTS = 3;
+export const TERMINAL_PUBLICATION_RETRY_MS = 100;
+const TERMINAL_PUBLICATION_DIAGNOSTIC_CHARS = 500;
 const TELEMETRY_BUFFER_CHARS = 512 * 1024;
+
+export type TerminalPublicationClosureReason = Extract<
+  TerminalPublicationAbandonReason,
+  'registry_shutdown' | 'publisher_closed'
+>;
+
+type TerminalPublicationGateOutcome =
+  | { readonly kind: 'released' }
+  | { readonly kind: 'rejected'; readonly error: unknown }
+  | { readonly kind: 'closed'; readonly reason: TerminalPublicationClosureReason };
 export const WIN32_CMD_PI_TELEMETRY_UNAVAILABLE_REASON =
   'win32-cmd-cannot-safely-intercept-pi-argv';
 
@@ -719,6 +734,12 @@ export class BackgroundTaskRegistry {
   private readonly tasks = new Map<string, BgTask>();
   private runtimeDir: RuntimeDir | undefined;
   private shuttingDown = false;
+  private terminalPublicationClosed = false;
+  private terminalPublicationCloseReason: TerminalPublicationClosureReason | undefined;
+  private readonly terminalPublicationClosedSignal: Promise<TerminalPublicationClosureReason>;
+  private resolveTerminalPublicationClosedSignal: (
+    reason: TerminalPublicationClosureReason,
+  ) => void = () => {};
   private readonly spawn: BackgroundTaskSpawn;
   private readonly killProcess: KillProcessFn;
   private readonly killTree: KillTreeFn;
@@ -737,6 +758,9 @@ export class BackgroundTaskRegistry {
   private readonly windowsKillStates = new WeakMap<BgTask, WindowsKillState>();
 
   constructor(options: BackgroundTaskRegistryOptions) {
+    this.terminalPublicationClosedSignal = new Promise((resolve) => {
+      this.resolveTerminalPublicationClosedSignal = resolve;
+    });
     this.spawn =
       options.spawn ?? ((command, args, spawnOptions) => nodeSpawn(command, args, spawnOptions));
     this.killProcess = options.killProcess ?? process.kill.bind(process);
@@ -766,7 +790,35 @@ export class BackgroundTaskRegistry {
   }
 
   setShuttingDown(value: boolean): void {
-    this.shuttingDown = value;
+    if (value) {
+      this.shuttingDown = true;
+      this.closeTerminalPublication('registry_shutdown');
+      return;
+    }
+    // Publication closure belongs to one extension activation and is one-way.
+    // Pi session replacement creates a fresh registry; an old registry must not
+    // be reopened by a late session_start or retained gate continuation.
+    if (!this.terminalPublicationClosed) this.shuttingDown = false;
+  }
+
+  closeTerminalPublication(reason: TerminalPublicationClosureReason): void {
+    if (!this.terminalPublicationClosed) {
+      this.terminalPublicationClosed = true;
+      this.terminalPublicationCloseReason = reason;
+      this.resolveTerminalPublicationClosedSignal(reason);
+    }
+    const effectiveReason = this.terminalPublicationCloseReason ?? reason;
+    for (const task of this.tasks.values()) {
+      const shouldLog =
+        task.terminalPublicationState === 'pending' &&
+        task.status !== 'running' &&
+        (task.terminalPublishAttempts > 0 ||
+          task.terminalPublishRetryHandle !== undefined ||
+          task.terminalPublishInFlight === true ||
+          task.terminalPublicationGate !== undefined);
+      this.abandonTerminalPublication(task, effectiveReason, undefined, shouldLog);
+    }
+    this.pruneOldTasks();
   }
 
   allTasks(): BgTask[] {
@@ -844,6 +896,9 @@ export class BackgroundTaskRegistry {
       notifyOnCompletion: options.notifyOnCompletion ?? true,
       triggerOnCompletion: options.triggerOnCompletion ?? false,
       timeoutSeconds,
+      terminalPublished: false,
+      terminalPublicationState: 'pending',
+      terminalPublishAttempts: 0,
       terminalPublicationGate: options.terminalPublicationGate,
       waiters: [],
     };
@@ -1009,6 +1064,9 @@ export class BackgroundTaskRegistry {
       fusion: request.fusion,
       managedCancel: request.cancel,
       managedStopWaitMs: request.stopWaitMs,
+      terminalPublished: false,
+      terminalPublicationState: 'pending',
+      terminalPublishAttempts: 0,
       terminalPublicationGate: request.terminalPublicationGate,
       waiters: [],
     };
@@ -1133,6 +1191,9 @@ export class BackgroundTaskRegistry {
       timeoutSeconds: request.timeoutSeconds,
       model: request.facts.route.qualifiedId,
       delegate: request.facts,
+      terminalPublished: false,
+      terminalPublicationState: 'pending',
+      terminalPublishAttempts: 0,
       waiters: [],
     };
     this.tasks.set(id, task);
@@ -1295,6 +1356,9 @@ export class BackgroundTaskRegistry {
         wrapperPath: paths.wrapperPath,
         attestationPath: paths.attestationPath,
       },
+      terminalPublished: false,
+      terminalPublicationState: 'pending',
+      terminalPublishAttempts: 0,
       waiters: [],
     };
     this.tasks.set(id, task);
@@ -2240,7 +2304,14 @@ export class BackgroundTaskRegistry {
   }
 
   private publishTerminal(task: BgTask): void {
-    if (task.terminalPublished || task.terminalPublishInFlight) return;
+    if (task.terminalPublicationState !== 'pending' || task.terminalPublishInFlight) return;
+    if (this.terminalPublicationClosed) {
+      this.abandonTerminalPublication(
+        task,
+        this.terminalPublicationCloseReason ?? 'registry_shutdown',
+      );
+      return;
+    }
     task.terminalPublishInFlight = true;
     if (task.terminalPublicationGate === undefined) {
       this.tryPublishTerminalNow(task);
@@ -2250,42 +2321,161 @@ export class BackgroundTaskRegistry {
   }
 
   private async publishTerminalWhenReady(task: BgTask): Promise<void> {
-    try {
-      await task.terminalPublicationGate;
-    } catch (error) {
-      this.handleTerminalPublishFailure(task, error);
+    const outcome = await this.waitForTerminalPublicationGate(task);
+    if (outcome.kind === 'closed') {
+      this.abandonTerminalPublication(task, outcome.reason);
+      return;
+    }
+    if (outcome.kind === 'rejected') {
+      this.abandonTerminalPublication(task, 'gate_rejected', outcome.error);
+      return;
+    }
+    // The gate and registry closure can settle in the same microtask turn.
+    // Re-check after the await so a late gate cannot publish into a disposed
+    // activation or revive a task already abandoned by shutdown.
+    if (this.terminalPublicationClosed || task.terminalPublicationState !== 'pending') {
+      this.abandonTerminalPublication(
+        task,
+        this.terminalPublicationCloseReason ?? 'registry_shutdown',
+      );
       return;
     }
     this.tryPublishTerminalNow(task);
   }
 
+  private async waitForTerminalPublicationGate(
+    task: BgTask,
+  ): Promise<TerminalPublicationGateOutcome> {
+    if (this.terminalPublicationClosed) {
+      return {
+        kind: 'closed',
+        reason: this.terminalPublicationCloseReason ?? 'registry_shutdown',
+      };
+    }
+    if (
+      task.terminalPublicationState === 'abandoned' &&
+      task.terminalPublicationAbandonReason === 'gate_rejected'
+    ) {
+      return { kind: 'rejected', error: new Error('terminal publication gate rejected') };
+    }
+    const gate = task.terminalPublicationGate;
+    if (gate === undefined) return { kind: 'released' };
+
+    const gateOutcome: Promise<TerminalPublicationGateOutcome> = gate.then(
+      () => ({ kind: 'released' }),
+      (error: unknown) => ({ kind: 'rejected', error }),
+    );
+    const closureOutcome: Promise<TerminalPublicationGateOutcome> =
+      this.terminalPublicationClosedSignal.then((reason) => ({ kind: 'closed', reason }));
+    const outcome = await Promise.race([gateOutcome, closureOutcome]);
+
+    // Closure wins if it happened before this continuation resumed, regardless
+    // of which promise queued its reaction first.
+    if (this.terminalPublicationClosed) {
+      return {
+        kind: 'closed',
+        reason: this.terminalPublicationCloseReason ?? 'registry_shutdown',
+      };
+    }
+    return outcome;
+  }
+
   private tryPublishTerminalNow(task: BgTask): void {
     try {
-      if (task.terminalPublished) return;
-      this.publishTerminalSnapshot(snapshot(task));
-      task.terminalPublished = true;
-      if (task.terminalPublishRetryHandle) {
-        clearTimeout(task.terminalPublishRetryHandle);
-        task.terminalPublishRetryHandle = undefined;
+      if (task.terminalPublicationState !== 'pending') return;
+      if (this.terminalPublicationClosed) {
+        this.abandonTerminalPublication(
+          task,
+          this.terminalPublicationCloseReason ?? 'registry_shutdown',
+        );
+        return;
       }
+      task.terminalPublishAttempts += 1;
+      this.publishTerminalSnapshot(snapshot(task));
+      this.markTerminalPublicationDelivered(task);
+      this.pruneOldTasks();
     } catch (error) {
       this.handleTerminalPublishFailure(task, error);
-      return;
     } finally {
       task.terminalPublishInFlight = false;
     }
   }
 
-  private handleTerminalPublishFailure(task: BgTask, error: unknown): void {
-    this.logger.error(`[background-tasks] terminal publication failed for ${task.id}:`, error);
-    task.terminalPublishInFlight = false;
-    if (!task.terminalPublished && task.terminalPublishRetryHandle === undefined) {
-      task.terminalPublishRetryHandle = setTimeout(() => {
-        task.terminalPublishRetryHandle = undefined;
-        this.publishTerminal(task);
-      }, 100);
-      task.terminalPublishRetryHandle.unref();
+  private markTerminalPublicationDelivered(task: BgTask): void {
+    if (task.terminalPublishRetryHandle !== undefined) {
+      clearTimeout(task.terminalPublishRetryHandle);
+      task.terminalPublishRetryHandle = undefined;
     }
+    task.terminalPublicationGate = undefined;
+    task.terminalPublicationState = 'delivered';
+    delete task.terminalPublicationAbandonReason;
+    task.terminalPublished = true;
+  }
+
+  private abandonTerminalPublication(
+    task: BgTask,
+    reason: TerminalPublicationAbandonReason,
+    error?: unknown,
+    log = true,
+  ): void {
+    if (task.terminalPublishRetryHandle !== undefined) {
+      clearTimeout(task.terminalPublishRetryHandle);
+      task.terminalPublishRetryHandle = undefined;
+    }
+    task.terminalPublicationGate = undefined;
+    task.terminalPublishInFlight = false;
+    if (task.terminalPublicationState === 'delivered') return;
+    if (task.terminalPublicationState === 'abandoned') return;
+
+    task.terminalPublicationState = 'abandoned';
+    task.terminalPublicationAbandonReason = reason;
+    task.terminalPublished = false;
+    if (log) {
+      const detail = error === undefined ? '' : `: ${this.terminalPublicationError(error)}`;
+      this.logger.error(
+        `[background-tasks] terminal publication abandoned for ${task.id} (${reason}) after ${String(task.terminalPublishAttempts)}/${String(TERMINAL_PUBLICATION_MAX_ATTEMPTS)} emit attempts${detail}`,
+      );
+    }
+  }
+
+  private terminalPublicationError(error: unknown): string {
+    const compact = BackgroundTaskRegistry.errorMessage(error).replace(/\s+/gu, ' ').trim();
+    if (compact.length <= TERMINAL_PUBLICATION_DIAGNOSTIC_CHARS) return compact;
+    return `${compact.slice(0, TERMINAL_PUBLICATION_DIAGNOSTIC_CHARS - 1)}…`;
+  }
+
+  private handleTerminalPublishFailure(task: BgTask, error: unknown): void {
+    task.terminalPublishInFlight = false;
+    if (task.terminalPublicationState !== 'pending') return;
+    if (error instanceof BackgroundTaskExtensionServiceClosedError) {
+      this.closeTerminalPublication('publisher_closed');
+      return;
+    }
+    if (this.terminalPublicationClosed) {
+      this.abandonTerminalPublication(
+        task,
+        this.terminalPublicationCloseReason ?? 'registry_shutdown',
+        error,
+      );
+      this.pruneOldTasks();
+      return;
+    }
+    if (task.terminalPublishAttempts >= TERMINAL_PUBLICATION_MAX_ATTEMPTS) {
+      this.abandonTerminalPublication(task, 'retry_exhausted', error);
+      this.pruneOldTasks();
+      return;
+    }
+
+    this.logger.error(
+      `[background-tasks] terminal publication failed for ${task.id} (attempt ${String(task.terminalPublishAttempts)}/${String(TERMINAL_PUBLICATION_MAX_ATTEMPTS)}; retrying): ${this.terminalPublicationError(error)}`,
+    );
+    if (task.terminalPublishRetryHandle !== undefined) return;
+    task.terminalPublishRetryHandle = setTimeout(() => {
+      task.terminalPublishRetryHandle = undefined;
+      if (this.terminalPublicationClosed || task.terminalPublicationState !== 'pending') return;
+      this.publishTerminal(task);
+    }, TERMINAL_PUBLICATION_RETRY_MS);
+    task.terminalPublishRetryHandle.unref();
   }
 
   private notifyCompletion(task: BgTask): void {
@@ -2406,19 +2596,14 @@ export class BackgroundTaskRegistry {
     for (const waiter of task.waiters.splice(0)) waiter();
     this.onChange();
     this.publishTerminal(task);
-    let deliveryGateReady = true;
-    if (task.terminalPublicationGate !== undefined) {
-      try {
-        await task.terminalPublicationGate;
-      } catch (error) {
-        deliveryGateReady = false;
-        this.logger.error(
-          `[background-tasks] completion delivery gate failed for ${task.id}:`,
-          error,
-        );
-      }
-    }
-    if (deliveryGateReady) {
+    const deliveryGate = await this.waitForTerminalPublicationGate(task);
+    if (deliveryGate.kind === 'rejected') {
+      this.logger.error(
+        `[background-tasks] completion delivery gate failed for ${task.id}: ${this.terminalPublicationError(deliveryGate.error)}`,
+      );
+    } else {
+      // EventBus disposal abandons only EventBus publication. Notification truth
+      // remains independent; notifyCompletion itself suppresses session shutdown.
       try {
         this.notifyCompletion(task);
       } catch (notificationError) {
@@ -2442,7 +2627,9 @@ export class BackgroundTaskRegistry {
   private pruneOldTasks(): void {
     if (this.tasks.size <= this.maxRecentTasks) return;
     const removable = [...this.tasks.values()]
-      .filter((task) => task.status !== 'running')
+      .filter(
+        (task) => task.status !== 'running' && task.terminalPublicationState !== 'pending',
+      )
       .sort((a, b) => (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime));
     while (this.tasks.size > this.maxRecentTasks && removable.length > 0) {
       const task = removable.shift();

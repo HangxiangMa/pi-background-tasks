@@ -90,7 +90,7 @@ Closed by construction through the exported union:
 }
 ```
 
-Duplicate `request_id` values are rejected. The service rejects requests before `session_start` and while shutting down. Calling `close()` unsubscribes the request listener, so later requests are not handled and receive no service response.
+Duplicate `request_id` values are rejected. The service rejects requests before `session_start` and while shutting down. The installed service exposes typed state `open | closed`. Calling `close()` is idempotent, transitions it permanently to `closed`, unsubscribes the request listener, and disposes registry publication, so later requests are not handled and receive no service response. Direct publication after close throws `BackgroundTaskExtensionServiceClosedError` with code `pi_background_tasks_eventbus_closed`; callers must not infer closure from message text.
 
 ## Capabilities
 
@@ -126,7 +126,11 @@ The terminal event carries no request id; consumers correlate by `task.id` retur
 
 For `run` and `kill` requests, the service installs a terminal-publication gate. After the response is emitted, the gate waits one microtask before releasing terminal publication, so immediate-exit tasks cannot publish terminal before the caller has observed the task id.
 
-The registry publishes terminal snapshots only after the output stream has finished/closed and durable terminal metadata has been written. Successful publication is latched and not emitted again. If `EventBus.emit` throws, the failure is loud and the registry retries; because one listener may have received a frame before another listener threw, delivery is **at least once under emission failure**. Consumers must deduplicate by `task.id`.
+The registry publishes terminal snapshots only after the output stream has finished/closed and durable terminal metadata has been written. Publication state is tracked separately as `pending`, `delivered`, or `abandoned`; successful publication is latched and not emitted again, while abandonment is never represented as delivery.
+
+If `EventBus.emit` throws, the registry retries after 100 ms for at most three total emit attempts. Persistent failure then becomes `abandoned` with bounded diagnostics. Because one listener may have received a frame before a later listener threw, delivery is **at least once under emission failure** and the same task can be observed up to the attempt bound. Consumers must deduplicate by `task.id`.
+
+Shutdown, service disposal, a rejected publication gate, or retry exhaustion can abandon the terminal frame without changing durable task metadata, waiter completion, or notification truth. Shutdown/service disposal clears pending retry timers and races any gate wait against one-way activation closure. After either gate resolution or rejection, lifecycle is checked again, so a late gate cannot emit or re-arm an old activation. Tasks made terminal by session shutdown intentionally do not publish onto the disposed activation's EventBus.
 
 ## Operations
 

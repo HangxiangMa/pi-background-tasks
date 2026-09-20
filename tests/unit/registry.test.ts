@@ -19,6 +19,7 @@ import {
 import type { Api, Model } from '@earendil-works/pi-ai';
 import type { BgTask, BgTaskSnapshot } from '../../src/core/common.js';
 import type { TaskkillOutcome, WindowsKillPhase } from '../../src/core/windows-taskkill.js';
+import { BackgroundTaskExtensionServiceClosedError } from '../../src/core/extension-api.js';
 
 type JsonObject = Record<PropertyKey, unknown>;
 
@@ -983,6 +984,211 @@ void describe('BackgroundTaskRegistry', () => {
         /terminal publication failed|terminal bus unavailable/,
       );
     } finally {
+      await cleanup(h.root);
+    }
+  });
+
+  void it('abandons a pending retry on shutdown without claiming terminal delivery', async () => {
+    let attempts = 0;
+    let failPublication = true;
+    let task: BgTask | undefined;
+    const h = await createHarness({
+      publishTerminal: () => {
+        attempts += 1;
+        if (failPublication) throw new Error('terminal listener unavailable');
+      },
+    });
+    try {
+      const started = await startFakeTask(h, 'Terminal Shutdown Abandonment');
+      task = started.task;
+      started.child.close(0, null);
+      await waitFor(() => task?.terminalPublishRetryHandle !== undefined, 'terminal retry arm');
+
+      h.registry.setShuttingDown(true);
+      assert.equal(task.status, 'completed', 'terminal task truth must remain intact');
+      assert.notEqual(task.terminalPublished, true, 'abandonment is not successful delivery');
+      assert.equal(Reflect.get(task, 'terminalPublicationState'), 'abandoned');
+      assert.equal(Reflect.get(task, 'terminalPublicationAbandonReason'), 'registry_shutdown');
+      assert.equal(task.terminalPublishRetryHandle, undefined, 'shutdown must cancel retry timer');
+
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.equal(attempts, 1, 'a disposed registry must never re-arm its publisher');
+      const metadata = parseJsonObject(
+        await readFile(task.metadataAbsPath, 'utf8'),
+        'terminal metadata must survive publication abandonment',
+      );
+      assert.equal(metadata['status'], 'completed');
+      assert.equal(task.notified, true, 'notification truth remains independent of EventBus delivery');
+    } finally {
+      failPublication = false;
+      if (task !== undefined) {
+        if (task.terminalPublishRetryHandle !== undefined)
+          clearTimeout(task.terminalPublishRetryHandle);
+        task.terminalPublishRetryHandle = undefined;
+        // Baseline-only cleanup: stop its unbounded retry after preserving red evidence.
+        if (Reflect.get(task, 'terminalPublicationState') === undefined)
+          task.terminalPublished = true;
+      }
+      await cleanup(h.root);
+    }
+  });
+
+  void it('abandons a typed closed publisher error without retrying or message matching', async () => {
+    let attempts = 0;
+    const h = await createHarness({
+      publishTerminal: () => {
+        attempts += 1;
+        throw new BackgroundTaskExtensionServiceClosedError();
+      },
+    });
+    try {
+      const { task, child } = await startFakeTask(h, 'Typed Publisher Closure');
+      child.close(0, null);
+      await waitFor(
+        () => task.terminalPublicationState === 'abandoned',
+        'typed publisher abandonment',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      assert.equal(attempts, 1);
+      assert.equal(task.terminalPublished, false);
+      assert.equal(task.terminalPublicationAbandonReason, 'publisher_closed');
+      assert.equal(task.terminalPublishRetryHandle, undefined);
+      assert.equal(h.errors.length, 1);
+    } finally {
+      await cleanup(h.root);
+    }
+  });
+
+  void it('bounds persistent terminal listener failures while retaining transient retry', async () => {
+    let attempts = 0;
+    let failPublication = true;
+    let task: BgTask | undefined;
+    const h = await createHarness({
+      publishTerminal: () => {
+        attempts += 1;
+        if (failPublication) throw new Error(`persistent listener failure ${String(attempts)}`);
+      },
+    });
+    try {
+      const started = await startFakeTask(h, 'Terminal Retry Exhaustion');
+      task = started.task;
+      started.child.close(0, null);
+      await waitFor(() => attempts >= 3, 'bounded terminal attempts');
+      await new Promise((resolve) => setTimeout(resolve, 180));
+
+      assert.equal(attempts, 3, 'terminal delivery uses three total attempts, not an open loop');
+      assert.notEqual(task.terminalPublished, true, 'exhaustion is not successful delivery');
+      assert.equal(Reflect.get(task, 'terminalPublicationState'), 'abandoned');
+      assert.equal(Reflect.get(task, 'terminalPublicationAbandonReason'), 'retry_exhausted');
+      assert.equal(task.terminalPublishRetryHandle, undefined);
+      assert.equal(
+        h.errors.length,
+        3,
+        'persistent failure diagnostics must be bounded with the attempt policy',
+      );
+    } finally {
+      failPublication = false;
+      if (task !== undefined) {
+        if (task.terminalPublishRetryHandle !== undefined)
+          clearTimeout(task.terminalPublishRetryHandle);
+        task.terminalPublishRetryHandle = undefined;
+        // Baseline-only cleanup: stop its unbounded retry after preserving red evidence.
+        if (Reflect.get(task, 'terminalPublicationState') === undefined)
+          task.terminalPublished = true;
+      }
+      await cleanup(h.root);
+    }
+  });
+
+  void it('does not publish an ordinary terminal after a late gate resolves into shutdown', async () => {
+    const gate = deferred<void>();
+    const terminals: BgTaskSnapshot[] = [];
+    const h = await createHarness({ publishTerminal: (terminal) => terminals.push(terminal) });
+    const task = await h.registry.startTask(h.ctx, 'node late-gate.js', {
+      name: 'Late Ordinary Gate',
+      notifyOnCompletion: true,
+      triggerOnCompletion: true,
+      terminalPublicationGate: gate.promise,
+    });
+    try {
+      lastSpawn(h).child.close(0, null);
+      await waitFor(() => task.status === 'completed', 'late-gated ordinary completion');
+      assert.equal(terminals.length, 0);
+
+      h.registry.setShuttingDown(true);
+      gate.resolve(undefined);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      assert.equal(terminals.length, 0, 'a gate resolving after closure cannot publish');
+      assert.notEqual(task.terminalPublished, true);
+      assert.equal(Reflect.get(task, 'terminalPublicationState'), 'abandoned');
+      assert.equal(task.terminalPublishRetryHandle, undefined);
+      assert.equal(task.terminalPublicationGate, undefined, 'closure must release the gate reference');
+      assert.equal(task.terminalPublishInFlight, false);
+      assert.equal(h.notifications.length, 0, 'shutdown still suppresses completion notification');
+      const metadata = parseJsonObject(
+        await readFile(task.metadataAbsPath, 'utf8'),
+        'late-gated task metadata must remain durable',
+      );
+      assert.equal(metadata['status'], 'completed');
+    } finally {
+      gate.resolve(undefined);
+      await cleanup(h.root);
+    }
+  });
+
+  void it('does not re-arm a managed terminal when its late gate rejects after shutdown', async () => {
+    const completion = deferred<void>();
+    const gate = deferred<void>();
+    const h = await createHarness();
+    const facts = {
+      runId: 'reason-cccccccccccccccccccccccccccccccc',
+      workflow: 'reason' as const,
+      artifactDir: '.pi/fusion/test/reason-c',
+      artifactDirAbs: join(h.cwd, '.pi', 'fusion', 'test', 'reason-c'),
+      state: 'initializing',
+      usageDelivered: false,
+    };
+    const task = await h.registry.startManagedTask(h.ctx, {
+      id: facts.runId,
+      name: 'late managed gate',
+      command: 'fusion_reason',
+      isAgent: true,
+      completion: completion.promise,
+      cancel: () => undefined,
+      notifyOnCompletion: true,
+      triggerOnCompletion: true,
+      fusion: facts,
+      terminalPublicationGate: gate.promise,
+    });
+    try {
+      completion.resolve(undefined);
+      await waitFor(() => task.status === 'completed', 'late-gated managed completion');
+      h.registry.setShuttingDown(true);
+      gate.reject(new Error('late launch gate rejected'));
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      assert.notEqual(task.terminalPublished, true);
+      assert.equal(Reflect.get(task, 'terminalPublicationState'), 'abandoned');
+      assert.equal(Reflect.get(task, 'terminalPublicationAbandonReason'), 'registry_shutdown');
+      assert.equal(task.terminalPublishRetryHandle, undefined);
+      assert.equal(task.terminalPublicationGate, undefined, 'closure must release the gate reference');
+      assert.equal(task.terminalPublishInFlight, false);
+      assert.equal(h.notifications.length, 0);
+      const metadata = parseJsonObject(
+        await readFile(task.metadataAbsPath, 'utf8'),
+        'managed terminal metadata must remain durable',
+      );
+      assert.equal(metadata['status'], 'completed');
+    } finally {
+      if (task.terminalPublishRetryHandle !== undefined)
+        clearTimeout(task.terminalPublishRetryHandle);
+      task.terminalPublishRetryHandle = undefined;
+      // Baseline-only cleanup: stop its rejected-gate retry loop.
+      if (Reflect.get(task, 'terminalPublicationState') === undefined)
+        task.terminalPublished = true;
+      completion.resolve(undefined);
       await cleanup(h.root);
     }
   });

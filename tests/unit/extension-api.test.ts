@@ -74,6 +74,7 @@ interface Harness {
   ctx: BackgroundTaskContext;
   bus: MemoryEventBus;
   registry: BackgroundTaskRegistry;
+  service: BackgroundTaskExtensionService;
   setCtx(value: BackgroundTaskContext | undefined): void;
   setShutdown(value: boolean): void;
   close(): void;
@@ -113,6 +114,7 @@ async function createHarness(): Promise<Harness> {
     ctx,
     bus,
     registry,
+    service,
     setCtx(value) {
       currentCtx = value;
     },
@@ -132,7 +134,10 @@ interface ProtocolHarness {
   root: string;
   ctx: BackgroundTaskContext;
   bus: MemoryEventBus;
+  registry: BackgroundTaskRegistry;
+  service: BackgroundTaskExtensionService;
   children: FakeChild[];
+  errors: unknown[][];
   close(): void;
 }
 
@@ -148,6 +153,7 @@ async function createProtocolHarness(
   const children: FakeChild[] = [];
   let pid = 5100;
   let idSeq = 0;
+  const errors: unknown[][] = [];
   let service: BackgroundTaskExtensionService | undefined;
   const spawn: BackgroundTaskSpawn = () => {
     const child = new FakeChild(++pid);
@@ -194,6 +200,11 @@ async function createProtocolHarness(
     killProcess,
     killTree,
     spawn,
+    logger: {
+      error: (...args: unknown[]) => {
+        errors.push(args);
+      },
+    },
     publishTerminal: (task) => {
       if (!service) throw new Error('test EventBus service is not installed');
       service.publishTerminal(task);
@@ -211,13 +222,17 @@ async function createProtocolHarness(
     getContext: () => ctx,
     isShuttingDown: () => false,
   });
+  const installedService = service;
   return {
     root,
     ctx,
     bus,
+    registry,
+    service: installedService,
     children,
+    errors,
     close() {
-      service?.close();
+      installedService.close();
     },
   };
 }
@@ -316,6 +331,19 @@ async function emitRequest(
 // not depend on host process-creation cost. A genuine hang must still fail
 // fast on every platform.
 const TERMINAL_WAIT_TIMEOUT_MS = 1500;
+
+async function waitForCondition(
+  predicate: () => boolean,
+  label: string,
+  timeoutMs = TERMINAL_WAIT_TIMEOUT_MS,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
 
 async function waitForTerminal(
   terminals: readonly BackgroundTaskExtensionTerminal[],
@@ -557,6 +585,127 @@ void describe('background EventBus protocol', () => {
         assert.equal(requireTask(resultRecord['task'], 'kill.result.task').status, 'killed');
       },
     });
+  });
+
+  void it('bounds genuine listener failures with documented at-least-once delivery', async () => {
+    const h = await createProtocolHarness();
+    const received: BackgroundTaskExtensionTerminal[] = [];
+    const unsubscribeReceiver = h.bus.on(BG_TERMINAL_CHANNEL, (data) => {
+      received.push(requireTerminal(data));
+    });
+    const unsubscribeFailure = h.bus.on(BG_TERMINAL_CHANNEL, () => {
+      throw new Error('later terminal listener failed');
+    });
+    let taskId: string | undefined;
+    try {
+      const run = await emitRequest(h.bus, {
+        schema_version: BG_REQUEST_SCHEMA,
+        request_id: 'listener-failure-run',
+        operation: 'run',
+        payload: {
+          name: 'Listener Failure',
+          command: 'echo listener-failure',
+          isAgent: false,
+          notifyOnCompletion: false,
+          triggerOnCompletion: false,
+        },
+      });
+      assert.equal(run.ok, true, run.ok ? 'ok' : run.error);
+      taskId = requireTask(run.ok ? run.result : undefined, 'listener failure task').id;
+      h.children[0]?.close(0, null);
+
+      await waitForCondition(() => received.length >= 3, 'three bounded listener deliveries');
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      const task = h.registry.resolveTask(taskId);
+      assert.equal(received.length, 3, 'persistent emit failure must stop after three attempts');
+      assert.deepEqual(
+        received.map((entry) => entry.task.id),
+        [taskId, taskId, taskId],
+        'an earlier listener can observe duplicate at-least-once frames',
+      );
+      assert.notEqual(task.terminalPublished, true);
+      assert.equal(Reflect.get(task, 'terminalPublicationState'), 'abandoned');
+      assert.equal(Reflect.get(task, 'terminalPublicationAbandonReason'), 'retry_exhausted');
+      assert.equal(task.terminalPublishRetryHandle, undefined);
+      assert.equal(h.errors.length, 3, 'publisher diagnostics must be bounded with attempts');
+    } finally {
+      unsubscribeFailure();
+      unsubscribeReceiver();
+      if (taskId !== undefined) {
+        const task = h.registry.resolveTask(taskId);
+        if (task.terminalPublishRetryHandle !== undefined)
+          clearTimeout(task.terminalPublishRetryHandle);
+        task.terminalPublishRetryHandle = undefined;
+        // Baseline-only cleanup: stop its unbounded retry after preserving red evidence.
+        if (Reflect.get(task, 'terminalPublicationState') === undefined)
+          task.terminalPublished = true;
+      }
+      h.close();
+      await rm(h.root, { recursive: true, force: true });
+    }
+  });
+
+  void it('uses a typed closed-service error and disposes registry publication retries', async () => {
+    const h = await createProtocolHarness();
+    const unsubscribeFailure = h.bus.on(BG_TERMINAL_CHANNEL, () => {
+      throw new Error('terminal listener failed before close');
+    });
+    let taskId: string | undefined;
+    try {
+      const run = await emitRequest(h.bus, {
+        schema_version: BG_REQUEST_SCHEMA,
+        request_id: 'close-retry-run',
+        operation: 'run',
+        payload: {
+          name: 'Close Retry',
+          command: 'echo close-retry',
+          isAgent: false,
+          notifyOnCompletion: false,
+          triggerOnCompletion: false,
+        },
+      });
+      assert.equal(run.ok, true, run.ok ? 'ok' : run.error);
+      const snapshot = requireTask(run.ok ? run.result : undefined, 'close retry task');
+      taskId = snapshot.id;
+      h.children[0]?.close(0, null);
+      const task = h.registry.resolveTask(taskId);
+      await waitForCondition(
+        () => task.terminalPublishRetryHandle !== undefined,
+        'publication retry before service close',
+      );
+
+      assert.equal(h.service.state, 'open');
+      h.close();
+      assert.equal(h.service.state, 'closed');
+      assert.equal(task.terminalPublishRetryHandle, undefined, 'service close cancels old timer');
+      assert.notEqual(task.terminalPublished, true, 'service close is abandonment, not delivery');
+      assert.equal(Reflect.get(task, 'terminalPublicationState'), 'abandoned');
+      assert.equal(Reflect.get(task, 'terminalPublicationAbandonReason'), 'publisher_closed');
+      assert.equal(task.terminalPublicationGate, undefined);
+      assert.equal(task.terminalPublishInFlight, false);
+      assert.throws(
+        () => h.service.publishTerminal(snapshot),
+        (error: unknown) =>
+          error instanceof Error &&
+          error.name === 'BackgroundTaskExtensionServiceClosedError' &&
+          Reflect.get(error, 'code') === 'pi_background_tasks_eventbus_closed',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.equal(h.errors.length, 2, 'close may add one abandonment diagnostic but no flood');
+    } finally {
+      unsubscribeFailure();
+      if (taskId !== undefined) {
+        const task = h.registry.resolveTask(taskId);
+        if (task.terminalPublishRetryHandle !== undefined)
+          clearTimeout(task.terminalPublishRetryHandle);
+        task.terminalPublishRetryHandle = undefined;
+        // Baseline-only cleanup: stop its unbounded retry after preserving red evidence.
+        if (Reflect.get(task, 'terminalPublicationState') === undefined)
+          task.terminalPublished = true;
+      }
+      h.close();
+      await rm(h.root, { recursive: true, force: true });
+    }
   });
 
   void it('unsubscribes cleanly when the service closes', async () => {

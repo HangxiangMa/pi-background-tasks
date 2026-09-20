@@ -210,6 +210,8 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   let statusInterval: NodeJS.Timeout | undefined;
   let latestKnownVersion: string | undefined;
   let updateCheckStarted = false;
+  let disposed = false;
+  let shutdownCleanupStarted = false;
 
   const registry = new BackgroundTaskRegistry({
     onChange: () => {
@@ -227,6 +229,25 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     registry,
     getContext: () => currentCtx,
     isShuttingDown: () => registry.isShuttingDown(),
+  });
+
+  const beginSessionShutdown = (): void => {
+    if (disposed) return;
+    disposed = true;
+    registry.setShuttingDown(true);
+    eventService.close();
+    currentCtx = undefined;
+    if (statusInterval !== undefined) {
+      clearInterval(statusInterval);
+      statusInterval = undefined;
+    }
+  };
+
+  // Register the synchronous publication barrier before managed-workflow
+  // shutdown handlers. Fusion may settle while its own cleanup is awaited; the
+  // old registry must already be closed before that terminal continuation runs.
+  pi.on('session_shutdown', () => {
+    beginSessionShutdown();
   });
 
   registerFusionExtension(pi, {
@@ -471,6 +492,9 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   }
 
   pi.on('session_start', async (_event, ctx) => {
+    // Pi replacement binds a fresh extension instance. Never revive this old
+    // activation if a late lifecycle dispatch reaches it after shutdown.
+    if (disposed) return;
     registry.setShuttingDown(false);
     currentCtx = ctx;
     await registry.ensureRuntimeDir(ctx);
@@ -484,12 +508,9 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {
-    registry.setShuttingDown(true);
-    currentCtx = undefined;
-    if (statusInterval) {
-      clearInterval(statusInterval);
-      statusInterval = undefined;
-    }
+    beginSessionShutdown();
+    if (shutdownCleanupStarted) return;
+    shutdownCleanupStarted = true;
     try {
       const running = registry.allTasks().filter((task) => task.status === 'running');
       if (running.length === 0) return;

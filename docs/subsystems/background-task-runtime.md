@@ -58,9 +58,15 @@ A child closing with code `0` becomes `completed` unless killed/timeout/cap stat
 
 During finalization, the runtime flushes wrapped-agent output, ends and waits for the output stream to finish/close, writes terminal metadata through the durable metadata path, updates waiters, initiates terminal EventBus publication, sends the completion notification when enabled and not shutting down, persists notification state, then prunes old finished tasks. Actual EventBus emission may wait behind the run-response publication gate and therefore may occur after the completion notification; it still occurs only after stream close and terminal metadata. The registry calls a historically named `closeAndFsyncOutputStream()` helper, but its current implementation ends and observes the stream rather than issuing `fsync` for ordinary `.output`; durable terminal truth refers to the metadata-backed status, not a stronger crash-durability guarantee for every output byte.
 
+Terminal EventBus publication has separate `pending`, `delivered`, and `abandoned` truth. The legacy internal `terminalPublished` latch means delivered only; abandonment never sets it. A genuine synchronous emitter failure is retried after 100 ms, up to three total emit attempts. Exhaustion abandons publication with bounded diagnostics. Since an earlier listener can receive before a later listener throws, retries are at-least-once and consumers deduplicate by task id.
+
+Publication gates race the activation's one-way closure signal. Gate resolution is followed by a lifecycle re-check; gate rejection abandons publication; shutdown or publisher disposal clears gate references and retry timers. A late gate cannot emit or re-arm an old registry. These outcomes do not rewrite durable task status, waiter completion, or notification receipt state.
+
 ## Stopping tasks
 
 Only `running` tasks can be stopped. Managed tasks invoke their task-owned cancellation callback and wait for workflow settlement; process tasks use the platform paths below.
+
+Session shutdown closes terminal publication before managed-workflow cleanup starts, then applies the normal stop paths. Pending publication is abandoned, not reported as delivered. Registry publication closure is one-way: session replacement receives a fresh registry, while the old registry cannot be reopened by late lifecycle or gate continuations.
 
 POSIX stop path:
 

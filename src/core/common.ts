@@ -13,6 +13,13 @@ export type TaskStatus = (typeof TASK_STATUS_VALUES)[number];
 export type TerminalTaskStatus = (typeof TERMINAL_TASK_STATUS_VALUES)[number];
 export type KillKind = 'user' | 'timeout' | 'output_cap' | 'shutdown';
 
+export type TerminalPublicationState = 'pending' | 'delivered' | 'abandoned';
+export type TerminalPublicationAbandonReason =
+  | 'registry_shutdown'
+  | 'publisher_closed'
+  | 'gate_rejected'
+  | 'retry_exhausted';
+
 export type JsonObject = Readonly<Record<PropertyKey, unknown>>;
 
 export interface TaskContextUsage {
@@ -137,7 +144,11 @@ export interface BgTask extends Omit<BgTaskSnapshot, 'name'> {
   killEscalationTimer?: NodeJS.Timeout | undefined;
   capExceeded?: boolean | undefined;
   finalized?: boolean | undefined;
-  terminalPublished?: boolean | undefined;
+  /** True only after the terminal EventBus emitter returns successfully; abandonment is never delivery. */
+  terminalPublished: boolean;
+  terminalPublicationState: TerminalPublicationState;
+  terminalPublicationAbandonReason?: TerminalPublicationAbandonReason | undefined;
+  terminalPublishAttempts: number;
   terminalPublishInFlight?: boolean | undefined;
   terminalPublishRetryHandle?: NodeJS.Timeout | undefined;
   /** Optional protocol barrier used by EventBus run requests so early child exits cannot publish before the run response is observable. */

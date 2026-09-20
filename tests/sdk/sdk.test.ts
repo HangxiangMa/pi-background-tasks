@@ -807,6 +807,85 @@ void describe('sdk', () => {
     }
   });
 
+  void it('disposes old publication lifecycles across repeated reload activations', async () => {
+    const eventBus = createEventBus();
+    const responses: BackgroundTaskExtensionResponse[] = [];
+    const terminals: BgTaskSnapshot[] = [];
+    const unsubscribeResponses = eventBus.on(BG_RESPONSE_CHANNEL, (data) => {
+      responses.push(requireEventResponse(data));
+    });
+    const unsubscribeTerminals = eventBus.on(BG_TERMINAL_CHANNEL, (data) => {
+      terminals.push(requireTerminal(data).task);
+    });
+    try {
+      for (let cycle = 1; cycle <= 2; cycle++) {
+        const { session } = await harness({ eventBus });
+        let shutDown = false;
+        try {
+          await session.extensionRunner.emit({ type: 'session_start', reason: 'reload' });
+
+          const quickRequestId = `reload-${String(cycle)}-quick`;
+          const quick = await emitEventRequest(eventBus, quickRequestId, 'run', {
+            name: `Reload Quick ${String(cycle)}`,
+            command: 'echo reload-ok',
+            isAgent: false,
+            notifyOnCompletion: false,
+            triggerOnCompletion: false,
+          });
+          const quickTask = requiredTask(requireOkResult(quick), 'reload quick task');
+          await waitForTerminalSnapshot(terminals, quickTask.id);
+          assert.equal(
+            responses.filter((response) => response.request_id === quickRequestId).length,
+            1,
+            'only the current activation may answer a request',
+          );
+
+          const runningRequestId = `reload-${String(cycle)}-running`;
+          const running = await emitEventRequest(eventBus, runningRequestId, 'run', {
+            name: `Reload Running ${String(cycle)}`,
+            command: `node -e ${JSON.stringify('setTimeout(() => {}, 10000)')}`,
+            isAgent: false,
+            notifyOnCompletion: false,
+            triggerOnCompletion: false,
+          });
+          const runningTask = requiredTask(requireOkResult(running), 'reload running task');
+          assert.equal(runningTask.status, 'running');
+
+          await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'reload' });
+          shutDown = true;
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          assert.equal(
+            terminals.filter((task) => task.id === runningTask.id).length,
+            0,
+            'shutdown terminal truth is durable but EventBus publication is abandoned',
+          );
+
+          const staleRequestId = `reload-${String(cycle)}-stale`;
+          eventBus.emit(BG_REQUEST_CHANNEL, {
+            schema_version: BG_REQUEST_SCHEMA,
+            request_id: staleRequestId,
+            operation: 'capabilities',
+            payload: {},
+          });
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          assert.equal(
+            responses.filter((response) => response.request_id === staleRequestId).length,
+            0,
+            'the disposed activation must remain unsubscribed',
+          );
+        } finally {
+          if (!shutDown) {
+            await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'reload' });
+          }
+          session.dispose();
+        }
+      }
+    } finally {
+      unsubscribeTerminals();
+      unsubscribeResponses();
+    }
+  });
+
   void it('runs the structured bg_run_pi_attested tool and writes a complete flat attestation', async (t) => {
     if (skipWin32PiPathFixture(t, 'attested')) return;
     const { session, cwd, modelRegistry, modelRuntime } = await harness();

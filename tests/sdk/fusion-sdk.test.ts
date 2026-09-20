@@ -8,17 +8,20 @@ import type { AssistantMessage, UserMessage } from '@earendil-works/pi-ai';
 import {
   ModelRuntime,
   createAgentSession,
+  createEventBus,
   DefaultResourceLoader,
   ModelRegistry,
   SessionManager,
   SettingsManager,
   Theme,
   type AgentSession,
+  type EventBus,
   type ExtensionUIContext,
   type KeybindingsManager,
 } from '@earendil-works/pi-coding-agent';
 import type { Component, TUI } from '@earendil-works/pi-tui';
 import { parseJsonText } from '../../src/core/common.js';
+import { BG_TERMINAL_CHANNEL, BG_TERMINAL_SCHEMA } from '../../src/core/extension-api.js';
 import { resolvePiLaunch } from '../../src/core/pi-launch.js';
 import { CURRENT_MODEL_SELECTION, FUSION_MODEL_CONFIG_FILE } from '../../src/core/fusion/config.js';
 import {
@@ -65,6 +68,7 @@ interface Harness {
   root: string;
   agentDir: string;
   fakeLogPath: string;
+  eventBus: EventBus;
 }
 
 interface HarnessOptions {
@@ -311,10 +315,12 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     defaultProvider: 'pi-bg-fusion',
     defaultModel: 'current-model',
   });
+  const eventBus = createEventBus();
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir,
     settingsManager,
+    eventBus,
     additionalExtensionPaths: [backgroundTasksExtensionPath],
     noExtensions: true,
     noSkills: true,
@@ -370,7 +376,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   assert.equal(session.model?.id, 'current-model');
   session.setThinkingLevel('low');
   await session.extensionRunner.emit({ type: 'session_start', reason: 'startup' });
-  return { session, cwd, root, agentDir, fakeLogPath: fake.logPath };
+  return { session, cwd, root, agentDir, fakeLogPath: fake.logPath, eventBus };
 }
 
 async function disposeHarness(h: Harness): Promise<void> {
@@ -993,6 +999,12 @@ void describe('fusion SDK integration', { concurrency: false }, () => {
   void it('cancels live fusion children on session shutdown', async (t) => {
     if (skipWin32FusionChildPathFixture(t)) return;
     const h = await harness({ fakeDelayMs: 10000 });
+    const terminalTaskIds: string[] = [];
+    const unsubscribeTerminal = h.eventBus.on(BG_TERMINAL_CHANNEL, (value) => {
+      if (!isRecord(value) || value['schema_version'] !== BG_TERMINAL_SCHEMA) return;
+      const task = value['task'];
+      if (isRecord(task) && typeof task['id'] === 'string') terminalTaskIds.push(task['id']);
+    });
     let disposed = false;
     try {
       const tool = h.session.getToolDefinition('fusion_reason');
@@ -1031,6 +1043,11 @@ void describe('fusion SDK integration', { concurrency: false }, () => {
       assert.equal(terminal.details['summary_status'], 'verified');
       assert.equal(terminal.details['usage_delivered'], undefined);
       assert.equal('usage' in terminal, false);
+      assert.equal(
+        terminalTaskIds.filter((publishedId) => publishedId === taskId).length,
+        0,
+        'managed terminal publication is abandoned once reload shutdown begins',
+      );
       for (const delivery of [undefined, 'inline'] as const) {
         const repeat = await resultTool.execute(
           `result-shutdown-${delivery ?? 'default'}`,
@@ -1051,6 +1068,7 @@ void describe('fusion SDK integration', { concurrency: false }, () => {
       h.session.dispose();
       disposed = true;
     } finally {
+      unsubscribeTerminal();
       if (!disposed) await disposeHarness(h);
     }
   });
