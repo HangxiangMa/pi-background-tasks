@@ -1,0 +1,5 @@
+# Immutable external evidence: preserve exact bytes and significant patch context
+# whitespace across platforms. These are review artifacts, not production sources.
+patches/*.diff -text -diff
+threads/*.md -text -diff
+evidence/*.log -text -diff
