@@ -3,7 +3,7 @@
 Date: 2026-09-21
 
 Package: `pi-background-tasks@2.5.0`
-Integrated main: `5d0ad28fc1132c9611ec42d7f602bfaebd097520`
+Integrated main: `ff1ddbc07c85a9edfd5d91d3241e322d6b8a9d67` (tree `40f789193734e57a65f3336a467a903dee7db124`)
 
 This is a **local closure candidate**, not a GitHub closure, release, push, tag, or publication.
 
@@ -69,6 +69,8 @@ These limitations remain visible blockers and are not converted into passes.
 - Cross-process PID/file/JSON adoption or synthesized process exit truth.
 - Silent route substitution, silent fallback, or restart-based built-in Bash takeover.
 
-## Remote state
+## Cleanup and remote state
+
+Both auxiliary branch tips are retained as main ancestors through tree-preserving merge commits. Their package-only worktrees and merged branches were removed normally, the 225 MiB task scratch root was deleted after receipt preservation, shared dependencies remain intact, and no matching process remains.
 
 No closeout changes were pushed or published. No GitHub issue/PR was closed or modified. The parent repository was not committed.

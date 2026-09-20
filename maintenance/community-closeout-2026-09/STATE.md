@@ -4,9 +4,9 @@ Last updated: 2026-09-21.
 
 ## Current stage
 
-**LOCAL IMPLEMENTATION COMPLETE — final performance evidence, blocker receipts, and cleanup remain.**
+**LOCAL CLOSURE CANDIDATE COMPLETE — package work, qualification, evidence, and cleanup finished.**
 
-- Package main: `154e97f` (`perf(runtime): ship compiled conditional startup graph`).
+- Runtime integration/ancestry anchor: `ff1ddbc07c85a9edfd5d91d3241e322d6b8a9d67` (tree `40f789193734e57a65f3336a467a903dee7db124`); final HEAD adds only this closure dossier.
 - Package version: `2.5.0`.
 - Parent repository remains untouched.
 - No closeout push, publish, tag, GitHub mutation, or remote closure occurred.
@@ -65,21 +65,15 @@ Two PTY cases initially failed on the unchanged baseline because fixed delays se
 | pnpm gate | `BLOCKED_ENVIRONMENT` | No pnpm executable is installed. |
 | exact Pi 0.81–0.84 compatibility reinstall | pending environment decision | The release script is offline-only; no isolated task-owned cache containing all exact package closures is currently available. Do not borrow the user cache or use network. |
 
-## Remaining execution steps
+## Final cleanup state
 
-1. Collect final 30-sample source-vs-compiled cold-load distributions on the clean integrated commit.
-2. Record benchmark and unavailable-gate receipts without overstating Windows/Bun/pnpm/exact-version coverage.
-3. Produce the ticket-by-ticket local closure-readiness report.
-4. Prove both auxiliary branch tips are ancestors of main, unlink only owned dependency symlinks, remove both package-only worktrees normally, delete merged branches with `-d`, prune, and remove disposable scratch.
-5. Commit final evidence/cleanup state. No remote action.
-
-## Owned workspace ledger
-
-| Resource | State | Cleanup rule |
-|---|---|---|
-| Main package checkout | `main` at `154e97f`; maintenance evidence pending | Keep; final source must be clean after evidence commit |
-| `/private/tmp/pi-bg-closeout-iNoltL/reload-survival` | tip `354dbdf`; all three commits integrated as main ancestors | Verify ancestry/tree evidence, unlink owned `node_modules` symlink, normal worktree removal, branch `-d` |
-| `/private/tmp/pi-bg-closeout-iNoltL/lazy-agents` | tip `60e3889`; all four commits integrated as main ancestors | Verify ancestry/tree evidence, normal worktree removal, branch `-d` |
-| `/private/tmp/pi-bg-closeout-iNoltL` | retained reports plus disposable test/benchmark roots | Preserve final receipts first; remove task-owned bulky/transient roots, never force-delete unknown data |
+- Final 30-sample source/compiled receipts and platform blockers are committed under `execution/final-performance/` and `execution/final-platform/`.
+- Ticket-by-ticket disposition is committed in `CLOSURE.md`.
+- Reload tip `354dbdf` and lazy tip `60e3889` are ancestors of main through tree-preserving ancestry merges `994fb68` and `ff1ddbc`; both merge commits retain tree `40f7891` unchanged.
+- The reload worktree's owned dependency symlink was verified against the main package dependency directory and unlinked; both auxiliary package-only worktrees were then removed normally without force.
+- Both `closeout/*` branches were deleted with `git branch -d`; worktree prune reports no stale entries.
+- Shared package `node_modules` remains intact.
+- `/private/tmp/pi-bg-closeout-iNoltL` (225 MiB before cleanup) was removed after all final receipts were committed. No matching process remains.
+- The package has one worktree, no closeout branches, no running agents/tests, and a clean main checkout before this final state commit.
 
 Historical implementation/review receipts are retained under `execution/`. They document rejected intermediate states as well as accepted corrections; the current table above is authoritative for live state.
