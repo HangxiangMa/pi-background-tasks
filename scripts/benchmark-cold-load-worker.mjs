@@ -105,10 +105,21 @@ function inventory(result) {
   };
 }
 
-if (args.scenario === 'sdk-default-load') {
-  Reflect.deleteProperty(process.env, 'PI_BG_FEATURES');
-  Reflect.deleteProperty(process.env, 'PI_BG_DOCK_SHORTCUT');
-  const { loader } = await makeLoader([attributionPath, backgroundPath]);
+if (
+  args.scenario === 'sdk-no-extension-load' ||
+  args.scenario === 'sdk-process-only-load' ||
+  args.scenario === 'sdk-default-load'
+) {
+  if (args.scenario === 'sdk-process-only-load') {
+    process.env.PI_BG_FEATURES = 'process';
+    process.env.PI_BG_DOCK_SHORTCUT = 'off';
+  } else {
+    Reflect.deleteProperty(process.env, 'PI_BG_FEATURES');
+    Reflect.deleteProperty(process.env, 'PI_BG_DOCK_SHORTCUT');
+  }
+  const paths =
+    args.scenario === 'sdk-no-extension-load' ? [] : [attributionPath, backgroundPath];
+  const { loader } = await makeLoader(paths);
   const start = performance.now();
   await loader.reload();
   const loadMs = elapsed(start);
