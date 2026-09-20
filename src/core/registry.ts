@@ -16,6 +16,7 @@ import {
   normalizeTaskName,
   parseAgentActivity,
   parseJsonText,
+  rejectSurvivalForTaskKind,
   resolveShellPolicy,
   sanitizePathSegment,
   shellInvocationForPolicy,
@@ -28,6 +29,12 @@ import {
   type BgTaskSnapshot,
   type JsonObject,
   type KillKind,
+  type ReloadShellActivationClaimV1,
+  type ReloadShellActivationLeaseV1,
+  type ReloadShellHostAdapterV1,
+  type ReloadShellIdentityV1,
+  type ReloadShellOwnerHubV1,
+  type ReloadableShellExecutionV1,
   type ResolvedShellPolicy,
   type StartAttestedPiTaskOptions,
   type StartDelegateTaskOptions,
@@ -38,6 +45,7 @@ import {
   type TaskTokenUsage,
   type TaskToolUsage,
   type TerminalPublicationAbandonReason,
+  ReloadSurvivalError,
 } from './common.js';
 import {
   ATTESTED_GIT_KILL_GRACE_MS,
@@ -68,6 +76,10 @@ import {
 } from './pi-launch.js';
 import { BackgroundTaskExtensionServiceClosedError } from './extension-api.js';
 import { resolveAnthropicAttributionExtensionPath } from './anthropic-attribution-path.js';
+import {
+  createReloadableShellExecutionV1,
+  RELOAD_SHELL_OWNER_PROTOCOL,
+} from './reload-shell-owner.js';
 import {
   runWindowsTaskkill,
   type TaskkillOutcome,
@@ -239,6 +251,7 @@ export interface BackgroundTaskRegistryOptions {
   attestedGitMaxOutputBytes?: number;
   attestedGitSpawn?: AttestedGitSpawn;
   logger?: Pick<Console, 'error'>;
+  reloadShellOwner?: ReloadShellOwnerHubV1;
 }
 
 interface RuntimeDir {
@@ -833,6 +846,9 @@ export class BackgroundTaskRegistry {
     BgTask,
     TerminalPublicationAbandonSignal
   >();
+  private readonly reloadShellOwner: ReloadShellOwnerHubV1 | undefined;
+  private reloadShellLease: ReloadShellActivationLeaseV1 | undefined;
+  private reloadShellIdentity: ReloadShellIdentityV1 | undefined;
 
   constructor(options: BackgroundTaskRegistryOptions) {
     this.terminalPublicationClosedSignal = new Promise((resolve) => {
@@ -845,11 +861,12 @@ export class BackgroundTaskRegistry {
     this.env = options.env ?? process.env;
     this.shellPolicy = options.shellPolicy;
     this.shellPolicyEnv = options.shellPolicy === undefined ? { ...this.env } : undefined;
+    const taskkillEnv = this.env;
     this.killTree =
       options.killTree ??
       ((pid, phase, signal) => {
         const taskkillOptions: WindowsTaskkillOptions =
-          signal === undefined ? { env: this.env } : { env: this.env, signal };
+          signal === undefined ? { env: taskkillEnv } : { env: taskkillEnv, signal };
         return runWindowsTaskkill(pid, phase, taskkillOptions);
       });
     this.makeTaskIdFn = options.makeTaskId ?? defaultTaskId;
@@ -878,6 +895,7 @@ export class BackgroundTaskRegistry {
     this.onChange = options.onChange ?? noopOnChange;
     this.sendCompletionNotification = options.sendCompletionNotification;
     this.publishTerminalSnapshot = options.publishTerminal ?? noopOnChange;
+    this.reloadShellOwner = options.reloadShellOwner;
   }
 
   isShuttingDown(): boolean {
@@ -1074,6 +1092,171 @@ export class BackgroundTaskRegistry {
     return snapshot(task);
   }
 
+  hasCurrentReloadLease(): boolean {
+    const lease = this.reloadShellLease;
+    return lease !== undefined && this.reloadShellOwner?.isCurrentLease(lease) === true;
+  }
+
+  async stageReloadActivation(
+    claim: ReloadShellActivationClaimV1,
+  ): Promise<ReloadShellHostAdapterV1> {
+    if (claim.protocol !== RELOAD_SHELL_OWNER_PROTOCOL) {
+      throw new ReloadSurvivalError(
+        'pi_bg_reload_owner_protocol_incompatible',
+        'activation claim does not use the supported reload shell owner protocol',
+      );
+    }
+    const staged: ReloadableShellExecutionV1[] = [];
+    const ids = new Set<string>();
+    for (const execution of claim.executions) {
+      if (
+        execution.protocol !== RELOAD_SHELL_OWNER_PROTOCOL ||
+        execution.task.reloadExecution !== execution ||
+        execution.task.surviveReload !== true
+      ) {
+        throw new ReloadSurvivalError(
+          'pi_bg_reload_owner_protocol_incompatible',
+          'activation claim contains an incompatible reload shell execution',
+        );
+      }
+      if (ids.has(execution.task.id) || this.tasks.has(execution.task.id)) {
+        throw new ReloadSurvivalError(
+          'pi_bg_reload_owner_activation_conflict',
+          `claimed task id ${execution.task.id} conflicts with the fresh registry`,
+        );
+      }
+      ids.add(execution.task.id);
+    }
+
+    try {
+      for (const execution of claim.executions) {
+        const task = execution.task;
+        task.reloadHostDeliveryInFlight = false;
+        task.reloadHostDeliverySettled = false;
+        task.reloadHostNotificationSettled = false;
+        execution.updateLeaseAudit(
+          claim.generation,
+          (task.reloadSurvival?.handoffCount ?? 0) + 1,
+        );
+        this.tasks.set(task.id, task);
+        staged.push(execution);
+      }
+      await Promise.all(staged.map(async (execution) => this.writeMetadata(execution.task)));
+    } catch (error) {
+      for (const execution of staged) this.tasks.delete(execution.task.id);
+      throw error;
+    }
+
+    let boundLease: ReloadShellActivationLeaseV1 | undefined;
+    return {
+      activationNonce: claim.activationNonce,
+      onBound: (lease) => {
+        if (
+          lease.activationNonce !== claim.activationNonce ||
+          lease.generation !== claim.generation ||
+          lease.identityKey !== claim.identityKey
+        ) {
+          throw new ReloadSurvivalError(
+            'pi_bg_reload_owner_stale_claim',
+            'committed lease does not match its staged activation claim',
+          );
+        }
+        boundLease = lease;
+        this.reloadShellLease = lease;
+        this.reloadShellIdentity = claim.identity;
+      },
+      onChanged: (execution) => {
+        const lease = boundLease;
+        if (!this.ownsReloadExecution(execution, lease)) return;
+        this.onChange();
+      },
+      onTerminal: (execution) => {
+        const lease = boundLease;
+        if (!this.ownsReloadExecution(execution, lease)) return;
+        void this.deliverReloadTerminal(execution, lease);
+      },
+    };
+  }
+
+  abortReloadActivation(claim: ReloadShellActivationClaimV1): void {
+    for (const execution of claim.executions) {
+      const task = execution.task;
+      if (this.tasks.get(task.id) !== task) continue;
+      if (task.terminalPublishRetryHandle !== undefined) {
+        clearTimeout(task.terminalPublishRetryHandle);
+        task.terminalPublishRetryHandle = undefined;
+      }
+      task.terminalPublicationGate = undefined;
+      task.terminalPublishInFlight = false;
+      this.tasks.delete(task.id);
+    }
+    if (this.reloadShellLease?.activationNonce === claim.activationNonce) {
+      this.reloadShellLease = undefined;
+      this.reloadShellIdentity = undefined;
+    }
+  }
+
+  prepareReloadHandoff(
+    lease: ReloadShellActivationLeaseV1,
+  ): readonly BgTask[] {
+    if (this.reloadShellOwner === undefined || this.reloadShellLease !== lease) {
+      throw new ReloadSurvivalError(
+        'pi_bg_reload_owner_stale_claim',
+        'registry does not own the requested reload activation lease',
+      );
+    }
+    const executions = this.reloadShellOwner.beginReloadHandoff(lease);
+    const tasks: BgTask[] = [];
+    for (const execution of executions) {
+      const task = execution.task;
+      if (this.tasks.get(task.id) !== task) {
+        throw new ReloadSurvivalError(
+          'pi_bg_reload_owner_stale_claim',
+          `registry no longer owns survivor ${task.id}`,
+        );
+      }
+      if (task.terminalPublishRetryHandle !== undefined) {
+        clearTimeout(task.terminalPublishRetryHandle);
+        task.terminalPublishRetryHandle = undefined;
+      }
+      task.terminalPublicationGate = undefined;
+      task.terminalPublishInFlight = false;
+      task.reloadHostDeliveryInFlight = false;
+      task.reloadHostDeliverySettled = false;
+      task.reloadHostNotificationSettled = false;
+      this.tasks.delete(task.id);
+      tasks.push(task);
+    }
+    this.reloadShellLease = undefined;
+    this.reloadShellIdentity = undefined;
+    return Object.freeze(tasks);
+  }
+
+  releaseReloadActivation(lease: ReloadShellActivationLeaseV1): void {
+    if (this.reloadShellOwner === undefined) return;
+    if (this.reloadShellLease !== lease || !this.reloadShellOwner.isCurrentLease(lease)) return;
+    this.reloadShellOwner.releaseActivation(lease);
+    this.reloadShellLease = undefined;
+    this.reloadShellIdentity = undefined;
+  }
+
+  currentReloadLease(): ReloadShellActivationLeaseV1 | undefined {
+    return this.hasCurrentReloadLease() ? this.reloadShellLease : undefined;
+  }
+
+  private ownsReloadExecution(
+    execution: ReloadableShellExecutionV1,
+    lease: ReloadShellActivationLeaseV1 | undefined,
+  ): lease is ReloadShellActivationLeaseV1 {
+    return (
+      lease !== undefined &&
+      this.reloadShellLease === lease &&
+      this.reloadShellOwner?.isCurrentLease(lease) === true &&
+      this.tasks.get(execution.task.id) === execution.task &&
+      execution.task.reloadExecution === execution
+    );
+  }
+
   async ensureRuntimeDir(ctx: BackgroundTaskContext): Promise<RuntimeDir> {
     if (this.runtimeDir) return this.runtimeDir;
     const sessionId = sanitizePathSegment(ctx.sessionId ?? `session-${String(process.pid)}`);
@@ -1183,11 +1366,251 @@ export class BackgroundTaskRegistry {
     command: string,
     options: StartTaskOptions = {},
   ): Promise<BgTask> {
+    const hasSurvival = Object.prototype.hasOwnProperty.call(options, 'surviveReload');
+    if (hasSurvival && typeof options.surviveReload !== 'boolean') {
+      throw new ReloadSurvivalError(
+        'pi_bg_survive_reload_invalid',
+        'surviveReload must be a boolean when present',
+      );
+    }
+    const surviveReload = options.surviveReload === true;
+    if (surviveReload && options.isAgent === true) {
+      throw new ReloadSurvivalError(
+        'pi_bg_survive_reload_requires_non_agent',
+        'surviveReload requires isAgent:false',
+      );
+    }
+    const reloadLease = surviveReload ? this.currentReloadLease() : undefined;
+    if (surviveReload && reloadLease === undefined) {
+      throw new ReloadSurvivalError(
+        'pi_bg_reload_owner_unavailable',
+        'no successfully bound same-process reload owner activation is available',
+      );
+    }
+
     const admission = this.beginTaskAdmission('a background task');
     try {
+      if (surviveReload && reloadLease !== undefined) {
+        return await this.startReloadableTaskAdmitted(
+          ctx,
+          command,
+          options,
+          admission,
+          reloadLease,
+        );
+      }
       return await this.startTaskAdmitted(ctx, command, options, admission);
     } finally {
       this.releaseTaskAdmission(admission);
+    }
+  }
+
+  private async startReloadableTaskAdmitted(
+    ctx: BackgroundTaskContext,
+    command: string,
+    options: StartTaskOptions,
+    admission: TaskAdmission,
+    lease: ReloadShellActivationLeaseV1,
+  ): Promise<BgTask> {
+    const normalizedCommand = command.trim();
+    if (!normalizedCommand) throw new Error('Background command is empty');
+    if (options.isAgent === true) {
+      throw new ReloadSurvivalError(
+        'pi_bg_survive_reload_requires_non_agent',
+        'surviveReload requires isAgent:false',
+      );
+    }
+    if (
+      this.reloadShellOwner === undefined ||
+      this.reloadShellIdentity === undefined ||
+      this.reloadShellLease !== lease ||
+      !this.reloadShellOwner.isCurrentLease(lease)
+    ) {
+      throw new ReloadSurvivalError(
+        'pi_bg_reload_owner_unavailable',
+        'reload owner activation became unavailable before launch',
+      );
+    }
+    if (ctx.sessionId !== this.reloadShellIdentity.sessionId) {
+      throw new ReloadSurvivalError(
+        'pi_bg_reload_owner_stale_claim',
+        'launch context session id does not match the bound reload owner identity',
+      );
+    }
+    this.assertTaskAdmissionOpen('a background task', admission);
+
+    const shellPolicy = this.resolvedShellPolicy();
+    const invocation = shellInvocationForPolicy(normalizedCommand, shellPolicy);
+    const dir = await this.awaitTaskAdmissionBoundary(this.ensureRuntimeDir(ctx), admission);
+    this.assertTaskAdmissionOpen('a background task', admission);
+    if (
+      this.reloadShellLease !== lease ||
+      !this.reloadShellOwner.isCurrentLease(lease)
+    ) {
+      throw new ReloadSurvivalError(
+        'pi_bg_reload_owner_stale_claim',
+        'reload owner activation changed during task preflight',
+      );
+    }
+
+    const id = this.makeTaskIdFn();
+    const outputAbsPath = join(dir.abs, `${id}.output`);
+    const metadataAbsPath = join(dir.abs, `${id}.json`);
+    const outputPath = join(dir.display, `${id}.output`);
+    const timeoutSeconds =
+      typeof options.timeoutSeconds === 'number' &&
+      Number.isFinite(options.timeoutSeconds) &&
+      options.timeoutSeconds > 0
+        ? Math.floor(options.timeoutSeconds)
+        : undefined;
+    const taskName =
+      normalizeTaskName(options.name) ??
+      normalizeTaskName(options.description) ??
+      deriveTaskNameFromCommand(normalizedCommand);
+    const trimmedDescription = options.description?.trim();
+    const description =
+      trimmedDescription && trimmedDescription.length > 0 ? trimmedDescription : undefined;
+    const task: BgTask = {
+      id,
+      name: taskName,
+      command: normalizedCommand,
+      description,
+      status: 'running',
+      outputPath,
+      outputAbsPath,
+      metadataAbsPath,
+      cwd: ctx.cwd,
+      startTime: this.now(),
+      exitCode: undefined,
+      pid: undefined,
+      bytesWritten: 0,
+      isAgent: false,
+      surviveReload: true,
+      notified: false,
+      notifyOnCompletion: options.notifyOnCompletion ?? true,
+      triggerOnCompletion: options.triggerOnCompletion ?? false,
+      timeoutSeconds,
+      terminalPublished: false,
+      terminalPublicationState: 'pending',
+      terminalPublishAttempts: 0,
+      terminalPublicationGate: options.terminalPublicationGate,
+      shellPolicy: shellPolicySnapshot(shellPolicy),
+      waiters: [],
+    };
+    const launchNonce = randomBytes(16).toString('hex');
+    this.assertTaskAdmissionOpen('a background task', admission);
+    this.tasks.set(id, task);
+
+    let execution: ReloadableShellExecutionV1 | undefined;
+    let registered = false;
+    let committed = false;
+    let abortListener: (() => void) | undefined;
+    try {
+      execution = createReloadableShellExecutionV1({
+        task,
+        identity: this.reloadShellIdentity,
+        lease,
+        launchNonce,
+        invocation,
+        spawn: this.spawn,
+        killProcess: this.killProcess,
+        killTree: this.killTree,
+        platform: this.platform,
+        env: this.env,
+        maxOutputBytes: this.maxOutputBytes,
+        killGraceMs: this.killGraceMs,
+        stopWaitMs: this.stopWaitMs,
+        now: this.now,
+        logger: console,
+      });
+      this.reloadShellOwner.registerExecution(lease, execution);
+      registered = true;
+      abortListener = () => {
+        if (execution === undefined) return;
+        const error = this.taskAdmissionError(admission);
+        execution.failAdmission(error);
+        const kind: KillKind =
+          error instanceof BackgroundTaskAdmissionTimeoutError ? 'timeout' : 'shutdown';
+        void execution.requestStop(kind, error.message).catch((stopError: unknown) => {
+          this.logger.error(
+            `[background-tasks] failed to stop reloadable task ${task.id} after admission cancellation:`,
+            stopError,
+          );
+        });
+      };
+      admission.controller.signal.addEventListener('abort', abortListener, { once: true });
+      if (admission.controller.signal.aborted) abortListener();
+
+      await this.awaitTaskAdmissionBoundary(
+        execution.commitInitialMetadata(admission.controller.signal),
+        admission,
+      );
+      this.assertTaskAdmissionOpen('a background task', admission);
+      if (
+        this.reloadShellLease !== lease ||
+        !this.reloadShellOwner.isCurrentLease(lease)
+      ) {
+        throw new ReloadSurvivalError(
+          'pi_bg_reload_owner_stale_claim',
+          'reload owner activation changed before admission commit',
+        );
+      }
+      this.reloadShellOwner.markAdmissionCommitted(lease, execution);
+      committed = true;
+      this.onChange();
+      return task;
+    } catch (error) {
+      const primary =
+        admission.controller.signal.aborted
+          ? this.taskAdmissionError(admission)
+          : error instanceof Error
+            ? error
+            : new Error(String(error));
+      execution?.failAdmission(primary);
+      let cleanupError: unknown;
+      if (execution !== undefined) {
+        try {
+          if (task.status === 'running') {
+            await execution.requestStop(
+              admission.controller.signal.aborted &&
+                primary instanceof BackgroundTaskAdmissionTimeoutError
+                ? 'timeout'
+                : 'shutdown',
+              primary.message,
+            );
+          }
+        } catch (stopError) {
+          cleanupError = stopError;
+        }
+      }
+      if (registered && !committed && execution !== undefined) {
+        if (this.reloadShellOwner.isCurrentLease(lease)) {
+          this.reloadShellOwner.releaseExecution(lease, execution);
+        }
+      }
+      this.tasks.delete(task.id);
+      if (execution === undefined) {
+        const removals = await Promise.allSettled([
+          rm(outputAbsPath, { force: true }),
+          rm(metadataAbsPath, { force: true }),
+        ]);
+        const removalFailure = removals.find((result) => result.status === 'rejected');
+        if (removalFailure?.status === 'rejected') cleanupError = removalFailure.reason;
+      }
+      if (admission.controller.signal.aborted) {
+        throw this.surfacedTaskAdmissionError(admission, error, cleanupError);
+      }
+      if (cleanupError !== undefined) {
+        throw new AggregateError(
+          [primary, cleanupError],
+          `Failed to start reloadable background task and cleanup also failed: ${BackgroundTaskRegistry.errorMessage(cleanupError)}`,
+        );
+      }
+      throw new Error(`Failed to start background task: ${primary.message}`);
+    } finally {
+      if (abortListener !== undefined) {
+        admission.controller.signal.removeEventListener('abort', abortListener);
+      }
     }
   }
 
@@ -1273,6 +1696,7 @@ export class BackgroundTaskRegistry {
       pid: undefined,
       bytesWritten: 0,
       isAgent,
+      surviveReload: false,
       notified: false,
       notifyOnCompletion: options.notifyOnCompletion ?? true,
       triggerOnCompletion: options.triggerOnCompletion ?? false,
@@ -1427,6 +1851,7 @@ export class BackgroundTaskRegistry {
     ctx: BackgroundTaskContext,
     request: StartManagedTaskOptions,
   ): Promise<BgTask> {
+    rejectSurvivalForTaskKind(request, 'managed background tasks');
     let admission: TaskAdmission | undefined;
     try {
       admission = this.beginTaskAdmission('a managed background task');
@@ -1504,6 +1929,7 @@ export class BackgroundTaskRegistry {
       pid: undefined,
       bytesWritten: 0,
       isAgent: request.isAgent,
+      surviveReload: false,
       notified: false,
       notifyOnCompletion: request.notifyOnCompletion,
       triggerOnCompletion: request.triggerOnCompletion,
@@ -1638,6 +2064,7 @@ export class BackgroundTaskRegistry {
     ctx: BackgroundTaskContext,
     request: StartDelegateTaskOptions,
   ): Promise<BgTask> {
+    rejectSurvivalForTaskKind(request, 'delegate tasks');
     const admission = this.beginTaskAdmission('a delegate task');
     try {
       return await this.startDelegateTaskAdmitted(ctx, request, admission);
@@ -1676,6 +2103,7 @@ export class BackgroundTaskRegistry {
       pid: undefined,
       bytesWritten: 0,
       isAgent: true,
+      surviveReload: false,
       notified: false,
       notifyOnCompletion: request.notifyOnCompletion,
       triggerOnCompletion: request.triggerOnCompletion,
@@ -1809,6 +2237,7 @@ export class BackgroundTaskRegistry {
     ctx: BackgroundTaskContext,
     request: StartAttestedPiTaskOptions,
   ): Promise<BgTask> {
+    rejectSurvivalForTaskKind(request, 'attested Pi tasks');
     const admission = this.beginTaskAdmission('an attested Pi task');
     try {
       return await this.startAttestedPiTaskAdmitted(ctx, request, admission);
@@ -1881,6 +2310,7 @@ export class BackgroundTaskRegistry {
       pid: undefined,
       bytesWritten: 0,
       isAgent: true,
+      surviveReload: false,
       notified: false,
       notifyOnCompletion: false,
       triggerOnCompletion: false,
@@ -2225,6 +2655,9 @@ export class BackgroundTaskRegistry {
   async stopTask(task: BgTask, kind: KillKind, reason?: string): Promise<BgTask> {
     if (task.status !== 'running') {
       throw new Error(`Task ${task.id} is ${task.status}, not running`);
+    }
+    if (task.reloadExecution !== undefined) {
+      return task.reloadExecution.requestStop(kind, reason);
     }
     const stopWaitMs = task.managedStopWaitMs ?? this.stopWaitMs;
     if (
@@ -3186,6 +3619,93 @@ export class BackgroundTaskRegistry {
     return state.forceFailure;
   }
 
+  private async deliverReloadTerminal(
+    execution: ReloadableShellExecutionV1,
+    lease: ReloadShellActivationLeaseV1,
+  ): Promise<void> {
+    const task = execution.task;
+    if (task.reloadHostDeliveryInFlight || task.reloadHostDeliverySettled) {
+      this.maybeReleaseReloadExecution(task);
+      return;
+    }
+    task.reloadHostDeliveryInFlight = true;
+    try {
+      if (!this.ownsReloadExecution(execution, lease)) return;
+      this.onChange();
+      this.publishTerminal(task);
+      const deliveryGate = await this.waitForTerminalPublicationGate(task);
+      if (!this.ownsReloadExecution(execution, lease)) return;
+      if (deliveryGate.kind === 'rejected') {
+        this.logger.error(
+          `[background-tasks] completion delivery gate failed for ${task.id}: ${this.terminalPublicationError(deliveryGate.error)}`,
+        );
+      } else if (
+        task.notifyOnCompletion &&
+        !task.notified &&
+        !this.shuttingDown &&
+        execution.notificationState === 'pending'
+      ) {
+        const token = execution.beginNotification(lease);
+        if (token !== undefined) {
+          try {
+            this.notifyCompletion(task);
+            execution.finishNotification(token, task.notified);
+          } catch (error) {
+            execution.finishNotification(token, false);
+            this.logger.error(
+              `[background-tasks] notification failed for ${task.id}:`,
+              error,
+            );
+          }
+        }
+      }
+      if (!this.ownsReloadExecution(execution, lease)) return;
+      task.reloadHostNotificationSettled = true;
+      task.reloadHostDeliverySettled = true;
+      try {
+        await this.writeMetadata(task);
+      } catch (error) {
+        this.logger.error(
+          `[background-tasks] failed to update survivor notification metadata for ${task.id}:`,
+          error,
+        );
+      }
+    } finally {
+      task.reloadHostDeliveryInFlight = false;
+      this.maybeReleaseReloadExecution(task);
+    }
+  }
+
+  private maybeReleaseReloadExecution(task: BgTask): void {
+    const execution = task.reloadExecution;
+    const lease = this.reloadShellLease;
+    if (
+      execution === undefined ||
+      execution.phase !== 'terminal' ||
+      task.reloadHostNotificationSettled !== true ||
+      task.terminalPublicationState === 'pending' ||
+      !this.ownsReloadExecution(execution, lease) ||
+      this.reloadShellOwner === undefined ||
+      lease === undefined
+    ) {
+      return;
+    }
+    try {
+      this.reloadShellOwner.releaseExecution(lease, execution);
+    } catch (error) {
+      if (
+        typeof error !== 'object' ||
+        error === null ||
+        Reflect.get(error, 'code') !== 'pi_bg_reload_owner_stale_claim'
+      ) {
+        this.logger.error(
+          `[background-tasks] failed to release reload shell execution ${task.id}:`,
+          error,
+        );
+      }
+    }
+  }
+
   private terminalPublicationAbandonSignal(task: BgTask): TerminalPublicationAbandonSignal {
     const existing = this.terminalPublicationAbandonSignals.get(task);
     if (existing !== undefined) return existing;
@@ -3199,6 +3719,7 @@ export class BackgroundTaskRegistry {
   }
 
   private publishTerminal(task: BgTask): void {
+    if (task.reloadExecution !== undefined && this.tasks.get(task.id) !== task) return;
     if (task.terminalPublicationState !== 'pending' || task.terminalPublishInFlight) return;
     if (this.terminalPublicationClosed) {
       this.abandonTerminalPublication(
@@ -3217,6 +3738,10 @@ export class BackgroundTaskRegistry {
 
   private async publishTerminalWhenReady(task: BgTask): Promise<void> {
     const outcome = await this.waitForTerminalPublicationGate(task);
+    if (task.reloadExecution !== undefined && this.tasks.get(task.id) !== task) {
+      task.terminalPublishInFlight = false;
+      return;
+    }
     if (outcome.kind === 'closed') {
       this.abandonTerminalPublication(task, outcome.reason);
       return;
@@ -3284,6 +3809,10 @@ export class BackgroundTaskRegistry {
   }
 
   private tryPublishTerminalNow(task: BgTask): void {
+    if (task.reloadExecution !== undefined && this.tasks.get(task.id) !== task) {
+      task.terminalPublishInFlight = false;
+      return;
+    }
     if (task.terminalPublicationState !== 'pending') {
       task.terminalPublishInFlight = false;
       return;
@@ -3330,6 +3859,7 @@ export class BackgroundTaskRegistry {
     task.terminalPublicationState = 'delivered';
     delete task.terminalPublicationAbandonReason;
     task.terminalPublished = true;
+    this.maybeReleaseReloadExecution(task);
   }
 
   private abandonTerminalPublication(
@@ -3357,6 +3887,7 @@ export class BackgroundTaskRegistry {
         `[background-tasks] terminal publication abandoned for ${task.id} (${reason}) after ${String(task.terminalPublishAttempts)}/${String(TERMINAL_PUBLICATION_MAX_ATTEMPTS)} emit attempts${detail}`,
       );
     }
+    this.maybeReleaseReloadExecution(task);
   }
 
   private terminalPublicationError(error: unknown): string {
@@ -3393,7 +3924,12 @@ export class BackgroundTaskRegistry {
     if (task.terminalPublishRetryHandle !== undefined) return;
     task.terminalPublishRetryHandle = setTimeout(() => {
       task.terminalPublishRetryHandle = undefined;
-      if (this.terminalPublicationClosed || task.terminalPublicationState !== 'pending') return;
+      if (
+        this.terminalPublicationClosed ||
+        task.terminalPublicationState !== 'pending' ||
+        (task.reloadExecution !== undefined && this.tasks.get(task.id) !== task)
+      )
+        return;
       this.publishTerminal(task);
     }, TERMINAL_PUBLICATION_RETRY_MS);
     task.terminalPublishRetryHandle.unref();

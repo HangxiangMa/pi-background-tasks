@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmod,
   mkdir,
@@ -31,7 +31,17 @@ import {
   type CompletionNotificationOptions,
 } from '../../src/core/registry.js';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import type { BgTask, BgTaskSnapshot } from '../../src/core/common.js';
+import type {
+  BgTask,
+  BgTaskSnapshot,
+  ReloadShellActivationLeaseV1,
+  ReloadShellOwnerHubV1,
+} from '../../src/core/common.js';
+import {
+  createReloadShellOwnerHubForTests,
+  inspectReloadShellOwnerForTests,
+  makeReloadShellIdentity,
+} from '../../src/core/reload-shell-owner.js';
 import type { TaskkillOutcome, WindowsKillPhase } from '../../src/core/windows-taskkill.js';
 import type { AttestedGitSpawn } from '../../src/core/attested-pi-run.js';
 import { BackgroundTaskExtensionServiceClosedError } from '../../src/core/extension-api.js';
@@ -129,7 +139,9 @@ interface HarnessOptions {
   now?: () => number;
   env?: NodeJS.ProcessEnv;
   childFactory?: (pid: number) => FakeChild;
+  spawn?: BackgroundTaskSpawn;
   modelRegistry?: BackgroundTaskContext['modelRegistry'];
+  reloadShellOwner?: ReloadShellOwnerHubV1;
 }
 
 async function createHarness(options: HarnessOptions = {}) {
@@ -160,11 +172,16 @@ async function createHarness(options: HarnessOptions = {}) {
     onChange: () => {
       changes++;
     },
-    spawn: (shell, args, spawnOptions) => {
-      const child = options.childFactory?.(++pid) ?? new FakeChild(++pid);
-      children.push({ child, shell, args: [...args], options: spawnOptions });
-      return child;
-    },
+    ...(options.reloadShellOwner === undefined
+      ? {}
+      : { reloadShellOwner: options.reloadShellOwner }),
+    spawn:
+      options.spawn ??
+      ((shell, args, spawnOptions) => {
+        const child = options.childFactory?.(++pid) ?? new FakeChild(++pid);
+        children.push({ child, shell, args: [...args], options: spawnOptions });
+        return child;
+      }),
   };
   if (options.publishTerminal !== undefined)
     registryOptions.publishTerminal = options.publishTerminal;
@@ -293,13 +310,13 @@ async function cleanup(root: string) {
 }
 
 async function waitFor(
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   message = 'condition',
   timeoutMs = 1000,
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Timed out waiting for ${message}`);
@@ -525,6 +542,487 @@ async function createCommittedFusionResult(
 }
 
 void describe('BackgroundTaskRegistry', () => {
+  void it('validates reload survival before admission, filesystem, insertion, wrapper, or spawn', async () => {
+    const hub = createReloadShellOwnerHubForTests();
+    const h = await createHarness({ reloadShellOwner: hub });
+    let ensureCalls = 0;
+    const originalEnsureRuntimeDir = h.registry.ensureRuntimeDir.bind(h.registry);
+    h.registry.ensureRuntimeDir = async (ctx) => {
+      ensureCalls += 1;
+      return originalEnsureRuntimeDir(ctx);
+    };
+    try {
+      await assert.rejects(
+        () =>
+          h.registry.startTask(h.ctx, 'echo malformed', {
+            isAgent: false,
+            surviveReload: 'yes',
+          } as never),
+        /pi_bg_survive_reload_invalid/u,
+      );
+      await assert.rejects(
+        () =>
+          h.registry.startTask(h.ctx, 'pi -p agent', {
+            isAgent: true,
+            surviveReload: true,
+          }),
+        /pi_bg_survive_reload_requires_non_agent/u,
+      );
+      await assert.rejects(
+        () =>
+          h.registry.startTask(h.ctx, 'echo unavailable', {
+            isAgent: false,
+            surviveReload: true,
+          }),
+        /pi_bg_reload_owner_unavailable/u,
+      );
+      assert.equal(ensureCalls, 0);
+      assert.equal(h.children.length, 0);
+      assert.equal(h.registry.allTasks().length, 0);
+      assert.deepEqual(await filesBelow(join(h.cwd, '.pi')), []);
+    } finally {
+      h.registry.setShuttingDown(true);
+      await cleanup(h.root);
+    }
+  });
+
+  void it('starts a real owner-backed ordinary consumer only after activation and admission commit', async () => {
+    const hub = createReloadShellOwnerHubForTests({ handoffTimeoutMs: 1000 });
+    const h = await createHarness({
+      reloadShellOwner: hub,
+      killGraceMs: 10,
+      stopWaitMs: 200,
+      killProcess: () => true,
+    });
+    const identity = makeReloadShellIdentity(h.ctx.sessionId ?? '', realpathSync(h.cwd));
+    const claim = hub.beginActivation(identity, 'startup', 'a'.repeat(32));
+    const adapter = await h.registry.stageReloadActivation(claim);
+    const lease = hub.commitActivation(claim, adapter);
+    try {
+      const task = await h.registry.startTask(h.ctx, 'node owner-consumer.js', {
+        name: 'Owner consumer',
+        isAgent: false,
+        surviveReload: true,
+        notifyOnCompletion: false,
+        triggerOnCompletion: false,
+      });
+      const child = lastSpawn(h).child;
+      assert.equal(task.surviveReload, true);
+      assert.equal(task.reloadExecution?.admissionCommitted, true);
+      assert.equal(task.reloadExecution?.child, child);
+      assert.equal(task.reloadSurvival?.authority, 'same-process-live-owner');
+      assert.equal(task.reloadSurvival?.hostPid, process.pid);
+      assert.equal(task.reloadSurvival?.sessionId, h.ctx.sessionId);
+      assert.equal(task.reloadSurvival?.cwdRealpath, realpathSync(h.cwd));
+      assert.equal(task.reloadSurvival?.childPid, child.pid);
+      assert.equal(task.reloadSurvival?.leaseGeneration, 1);
+      assert.equal(task.reloadSurvival?.handoffCount, 0);
+      assert.match(task.reloadSurvival?.launchNonce ?? '', /^[0-9a-f]{32}$/u);
+      assert.equal(task.reloadSurvival?.completionId, `${task.id}:1`);
+      assert.equal(task.telemetryWrapped, undefined, 'opted ordinary work never creates a Pi wrapper');
+      assert.equal(hub.isCurrentLease(lease), true);
+
+      child.writeStdout('owner-output\n');
+      child.close(0, null);
+      await waitFor(() => task.status === 'completed', 'owner-backed completion');
+      assert.equal(task.exitCode, 0);
+      assert.equal(task.reloadExecution?.closeObservation?.code, 0);
+      assert.match(await readFile(task.outputAbsPath, 'utf8'), /owner-output/u);
+      await waitFor(async () => {
+        const metadata = await readJsonEventually(task.metadataAbsPath);
+        return metadata['status'] === 'completed';
+      }, 'owner metadata completion');
+      const metadata = await readJsonEventually(task.metadataAbsPath);
+      assert.equal(metadata['surviveReload'], true);
+      assert.deepEqual(metadata['reloadSurvival'], task.reloadSurvival);
+    } finally {
+      h.registry.releaseReloadActivation(lease);
+      h.registry.setShuttingDown(true);
+      for (const { child } of h.children) {
+        if (child.listenerCount('close') > 0) child.close(null, 'SIGTERM');
+      }
+      await cleanup(h.root);
+    }
+  });
+
+  void it('carries the R1 publication ledger across handoff with one cumulative three-attempt budget', async () => {
+    const hub = createReloadShellOwnerHubForTests({ handoffTimeoutMs: 1000 });
+    let oldAttempts = 0;
+    const h = await createHarness({
+      reloadShellOwner: hub,
+      publishTerminal: () => {
+        oldAttempts += 1;
+        throw new Error('old activation listener failure');
+      },
+    });
+    const identity = makeReloadShellIdentity(h.ctx.sessionId ?? '', realpathSync(h.cwd));
+    const firstClaim = hub.beginActivation(identity, 'startup', '9'.repeat(32));
+    const firstAdapter = await h.registry.stageReloadActivation(firstClaim);
+    const firstLease = hub.commitActivation(firstClaim, firstAdapter);
+    let freshLease: ReloadShellActivationLeaseV1 | undefined;
+    let fresh: BackgroundTaskRegistry | undefined;
+    try {
+      const task = await h.registry.startTask(h.ctx, 'node publication-owner.js', {
+        name: 'Publication owner',
+        isAgent: false,
+        surviveReload: true,
+        notifyOnCompletion: false,
+        triggerOnCompletion: false,
+      });
+      const child = lastSpawn(h).child;
+      child.close(0, null);
+      await waitFor(
+        () => task.terminalPublishAttempts === 1 && task.terminalPublishRetryHandle !== undefined,
+        'first owner publication retry',
+      );
+      assert.equal(task.terminalPublicationState, 'pending');
+      h.registry.prepareReloadHandoff(firstLease);
+      assert.equal(task.terminalPublishRetryHandle, undefined);
+
+      const freshPublications: BgTaskSnapshot[] = [];
+      fresh = new BackgroundTaskRegistry({
+        reloadShellOwner: hub,
+        sendCompletionNotification() {},
+        publishTerminal: (terminal) => freshPublications.push(terminal),
+        spawn: () => {
+          throw new Error('fresh registry must not respawn terminal execution');
+        },
+      });
+      const claim = hub.beginActivation(identity, 'reload', 'a'.repeat(31) + 'b');
+      const adapter = await fresh.stageReloadActivation(claim);
+      freshLease = hub.commitActivation(claim, adapter);
+      await waitFor(() => task.terminalPublicationState === 'delivered', 'fresh publication');
+      assert.equal(oldAttempts, 1);
+      assert.equal(task.terminalPublishAttempts, 2);
+      assert.equal(task.terminalPublished, true);
+      assert.equal(freshPublications.filter((entry) => entry.id === task.id).length, 1);
+      await waitFor(() => task.reloadExecution === undefined, 'published owner release');
+    } finally {
+      if (fresh !== undefined && freshLease !== undefined) {
+        fresh.releaseReloadActivation(freshLease);
+        fresh.setShuttingDown(true);
+      }
+      h.registry.setShuttingDown(true);
+      await cleanup(h.root);
+    }
+  });
+
+  void it('imports the same execution into a fresh registry and keeps one cumulative output cap', async () => {
+    const hub = createReloadShellOwnerHubForTests({ handoffTimeoutMs: 1000 });
+    let child: FakeChild | undefined;
+    let groupPresent = true;
+    const killProcess = (_pid: number, signal?: NodeJS.Signals | number): boolean => {
+      if (signal === 0) {
+        if (groupPresent) return true;
+        throw errnoError('ESRCH', 'group gone');
+      }
+      if (signal === 'SIGTERM' || signal === 'SIGKILL') {
+        groupPresent = false;
+        queueMicrotask(() => child?.close(null, signal));
+        return true;
+      }
+      return true;
+    };
+    const h = await createHarness({
+      reloadShellOwner: hub,
+      maxOutputBytes: 10,
+      killGraceMs: 10,
+      stopWaitMs: 200,
+      killProcess,
+    });
+    const identity = makeReloadShellIdentity(h.ctx.sessionId ?? '', realpathSync(h.cwd));
+    const initialClaim = hub.beginActivation(identity, 'startup', 'c'.repeat(32));
+    const initialAdapter = await h.registry.stageReloadActivation(initialClaim);
+    const initialLease = hub.commitActivation(initialClaim, initialAdapter);
+    let freshLease: ReloadShellActivationLeaseV1 | undefined;
+    let fresh: BackgroundTaskRegistry | undefined;
+    try {
+      const task = await h.registry.startTask(h.ctx, 'node cap-owner.js', {
+        name: 'Cumulative cap',
+        isAgent: false,
+        surviveReload: true,
+        notifyOnCompletion: false,
+        triggerOnCompletion: false,
+      });
+      child = lastSpawn(h).child;
+      child.writeStdout('123456');
+      assert.equal(task.bytesWritten, 6);
+      const execution = task.reloadExecution;
+      assert.ok(execution);
+      h.registry.prepareReloadHandoff(initialLease);
+
+      const published: BgTaskSnapshot[] = [];
+      fresh = new BackgroundTaskRegistry({
+        reloadShellOwner: hub,
+        maxOutputBytes: 10,
+        killGraceMs: 10,
+        stopWaitMs: 200,
+        killProcess,
+        platform: process.platform,
+        env: process.env,
+        sendCompletionNotification() {},
+        publishTerminal: (terminal) => published.push(terminal),
+        spawn: () => {
+          throw new Error('fresh registry must not respawn a claimed execution');
+        },
+      });
+      const claim = hub.beginActivation(identity, 'reload', 'd'.repeat(32));
+      const adapter = await fresh.stageReloadActivation(claim);
+      freshLease = hub.commitActivation(claim, adapter);
+      assert.equal(fresh.resolveTask(task.id), task);
+      assert.equal(task.reloadExecution, execution);
+      assert.equal(task.bytesWritten, 6);
+
+      child.writeStdout('789012');
+      await waitFor(() => task.status === 'failed', 'cumulative cap terminal');
+      assert.equal(task.capExceeded, true);
+      assert.match(task.error ?? '', /Output exceeded cap of 10B/u);
+      assert.equal(task.reloadSurvival?.outputCapBytes, 10);
+      assert.equal(task.reloadSurvival?.handoffCount, 1);
+      assert.equal(published.filter((entry) => entry.id === task.id).length, 1);
+      const logs = await fresh.getTaskLogs(task, 1024, true);
+      assert.match(logs.text, /1234567890/u);
+      assert.doesNotMatch(logs.text, /123456789012/u);
+      await waitFor(() => task.reloadExecution === undefined, 'cap owner release');
+    } finally {
+      if (fresh !== undefined && freshLease !== undefined) {
+        fresh.releaseReloadActivation(freshLease);
+        fresh.setShuttingDown(true);
+      }
+      h.registry.setShuttingDown(true);
+      child?.close(null, 'SIGTERM');
+      await cleanup(h.root);
+    }
+  });
+
+  void it('retains injected Windows taskkill tree authority across a registry handoff', async () => {
+    const hub = createReloadShellOwnerHubForTests({ handoffTimeoutMs: 1000 });
+    const phases: WindowsKillPhase[] = [];
+    let child: FakeChild | undefined;
+    let softAborted = 0;
+    const killTree = async (
+      _pid: number,
+      phase: WindowsKillPhase,
+      signal?: AbortSignal,
+    ): Promise<TaskkillOutcome> => {
+      phases.push(phase);
+      if (phase === 'terminate') {
+        return new Promise<TaskkillOutcome>((resolve) => {
+          signal?.addEventListener(
+            'abort',
+            () => {
+              softAborted += 1;
+              resolve(taskkillOutcome(null, 'aborted'));
+            },
+            { once: true },
+          );
+        });
+      }
+      queueMicrotask(() => child?.close(null, 'SIGTERM'));
+      return taskkillOutcome(0);
+    };
+    const h = await createHarness({
+      reloadShellOwner: hub,
+      platform: 'win32',
+      env: { SystemRoot: 'C:\\Windows', ComSpec: 'cmd.exe' },
+      killTree,
+      killGraceMs: 10,
+      stopWaitMs: 300,
+    });
+    const identity = makeReloadShellIdentity(h.ctx.sessionId ?? '', realpathSync(h.cwd));
+    const firstClaim = hub.beginActivation(identity, 'startup', 'e'.repeat(32));
+    const firstAdapter = await h.registry.stageReloadActivation(firstClaim);
+    const firstLease = hub.commitActivation(firstClaim, firstAdapter);
+    let freshLease: ReloadShellActivationLeaseV1 | undefined;
+    let fresh: BackgroundTaskRegistry | undefined;
+    try {
+      const task = await h.registry.startTask(h.ctx, 'echo windows-owner', {
+        name: 'Windows owner',
+        isAgent: false,
+        surviveReload: true,
+        notifyOnCompletion: false,
+        triggerOnCompletion: false,
+      });
+      child = lastSpawn(h).child;
+      const originalExecution = task.reloadExecution;
+      h.registry.prepareReloadHandoff(firstLease);
+
+      fresh = new BackgroundTaskRegistry({
+        reloadShellOwner: hub,
+        platform: 'win32',
+        env: { SystemRoot: 'C:\\Windows', ComSpec: 'cmd.exe' },
+        killTree,
+        killGraceMs: 10,
+        stopWaitMs: 300,
+        sendCompletionNotification() {},
+        spawn: () => {
+          throw new Error('claimed Windows execution must not respawn');
+        },
+      });
+      const claim = hub.beginActivation(identity, 'reload', 'f'.repeat(32));
+      const adapter = await fresh.stageReloadActivation(claim);
+      freshLease = hub.commitActivation(claim, adapter);
+      assert.equal(task.reloadExecution, originalExecution);
+      assert.equal(task.reloadExecution?.child, child);
+
+      await fresh.stopTask(task, 'user');
+      assert.equal(task.status, 'killed');
+      assert.deepEqual(phases, ['terminate', 'force']);
+      assert.equal(softAborted, 1);
+      assert.deepEqual(child.killCalls, [], 'Windows owner must never fall back to root-only child.kill');
+      await waitFor(() => task.reloadExecution === undefined, 'Windows owner release');
+    } finally {
+      if (fresh !== undefined && freshLease !== undefined) {
+        fresh.releaseReloadActivation(freshLease);
+        fresh.setShuttingDown(true);
+      }
+      h.registry.setShuttingDown(true);
+      child?.close(null, 'SIGTERM');
+      await cleanup(h.root);
+    }
+  });
+
+  void it('uses the short no-claim seam to stop and reap a real opted process without adoption', async () => {
+    if (process.platform === 'win32') return;
+    const hub = createReloadShellOwnerHubForTests({
+      handoffTimeoutMs: 40,
+      logger: { error() {} },
+    });
+    const h = await createHarness({
+      reloadShellOwner: hub,
+      spawn: (command, args, options) => spawn(command, args, options),
+      killGraceMs: 20,
+      stopWaitMs: 500,
+    });
+    const identity = makeReloadShellIdentity(h.ctx.sessionId ?? '', realpathSync(h.cwd));
+    const claim = hub.beginActivation(identity, 'startup', 'b'.repeat(32));
+    const adapter = await h.registry.stageReloadActivation(claim);
+    const lease = hub.commitActivation(claim, adapter);
+    let pid: number | undefined;
+    try {
+      const task = await h.registry.startTask(
+        h.ctx,
+        `node -e ${JSON.stringify('setInterval(() => {}, 1000)')}`,
+        {
+          name: 'No claimant',
+          isAgent: false,
+          surviveReload: true,
+          notifyOnCompletion: false,
+          triggerOnCompletion: false,
+        },
+      );
+      pid = task.pid;
+      assert.equal(typeof pid, 'number');
+      const execution = task.reloadExecution;
+      assert.ok(execution);
+      h.registry.prepareReloadHandoff(lease);
+      await waitFor(() => execution.phase === 'released', 'orphan owner release', 2000);
+      assert.equal(task.status, 'failed');
+      assert.match(task.error ?? '', /pi_bg_reload_handoff_expired/u);
+      assert.equal(task.terminalPublicationState, 'abandoned');
+      assert.equal(task.terminalPublicationAbandonReason, 'reload_handoff_expired');
+      if (pid !== undefined) assert.equal(pidExists(pid), false);
+      assert.deepEqual(inspectReloadShellOwnerForTests(hub, identity).executions, []);
+    } finally {
+      if (pid !== undefined && pidExists(pid)) {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          // Failure-only rescue; passing assertions above require this to be unnecessary.
+        }
+      }
+      h.registry.setShuttingDown(true);
+      await cleanup(h.root);
+    }
+  });
+
+  void it('rejects survival-shaped managed, delegate, and attested registry requests', async () => {
+    const h = await createHarness();
+    const managedCompletion = Promise.resolve();
+    try {
+      await assert.rejects(
+        () =>
+          h.registry.startManagedTask(
+            h.ctx,
+            Object.assign(
+              {
+                id: 'reason-survival-refusal00000000000000',
+                name: 'managed refusal',
+                command: 'fusion_reason',
+                isAgent: true,
+                completion: managedCompletion,
+                cancel() {},
+                notifyOnCompletion: false,
+                triggerOnCompletion: false,
+                fusion: {
+                  runId: 'reason-survival-refusal00000000000000',
+                  workflow: 'reason' as const,
+                  artifactDir: '.pi/fusion/refusal',
+                  artifactDirAbs: join(h.cwd, '.pi', 'fusion', 'refusal'),
+                  state: 'initializing',
+                  usageDelivered: false,
+                },
+              },
+              { surviveReload: true },
+            ),
+          ),
+        /pi_bg_survive_reload_unsupported_task_kind/u,
+      );
+      await assert.rejects(
+        () =>
+          h.registry.startDelegateTask(
+            h.ctx,
+            Object.assign(
+              {
+                name: 'delegate refusal',
+                argv: [],
+                stdinBytes: Buffer.from('seed'),
+                env: {},
+                facts: {
+                  taskId: 'delegate-survival-refusal',
+                  launchNonce: 'f'.repeat(32),
+                  artifactDir: '.pi/delegate/refusal',
+                  artifactDirAbs: join(h.cwd, '.pi', 'delegate', 'refusal'),
+                  seedSha256: '0'.repeat(64),
+                  childSessionId: 'child-refusal',
+                  route: { provider: 'test', model: 'test', qualifiedId: 'test/test' },
+                  budget: Object.create(null),
+                  extensionMode: 'isolated' as const,
+                  autoDeliver: 'never' as const,
+                },
+                notifyOnCompletion: false,
+                triggerOnCompletion: false,
+              },
+              { surviveReload: true },
+            ),
+          ),
+        /pi_bg_survive_reload_unsupported_task_kind/u,
+      );
+      await assert.rejects(
+        () =>
+          h.registry.startAttestedPiTask(
+            h.ctx,
+            Object.assign(
+              {
+                name: 'attested refusal',
+                provider: 'openai-codex',
+                model: 'gpt-test',
+                prompt: 'no launch',
+                reportPath: 'report.md',
+              },
+              { surviveReload: true },
+            ),
+          ),
+        /pi_bg_survive_reload_unsupported_task_kind/u,
+      );
+      assert.equal(h.children.length, 0);
+      assert.deepEqual(await filesBelow(join(h.cwd, '.pi')), []);
+    } finally {
+      h.registry.setShuttingDown(true);
+      await cleanup(h.root);
+    }
+  });
+
   void it('closes and drains every starter admission before late insertion or spawn', async () => {
     const h = await createHarness({ modelRegistry: oauthRegistry() });
     const releaseEnsure = deferred<void>();
