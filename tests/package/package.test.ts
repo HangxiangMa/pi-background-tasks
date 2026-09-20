@@ -1391,6 +1391,57 @@ void describe('package', () => {
     );
   });
 
+  void it('file URL guard retains explicit bases for possibly relative first inputs', () => {
+    const fileBaseCases = [
+      'declare const relativeName: string;',
+      'declare const fixtureName: string;',
+      'declare const condition: boolean;',
+      'const inline = new URL(relativeName, import.meta.url).pathname;',
+      "const literalBase = new URL(relativeName, 'file:///C:/pkg/module.ts').pathname;",
+      "const fileBaseObject = new URL('file:///C:/pkg/module.ts');",
+      'const declared = new URL(relativeName, fileBaseObject);',
+      'const declaredPath = declared.pathname;',
+      "let assigned = new URL('https://example.com/start');",
+      'assigned = new URL(`./fixtures/${fixtureName}.json`, `file:///C:/pkg/module.ts`);',
+      'const assignedPath = assigned.pathname;',
+      'const parentTemplate = new URL(`../fixtures/${fixtureName}.json`, import.meta.url).pathname;',
+      "const mixedFirst = condition ? 'https://example.com/request/path' : relativeName;",
+      'const mixedPath = new URL(mixedFirst, import.meta.url).pathname;',
+      "const absoluteFileObject = new URL('file:///D:/work/object.ts');",
+      "new URL(absoluteFileObject, 'https://example.com/base').pathname;",
+      "new URL('file:///E:/work/literal.ts', 'https://example.com/base').pathname;",
+      "const fileHost = 'server';",
+      'new URL(`file://${fileHost}/share/template.ts`, `https://example.com/base`).pathname;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('possible-relative-file-bases.ts', fileBaseCases).map(
+        (violation) => violation.line,
+      ),
+      [4, 5, 8, 11, 12, 14, 16, 17, 19],
+    );
+
+    const httpsBaseControls = [
+      'declare const relativeName: string;',
+      'declare const fixtureName: string;',
+      'declare const condition: boolean;',
+      "new URL(relativeName, 'https://example.com/base').pathname;",
+      'new URL(`./fixtures/${fixtureName}.json`, `https://example.com/base`).pathname;',
+      "const httpsBaseObject = new URL('https://example.com/base');",
+      'new URL(`../fixtures/${fixtureName}.json`, httpsBaseObject).pathname;',
+      "const mixedFirst = condition ? 'https://example.com/request/path' : relativeName;",
+      'new URL(mixedFirst, httpsBaseObject).pathname;',
+      "const absoluteHttpsObject = new URL('https://example.com/object');",
+      'new URL(absoluteHttpsObject, import.meta.url).pathname;',
+      "new URL('https://example.com/literal', import.meta.url).pathname;",
+      "const httpsHost = 'example.com';",
+      'new URL(`https://${httpsHost}/template`, import.meta.url).pathname;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('possible-relative-https-bases.ts', httpsBaseControls),
+      [],
+    );
+  });
+
   void it('file URL guard follows WHATWG preprocessing for static inputs', () => {
     const fileCases = [
       "const host = 'server';",
@@ -1430,7 +1481,7 @@ void describe('package', () => {
       findFileUrlPathnameViolations('whatwg-dynamic-boundary.ts', dynamicCases).map(
         (violation) => violation.line,
       ),
-      [4],
+      [4, 5],
     );
 
     const runtimeHost = 'server';
@@ -1795,6 +1846,44 @@ void describe('package', () => {
       findFileUrlPathnameViolations('for-of-and-global-url-controls.ts', controls),
       [],
     );
+  });
+
+  void it('file URL guard distinguishes uppercase constructor and lowercase meta keys', () => {
+    const hazards = [
+      "new globalThis.URL('file:///C:/work/dot.ts').pathname;",
+      "new globalThis['URL']('file:///C:/work/bracket.ts').pathname;",
+      "const constructorKey = 'URL' as const;",
+      "new globalThis[constructorKey]('file:///C:/work/key.ts').pathname;",
+      "const importMetaKey = 'url' as const;",
+      "new URL('./child.ts', import.meta[importMetaKey]).pathname;",
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('static-url-keys.ts', hazards).map(
+        (violation) => violation.line,
+      ),
+      [1, 2, 4, 6],
+    );
+
+    const controls = [
+      "class FakeURL { readonly pathname = 'fake'; constructor(_value: string) {} }",
+      'declare global {',
+      '  var url: typeof FakeURL;',
+      '  interface ImportMeta { readonly URL: string; }',
+      '}',
+      "const lowercaseConstructorKey = 'url' as const;",
+      "new globalThis[lowercaseConstructorKey]('file:///C:/not-native.ts').pathname;",
+      "const uppercaseMetaKey = 'URL' as const;",
+      "new URL('./child.ts', import.meta[uppercaseMetaKey]).pathname;",
+      'function parameterShadow(globalThis: { URL: typeof FakeURL }): string {',
+      "  return new globalThis['URL']('file:///C:/parameter.ts').pathname;",
+      '}',
+      'function localShadow(): string {',
+      '  const globalThis = { URL: FakeURL };',
+      "  return new globalThis['URL']('file:///C:/local.ts').pathname;",
+      '}',
+      'export {};',
+    ].join('\n');
+    assert.deepEqual(findFileUrlPathnameViolations('static-url-key-controls.ts', controls), []);
   });
 
   void it('file URL guard uses feasible values at each pathname read', () => {

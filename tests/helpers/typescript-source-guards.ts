@@ -230,7 +230,7 @@ const VALUE_STRING_FILE = 1 << 1;
 const VALUE_STRING_NON_FILE_ABSOLUTE = 1 << 2;
 const VALUE_STRING_RELATIVE = 1 << 3;
 const VALUE_STATIC_PATHNAME = 1 << 4;
-const VALUE_STATIC_URL = 1 << 5;
+const VALUE_STATIC_IMPORT_META_URL = 1 << 5;
 const VALUE_URL_FILE = 1 << 6;
 const VALUE_URL_NON_FILE = 1 << 7;
 const VALUE_URL_UNKNOWN = 1 << 8;
@@ -238,6 +238,7 @@ const VALUE_IMPORT_META = 1 << 9;
 const VALUE_URL_CONSTRUCTOR = 1 << 10;
 const VALUE_PATH_TO_FILE_URL = 1 << 11;
 const VALUE_NULLISH = 1 << 12;
+const VALUE_STATIC_URL_CONSTRUCTOR = 1 << 13;
 
 type AbstractValue = number;
 type FlowState = Map<ts.Symbol, AbstractValue>;
@@ -297,16 +298,22 @@ function staticStringValue(text: string): AbstractValue {
         ? VALUE_STRING_RELATIVE
         : VALUE_UNKNOWN;
   if (text === 'pathname') value |= VALUE_STATIC_PATHNAME;
-  if (text === 'url') value |= VALUE_STATIC_URL;
+  if (text === 'url') value |= VALUE_STATIC_IMPORT_META_URL;
+  if (text === 'URL') value |= VALUE_STATIC_URL_CONSTRUCTOR;
   return value;
 }
 
 function templateValue(expression: ts.TemplateExpression): AbstractValue {
   // An arbitrary interpolation can introduce a scheme. Classify a template as
-  // absolute only when its static head already makes WHATWG parsing absolute;
-  // otherwise retain unknown provenance rather than inventing a relative URL.
-  const protocol = parsedProtocol(`${expression.head.text}pi-template.invalid`);
-  return protocol === undefined ? VALUE_UNKNOWN : valueForProtocol(protocol);
+  // absolute only when its static head already makes WHATWG parsing absolute.
+  // Exact ./ and ../ heads remain relative regardless of the interpolation;
+  // every other dynamic head stays unknown.
+  const head = expression.head.text;
+  const protocol = parsedProtocol(`${head}pi-template.invalid`);
+  if (protocol !== undefined) return valueForProtocol(protocol);
+  return head.startsWith('./') || head.startsWith('../')
+    ? VALUE_STRING_RELATIVE
+    : VALUE_UNKNOWN;
 }
 
 function isImportedBinding(
@@ -420,27 +427,34 @@ function newUrlValue(
   expression: ts.NewExpression,
   state: FlowState,
   analysis: FileUrlAnalysis,
+  unknownFirstMayUseBase: boolean,
 ): AbstractValue {
   const first = expression.arguments?.[0];
   if (first === undefined) return VALUE_URL_UNKNOWN;
   const firstValue = expressionValue(first, state, analysis);
   let result = 0;
 
-  // URL objects and statically absolute strings are already absolute. WHATWG URL
-  // ignores the base for those alternatives, so only a known relative string uses it.
+  // URL objects and statically absolute strings are already absolute, so WHATWG URL
+  // ignores the base for those alternatives. An unknown string remains unknown but
+  // may also be relative, so an explicit base contributes only possible provenance.
   if ((firstValue & VALUE_URL_FILE) !== 0) result |= VALUE_URL_FILE;
   if ((firstValue & VALUE_URL_NON_FILE) !== 0) result |= VALUE_URL_NON_FILE;
   if ((firstValue & VALUE_URL_UNKNOWN) !== 0) result |= VALUE_URL_UNKNOWN;
   if ((firstValue & VALUE_STRING_FILE) !== 0) result |= VALUE_URL_FILE;
   if ((firstValue & VALUE_STRING_NON_FILE_ABSOLUTE) !== 0) result |= VALUE_URL_NON_FILE;
+  const base = expression.arguments?.[1];
   if ((firstValue & VALUE_STRING_RELATIVE) !== 0) {
-    const base = expression.arguments?.[1];
     result |=
       base === undefined
         ? VALUE_URL_UNKNOWN
         : baseUrlValue(expressionValue(base, state, analysis));
   }
-  if ((firstValue & VALUE_UNKNOWN) !== 0) result |= VALUE_URL_UNKNOWN;
+  if ((firstValue & VALUE_UNKNOWN) !== 0) {
+    result |= VALUE_URL_UNKNOWN;
+    if (unknownFirstMayUseBase && base !== undefined) {
+      result |= baseUrlValue(expressionValue(base, state, analysis));
+    }
+  }
   return result === 0 ? VALUE_URL_UNKNOWN : result;
 }
 
@@ -448,6 +462,7 @@ function expressionValue(
   expression: ts.Expression,
   state: FlowState,
   analysis: FileUrlAnalysis,
+  unknownFirstMayUseBase = true,
 ): AbstractValue {
   const current = unwrapForProvenance(expression);
   if (ts.isStringLiteral(current) || ts.isNoSubstitutionTemplateLiteral(current)) {
@@ -475,21 +490,31 @@ function expressionValue(
       current.name.text === 'url' &&
       (expressionValue(current.expression, state, analysis) & VALUE_IMPORT_META) !== 0
     ) {
-      return VALUE_STRING_FILE | VALUE_STATIC_URL;
+      return VALUE_STRING_FILE | VALUE_STATIC_IMPORT_META_URL;
     }
     return VALUE_UNKNOWN;
   }
   if (ts.isElementAccessExpression(current)) {
     if (
-      keyValueHas(current.argumentExpression, VALUE_STATIC_URL, state, analysis) &&
+      keyValueHas(
+        current.argumentExpression,
+        VALUE_STATIC_IMPORT_META_URL,
+        state,
+        analysis,
+      ) &&
       (expressionValue(current.expression, state, analysis) & VALUE_IMPORT_META) !== 0
     ) {
-      return VALUE_STRING_FILE | VALUE_STATIC_URL;
+      return VALUE_STRING_FILE | VALUE_STATIC_IMPORT_META_URL;
     }
     if (
       (isNodeUrlNamespace(current.expression, analysis.checker) ||
         isUnshadowedGlobalThis(current.expression, analysis.checker)) &&
-      keyValueHas(current.argumentExpression, VALUE_STATIC_URL, state, analysis)
+      keyValueHas(
+        current.argumentExpression,
+        VALUE_STATIC_URL_CONSTRUCTOR,
+        state,
+        analysis,
+      )
     ) {
       return VALUE_URL_CONSTRUCTOR;
     }
@@ -497,7 +522,7 @@ function expressionValue(
   }
   if (ts.isNewExpression(current)) {
     return (expressionValue(current.expression, state, analysis) & VALUE_URL_CONSTRUCTOR) !== 0
-      ? newUrlValue(current, state, analysis)
+      ? newUrlValue(current, state, analysis, unknownFirstMayUseBase)
       : VALUE_UNKNOWN;
   }
   if (ts.isCallExpression(current)) {
@@ -965,6 +990,7 @@ function iterableElementValue(
   expression: ts.Expression,
   state: FlowState,
   analysis: FileUrlAnalysis,
+  unknownFirstMayUseBase = true,
 ): AbstractValue {
   const current = unwrapForProvenance(expression);
   if (!ts.isArrayLiteralExpression(current)) return VALUE_UNKNOWN;
@@ -973,7 +999,7 @@ function iterableElementValue(
     if (ts.isOmittedExpression(element)) continue;
     value |= ts.isSpreadElement(element)
       ? VALUE_UNKNOWN
-      : expressionValue(element, state, analysis);
+      : expressionValue(element, state, analysis, unknownFirstMayUseBase);
   }
   return value === 0 ? VALUE_UNKNOWN : value;
 }
@@ -1020,13 +1046,13 @@ function scanIntrinsicFileUrlHazards(analysis: FileUrlAnalysis): void {
     if (
       ts.isPropertyAccessExpression(node) &&
       node.name.text === 'pathname' &&
-      (expressionValue(node.expression, emptyState, analysis) & VALUE_URL_FILE) !== 0
+      (expressionValue(node.expression, emptyState, analysis, false) & VALUE_URL_FILE) !== 0
     ) {
       addViolation(node, analysis);
     } else if (
       ts.isElementAccessExpression(node) &&
       keyValueHas(node.argumentExpression, VALUE_STATIC_PATHNAME, emptyState, analysis) &&
-      (expressionValue(node.expression, emptyState, analysis) & VALUE_URL_FILE) !== 0
+      (expressionValue(node.expression, emptyState, analysis, false) & VALUE_URL_FILE) !== 0
     ) {
       addViolation(node, analysis);
     } else if (
@@ -1036,7 +1062,7 @@ function scanIntrinsicFileUrlHazards(analysis: FileUrlAnalysis): void {
     ) {
       checkBindingPattern(
         node.name,
-        expressionValue(node.initializer, emptyState, analysis),
+        expressionValue(node.initializer, emptyState, analysis, false),
         emptyState,
         analysis,
       );
@@ -1048,13 +1074,13 @@ function scanIntrinsicFileUrlHazards(analysis: FileUrlAnalysis): void {
       if (ts.isObjectLiteralExpression(left)) {
         checkObjectAssignmentPattern(
           left,
-          expressionValue(node.right, emptyState, analysis),
+          expressionValue(node.right, emptyState, analysis, false),
           emptyState,
           analysis,
         );
       }
     } else if (ts.isForOfStatement(node)) {
-      const value = iterableElementValue(node.expression, emptyState, analysis);
+      const value = iterableElementValue(node.expression, emptyState, analysis, false);
       if (ts.isVariableDeclarationList(node.initializer)) {
         for (const declaration of node.initializer.declarations) {
           if (ts.isObjectBindingPattern(declaration.name)) {
