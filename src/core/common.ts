@@ -13,6 +13,14 @@ export type TaskStatus = (typeof TASK_STATUS_VALUES)[number];
 export type TerminalTaskStatus = (typeof TERMINAL_TASK_STATUS_VALUES)[number];
 export type KillKind = 'user' | 'timeout' | 'output_cap' | 'shutdown';
 
+export type TerminalPublicationState = 'pending' | 'delivered' | 'abandoned';
+export type TerminalPublicationAbandonReason =
+  | 'registry_shutdown'
+  | 'publisher_closed'
+  | 'gate_rejected'
+  | 'retry_exhausted'
+  | 'retention_limit';
+
 export type JsonObject = Readonly<Record<PropertyKey, unknown>>;
 
 export interface TaskContextUsage {
@@ -130,6 +138,10 @@ export interface BgTask extends Omit<BgTaskSnapshot, 'name'> {
   wrapperAbsPath?: string | undefined;
   attestationAbsPath?: string | undefined;
   child?: BackgroundTaskChildProcess | undefined;
+  /** Immutable in-memory ownership captured from a detached POSIX spawn; never restored from metadata. */
+  ownedPosixProcessGroupId?: number | undefined;
+  /** One-way latch preventing any later signal after group authority is released. */
+  posixProcessGroupSignalAuthorityReleased?: boolean | undefined;
   stream?: WriteStream | undefined;
   timeoutHandle?: NodeJS.Timeout | undefined;
   killKind?: KillKind | undefined;
@@ -137,8 +149,14 @@ export interface BgTask extends Omit<BgTaskSnapshot, 'name'> {
   killEscalationTimer?: NodeJS.Timeout | undefined;
   capExceeded?: boolean | undefined;
   finalized?: boolean | undefined;
-  terminalPublished?: boolean | undefined;
+  /** True only after the terminal EventBus emitter returns successfully; abandonment is never delivery. */
+  terminalPublished: boolean;
+  terminalPublicationState: TerminalPublicationState;
+  terminalPublicationAbandonReason?: TerminalPublicationAbandonReason | undefined;
+  terminalPublishAttempts: number;
   terminalPublishInFlight?: boolean | undefined;
+  /** True only while the synchronous terminal emitter itself is on the stack. */
+  terminalEmitInFlight?: boolean | undefined;
   terminalPublishRetryHandle?: NodeJS.Timeout | undefined;
   /** Optional protocol barrier used by EventBus run requests so early child exits cannot publish before the run response is observable. */
   terminalPublicationGate?: Promise<void> | undefined;

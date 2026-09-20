@@ -210,6 +210,8 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   let statusInterval: NodeJS.Timeout | undefined;
   let latestKnownVersion: string | undefined;
   let updateCheckStarted = false;
+  let disposed = false;
+  let shutdownCleanupStarted = false;
 
   const registry = new BackgroundTaskRegistry({
     onChange: () => {
@@ -227,6 +229,28 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     registry,
     getContext: () => currentCtx,
     isShuttingDown: () => registry.isShuttingDown(),
+  });
+
+  const beginSessionShutdown = (): void => {
+    if (!disposed) {
+      disposed = true;
+      registry.setShuttingDown(true);
+      eventService.close();
+    }
+    // Teardown remains active on repeated calls so even a handle assigned by a
+    // racing continuation is still disposed rather than hidden by idempotence.
+    currentCtx = undefined;
+    if (statusInterval !== undefined) {
+      clearInterval(statusInterval);
+      statusInterval = undefined;
+    }
+  };
+
+  // Register the synchronous publication barrier before managed-workflow
+  // shutdown handlers. Fusion may settle while its own cleanup is awaited; the
+  // old registry must already be closed before that terminal continuation runs.
+  pi.on('session_shutdown', () => {
+    beginSessionShutdown();
   });
 
   registerFusionExtension(pi, {
@@ -449,7 +473,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   );
 
   async function scheduleUpdateCheck(ctx: ExtensionContext): Promise<void> {
-    if (updateCheckStarted) return;
+    if (disposed || updateCheckStarted) return;
     updateCheckStarted = true;
     const env = process.env;
     if (env['PI_BG_DISABLE_UPDATE_CHECK'] === '1') return;
@@ -464,6 +488,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     const registryUrl = env['PI_BG_REGISTRY_URL'];
     if (registryUrl) options.registryUrl = registryUrl;
     const latest = await fetchLatestVersion(options);
+    if (disposed) return;
     if (latest && isNewerVersion(latest, PACKAGE_VERSION)) {
       latestKnownVersion = latest;
       updateUi(ctx);
@@ -471,26 +496,38 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   }
 
   pi.on('session_start', async (_event, ctx) => {
+    // Pi replacement binds a fresh extension instance. Never revive this old
+    // activation if a late lifecycle dispatch reaches it after shutdown.
+    if (disposed) return;
     registry.setShuttingDown(false);
     currentCtx = ctx;
     await registry.ensureRuntimeDir(ctx);
+    if (disposed) return;
     updateUi(ctx);
-    if (statusInterval) clearInterval(statusInterval);
-    statusInterval = setInterval(() => {
+    if (disposed) return;
+    if (statusInterval !== undefined) clearInterval(statusInterval);
+    if (disposed) return;
+    const nextStatusInterval = setInterval(() => {
       updateUi();
     }, STATUS_INTERVAL_MS);
+    if (disposed) {
+      clearInterval(nextStatusInterval);
+      return;
+    }
+    statusInterval = nextStatusInterval;
     // One-shot, non-blocking: never awaited on the session-start path or the status tick.
-    void scheduleUpdateCheck(ctx);
+    if (!disposed) void scheduleUpdateCheck(ctx);
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {
-    registry.setShuttingDown(true);
-    currentCtx = undefined;
-    if (statusInterval) {
-      clearInterval(statusInterval);
-      statusInterval = undefined;
-    }
+    beginSessionShutdown();
+    if (shutdownCleanupStarted) return;
+    shutdownCleanupStarted = true;
     try {
+      // Admission closure aborts cooperative preflight and the drain retains
+      // ownership until subprocess/file/managed cleanup settles. Any admitted
+      // child is inserted synchronously before spawn and is visible below.
+      await registry.waitForTaskAdmissions();
       const running = registry.allTasks().filter((task) => task.status === 'running');
       if (running.length === 0) return;
 

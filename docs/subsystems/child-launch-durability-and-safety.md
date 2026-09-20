@@ -47,10 +47,12 @@ Delegate seed bytes are delivered over stdin, not argv, so large seeds do not re
 
 `durable-fs.ts` provides two public operations:
 
-- `writeFileDurable(path, data)`: open the target once with `w`, write, `sync()`, close.
-- `replaceFileDurable(path, data)`: create a task-owned temp file with exclusive `wx` at `0o600`, write, `sync()`, close, rename over the target, then directory-sync on non-Windows.
+- `writeFileDurable(path, data, { signal? })`: open the target once with `w`, write, `sync()`, close.
+- `replaceFileDurable(path, data, { signal? })`: create a task-owned temp file with exclusive `wx` at `0o600`, write, `sync()`, close, rename over the target, then directory-sync on non-Windows.
 
 Invariant: a pathname is never reopened merely to fsync it. Sync failures are fatal and surfaced as `DurableFileError`; cleanup failures are retained in the error object instead of hiding the primary failure.
+
+Cancellation is cooperative between filesystem phases, not a claim that Node can interrupt every in-flight kernel syscall. Once a handle is opened, cancellation waits for the current operation and handle close. Before rename it removes the owned temp and never commits it. If cancellation overlaps a successful rename, directory sync still completes before `DurableFileCancellationError` reports `renameCompleted: true`; the caller therefore knows the replacement may already be visible and can perform its owning cleanup.
 
 Temp ownership matters: if exclusive temp creation collides, the caller does not delete the other writer's file. A successful rename is the commit point; if a post-rename directory sync fails, the error marks `renameCompleted: true` because the replacement may already be visible.
 

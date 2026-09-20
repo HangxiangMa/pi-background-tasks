@@ -17,8 +17,14 @@ The runtime owns task identity, shell invocation, process lifecycle, bounded log
 - Terminal statuses are exactly `completed`, `failed`, and `killed`.
 - Runtime directory: `.pi/tasks/<session-id>-<pid>/` under the project cwd.
 - Per task: `<task-id>.output` and `<task-id>.json`; some agent modes may add wrapper or attestation files.
-- In-memory recent retention prunes oldest finished tasks over the limit while preserving running tasks.
+- In-memory recent retention prunes oldest finished tasks over the limit while preserving running tasks and newest-result recency. If the oldest finished task still owns pending publication, pruning first abandons and disposes that publication as `retention_limit`; pending gates cannot force eviction of a newer result or grow retained finished tasks without bound.
 - `resolveTask` accepts exact ids or unambiguous prefixes and fails loudly for empty, unknown, or ambiguous ids.
+
+## Task admission
+
+Every registry starter (ordinary, managed, delegate, and attested Pi) holds a counted admission scope with a one-way `AbortSignal` and a 30 second overall preflight deadline. Session shutdown closes admissions and aborts every live scope before cleanup. Cooperative preflight receives that signal; all other started operations remain tracked until they settle. Insertion plus spawn retain immediate checks with no yielding gap between them. Shutdown drains accepted admissions before taking its running-task snapshot. Therefore a preflight crossing closure cannot insert or spawn, while a child that spawned before closure was already inserted and is owned by shutdown cleanup.
+
+Interrupted managed work is cancelled immediately and its workflow/child cleanup promise is awaited before the lease is released; if it was already inserted, terminal finalization remains registry-owned. A process child already inserted/spawned is bound to the admission signal and receives the normal stop path even while an admission-time metadata write is still settling. Interrupted wrapper/durable-file preflight awaits opened-handle/stream cleanup and removes owned partial task files. Node does not provide physical cancellation for every filesystem syscall: such a syscall remains admission-owned and shutdown waits for its settlement rather than racing it and allowing late artifact work. Cleanup failures are surfaced; they are not treated as successful cancellation.
 
 ## Starting managed tasks
 
@@ -56,17 +62,29 @@ Telemetry is task-owned. It is parsed from task output/control lines when the ta
 
 A child closing with code `0` becomes `completed` unless killed/timeout/cap state overrides it. Nonzero exit becomes `failed` with `Exited with code ...`. User or shutdown kills become `killed`; timeout and output cap become `failed`.
 
-During finalization, the runtime flushes wrapped-agent output, ends and waits for the output stream to finish/close, writes terminal metadata through the durable metadata path, updates waiters, initiates terminal EventBus publication, sends the completion notification when enabled and not shutting down, persists notification state, then prunes old finished tasks. Actual EventBus emission may wait behind the run-response publication gate and therefore may occur after the completion notification; it still occurs only after stream close and terminal metadata. The registry calls a historically named `closeAndFsyncOutputStream()` helper, but its current implementation ends and observes the stream rather than issuing `fsync` for ordinary `.output`; durable terminal truth refers to the metadata-backed status, not a stronger crash-durability guarantee for every output byte.
+During finalization, the runtime flushes wrapped-agent output, ends and waits for the output stream to finish/close, writes terminal metadata through the durable metadata path, updates waiters, initiates terminal EventBus publication, sends the completion notification when enabled and not shutting down, persists notification state, then prunes old finished tasks. After a POSIX tree stop, finalization first waits for the originally owned detached group to be observed gone or records a loud failed result when force/proof fails; direct-child close alone cannot publish successful cleanup. Actual EventBus emission may wait behind the run-response publication gate and therefore may occur after the completion notification; it still occurs only after stream close and terminal metadata. The registry calls a historically named `closeAndFsyncOutputStream()` helper, but its current implementation ends and observes the stream rather than issuing `fsync` for ordinary `.output`; durable terminal truth refers to the metadata-backed status, not a stronger crash-durability guarantee for every output byte.
+
+Terminal EventBus publication has separate `pending`, `delivered`, and `abandoned` truth. The legacy internal `terminalPublished` latch means delivered only; abandonment never sets it. A genuine synchronous emitter failure is retried after 100 ms, up to three total emit attempts. Exhaustion abandons publication with bounded diagnostics. Since an earlier listener can receive before a later listener throws, retries are at-least-once and consumers deduplicate by task id.
+
+Publication gates race both activation closure and task-local abandonment. Gate resolution is followed by a lifecycle re-check; gate rejection abandons publication; shutdown, publisher disposal, or retention pruning clears gate references and retry timers. A late gate cannot emit or re-arm an old registry, and pruning an old gate releases its waiting continuation. These outcomes do not rewrite durable task status, waiter completion, or notification receipt state.
+
+Synchronous emission has its own in-flight settlement phase. Reentrant shutdown/service close clears queued work but does not log abandonment or prune that task while its emitter is on the stack. A normal emitter return settles delivered; a throw settles abandonment/retry policy once, with the thrown failure in the diagnostic. This prevents contradictory abandoned-then-delivered outcomes.
 
 ## Stopping tasks
 
 Only `running` tasks can be stopped. Managed tasks invoke their task-owned cancellation callback and wait for workflow settlement; process tasks use the platform paths below.
 
+Session shutdown atomically closes task admission and terminal publication before managed-workflow cleanup starts, aborts admission-owned cancellable work, drains admission cleanup, then applies the normal stop paths. Pending publication is abandoned, not reported as delivered. Registry admission/publication closure is one-way: session replacement receives a fresh registry, while the old registry cannot be reopened by late lifecycle, admission, or gate continuations.
+
 POSIX stop path:
 
-1. send `SIGTERM` to the detached process group (`-pid`),
-2. if that fails, call the child handle's `kill`,
-3. after the grace window, send one `SIGKILL` escalation.
+1. use the immutable process-group id captured directly from the detached spawn (never a restored metadata PID), and publish one shared grace/force owner before signaling,
+2. send `SIGTERM` to that process group (`-pid`), falling back to the child handle's `kill` when the group signal fails,
+3. if the direct child closes, probe the still-owned group; only `ESRCH` disarms escalation,
+4. after the grace window, probe and send at most one group `SIGKILL`, then perform bounded signal-0 probes until `ESRCH`,
+5. on force failure or inability to prove the group gone within the stop window, report `failed` with `Descendant processes may have leaked` rather than claim a successful kill.
+
+The POSIX grace/proof owner remains referenced after leader close, is shared by concurrent stop requests, and is permanently disarmed once group absence is observed so it cannot later signal a reused group id. This proves process-group disappearance for the ordinary local case; it does not claim that Node reaps grandchildren or that signals can cure a kernel-uninterruptible process. Such a limit is surfaced as a bounded cleanup failure.
 
 Windows stop path:
 
