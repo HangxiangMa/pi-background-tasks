@@ -18,7 +18,7 @@ This authored section defines the boundary: documentation facts are extracted fr
 - Governed production sources: 50
 - Tool contracts extracted: 11
 - Schema IDs extracted: 46
-- Environment variable references extracted: 49
+- Environment variable references extracted: 50
 - Behavioral attestation receipts not passing: 8
 - Receipt store: `docs/attestations.json`
 

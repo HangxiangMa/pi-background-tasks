@@ -26,7 +26,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:d74e15a5d9c67a6602e341a68a08d8ed06edb0769cc114e689d5702ebab2b575",
+      "authored_body_sha256": "sha256:eadefb31bea96c88880f0638126e5ddb5d4ff4b73396bb4046914d71ba6ec061",
       "covers_sources": [
         "extensions/anthropic-attribution.ts",
         "src/core/anthropic-attribution-path.ts",
@@ -62,7 +62,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:40ee5dac92b9e873d6a9f71a59c03ff1ccd44d6717a13d3be18f74b19e68326e",
+      "authored_body_sha256": "sha256:db149e43190515e52a39831942576881c4b0e5358933247a90d8b52c44a3c9eb",
       "covers_sources": [
         "src/core/durable-fs.ts",
         "src/core/pi-launch.ts"
@@ -96,7 +96,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:cd882ae075d47e97e2fb45709d7ac044811eedb68e2377b1742ac44147297aa4",
+      "authored_body_sha256": "sha256:1668285ed9ca4a104d6278f499dfe6b721aecd630eae60373bb006e25705ebeb",
       "covers_sources": [
         "extensions/fusion-child.ts",
         "src/core/fusion/artifacts.ts",
@@ -902,7 +902,7 @@
         "id": "command:claude-cache",
         "kind": "command",
         "name": "claude-cache",
-        "source": "src/core/anthropic-attribution.ts:3026"
+        "source": "src/core/anthropic-attribution.ts:3206"
       },
       {
         "description": "Start fixed-purpose Fusion reason in the background and return immediately.",

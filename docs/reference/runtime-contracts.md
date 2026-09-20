@@ -33,7 +33,8 @@ This generated registry lists production environment-variable references, runtim
 | `OPENROUTER_BASE_URL` | remove | `src/core/attested-pi-run.ts:135`<br>`src/core/fusion/pi-child.ts:100` |
 | `path` | read | `src/core/common.ts:681` |
 | `Path` | read | `src/core/common.ts:681` |
-| `PATH` | read | `src/core/common.ts:681` |
+| `PATH` | read | `src/core/common.ts:681`<br>`src/core/pi-launch.ts:425` |
+| `PI_ANTHROPIC_ACCOUNT_CONFIG_PATH` | read | `src/core/anthropic-attribution.ts:893` |
 | `PI_API_BASE_URL` | remove | `src/core/attested-pi-run.ts:135`<br>`src/core/fusion/pi-child.ts:100` |
 | `PI_API_KEY` | remove | `src/core/attested-pi-run.ts:135`<br>`src/core/fusion/pi-child.ts:100` |
 | `PI_AUTH_FILE` | remove | `src/core/attested-pi-run.ts:135`<br>`src/core/fusion/pi-child.ts:100` |
@@ -48,7 +49,7 @@ This generated registry lists production environment-variable references, runtim
 | `PI_BG_REGISTRY_URL` | read | `src/extension.ts:464` |
 | `PI_BG_SHELL` | read | `src/core/common.ts:722` |
 | `PI_BG_SHELL_PATH` | read | `src/core/common.ts:723` |
-| `PI_CACHE_RETENTION` | read, write | `src/core/anthropic-attribution.ts:635`<br>`src/core/anthropic-attribution.ts:646`<br>`src/core/fusion/claude-cache.ts:57`<br>`src/core/fusion/pi-child.ts:273`<br>`src/core/fusion/pi-child.ts:274` |
+| `PI_CACHE_RETENTION` | read, write | `src/core/anthropic-attribution.ts:658`<br>`src/core/anthropic-attribution.ts:669`<br>`src/core/fusion/claude-cache.ts:57`<br>`src/core/fusion/pi-child.ts:273`<br>`src/core/fusion/pi-child.ts:274` |
 | `PI_FUSION_CANDIDATE_OUTPUT_RECOVERY_PATH` | read, remove, write | `src/core/fusion/pi-child.ts:100`<br>`src/core/fusion/pi-child.ts:1879`<br>`src/fusion-child-extension.ts:599` |
 | `PI_FUSION_RESEARCH_ENABLED` | read, remove, write | `src/core/fusion/pi-child.ts:100`<br>`src/core/fusion/pi-child.ts:1902`<br>`src/fusion-child-extension.ts:608` |
 | `PI_FUSION_SOURCE_POLICY_PATH` | read, remove, write | `src/core/fusion/pi-child.ts:100`<br>`src/core/fusion/pi-child.ts:1903`<br>`src/fusion-child-extension.ts:555` |
@@ -61,7 +62,7 @@ This generated registry lists production environment-variable references, runtim
 | `PI_SESSION_FILE` | remove | `src/core/delegate/launch.ts:330`<br>`src/core/fusion/pi-child.ts:100` |
 | `PI_SESSION_ID` | remove | `src/core/delegate/launch.ts:330`<br>`src/core/fusion/pi-child.ts:100` |
 | `PI_SKIP_VERSION_CHECK` | write | `src/core/delegate/launch.ts:352`<br>`src/core/fusion/pi-child.ts:272` |
-| `PIPELINE_ANTHROPIC_ATTRIBUTION_AUDIT_PATH` | read | `src/core/anthropic-attribution.ts:1124` |
+| `PIPELINE_ANTHROPIC_ATTRIBUTION_AUDIT_PATH` | read | `src/core/anthropic-attribution.ts:1170` |
 | `SHELL` | read | `src/core/common.ts:718` |
 | `SystemRoot` | read | `src/core/windows-taskkill.ts:96` |
 | `WINDIR` | read | `src/core/windows-taskkill.ts:101` |
