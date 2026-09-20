@@ -35,6 +35,7 @@ import type { BgTask, BgTaskSnapshot } from '../../src/core/common.js';
 import type { TaskkillOutcome, WindowsKillPhase } from '../../src/core/windows-taskkill.js';
 import type { AttestedGitSpawn } from '../../src/core/attested-pi-run.js';
 import { BackgroundTaskExtensionServiceClosedError } from '../../src/core/extension-api.js';
+import { SynchronousActivationCloseFence } from '../../src/core/lazy-module.js';
 import { registerBackgroundResultExtension } from '../../src/delegate-extension.js';
 import { FusionArtifactStore } from '../../src/core/fusion/artifacts.js';
 import { defaultFusionModelConfig } from '../../src/core/fusion/config.js';
@@ -2873,6 +2874,7 @@ setInterval(() => {}, 1000);
         setActiveTools() {},
       });
       registerBackgroundResultExtension(pi, {
+        activationCloseFence: new SynchronousActivationCloseFence(),
         resolveTask: (idOrPrefix) => h.registry.resolveTask(idOrPrefix),
         claimFusionUsage: (task) => h.registry.claimFusionUsage(task),
       });

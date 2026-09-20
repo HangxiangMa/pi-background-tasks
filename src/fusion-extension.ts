@@ -46,7 +46,10 @@ import type {
   FusionModelSelectorResult,
 } from './ui/fusion-model-selector.js';
 import { CURRENT_MODEL_SELECTION } from './core/fusion/facade-contract.js';
-import { LazyModule } from './core/lazy-module.js';
+import {
+  LazyModule,
+  SynchronousActivationCloseFence,
+} from './core/lazy-module.js';
 
 const FUSION_RESULT_MESSAGE_TYPE = 'fusion-result';
 const FUSION_PROGRESS_SCHEMA_VERSION = 'pi-background-tasks.fusion-progress.v1';
@@ -139,6 +142,8 @@ export interface FusionExtensionDependencies {
   startManagedTask: (ctx: ExtensionContext, options: StartManagedTaskOptions) => Promise<BgTask>;
   snapshot: (task: BgTask) => BgTaskSnapshot;
   updateManagedTask: (task: BgTask, state: string, line?: string) => Promise<void>;
+  /** Activation-local fence installed synchronously before asynchronous cleanup. */
+  activationCloseFence: SynchronousActivationCloseFence;
   /** Internal deterministic deferred-import seams. */
   loadExecutionRuntime?: (() => Promise<FusionExecutionRuntime>) | undefined;
   loadModelSelectorRuntime?: (() => Promise<FusionModelSelectorRuntime>) | undefined;
@@ -818,6 +823,12 @@ export function registerFusionExtension(pi: ExtensionAPI, deps: FusionExtensionD
   let shuttingDown = false;
   let lifecycleGeneration = 0;
   let shutdownCleanupPromise: Promise<PromiseSettledResult<void>[]> | undefined;
+  const closedActivationError = new Error(
+    'lazy_module_closed: Fusion facade belongs to a closed activation (Pi session shutdown)',
+  );
+  const assertFusionActive = (): void => {
+    if (shuttingDown) throw closedActivationError;
+  };
 
   const beginFusionShutdown = (): void => {
     if (shuttingDown) return;
@@ -832,16 +843,14 @@ export function registerFusionExtension(pi: ExtensionAPI, deps: FusionExtensionD
     shutdownCleanupPromise = Promise.allSettled(runs.map((run) => run.settled));
   };
 
-  pi.on('session_shutdown', () => {
-    beginFusionShutdown();
-  });
+  deps.activationCloseFence.add(beginFusionShutdown);
 
   async function runFusion(
     request: FusionRunRequest,
     suppliedController?: AbortController,
     onReady?: Parameters<FusionOrchestrator['run']>[0]['onReady'],
   ): Promise<FusionRunResult> {
-    if (shuttingDown) throw new Error('fusion extension is shutting down');
+    assertFusionActive();
     const generation = lifecycleGeneration;
     const controller = suppliedController ?? new AbortController();
     let resolveSettled: () => void = () => undefined;
@@ -1082,10 +1091,13 @@ export function registerFusionExtension(pi: ExtensionAPI, deps: FusionExtensionD
     handler: async (args, ctx) => {
       let requestText: string | undefined;
       try {
+        assertFusionActive();
         requestText = await promptFromCommandArgs(args, ctx);
+        assertFusionActive();
         if (requestText === undefined) return;
         const request = prepareFusionReasonArguments({ prompt: requestText });
         await ctx.waitForIdle();
+        assertFusionActive();
         const task = await launchFusionTask({
           source: 'command',
           ctx,
@@ -1096,6 +1108,7 @@ export function registerFusionExtension(pi: ExtensionAPI, deps: FusionExtensionD
         const fusion = task.fusion;
         if (fusion === undefined)
           throw new Error('Fusion command task was registered without Fusion facts');
+        assertFusionActive();
         if (ctx.hasUI) {
           ctx.ui.notify(
             `Started fusion reason (${task.id})\nArtifacts: ${fusion.artifactDir}\nIt will notify on completion; retrieve with bg_result.`,
@@ -1103,6 +1116,9 @@ export function registerFusionExtension(pi: ExtensionAPI, deps: FusionExtensionD
           );
         }
       } catch (error) {
+        // Closure wins over command error rendering: never inspect or notify an
+        // old host context after the activation fence has fired.
+        assertFusionActive();
         const message = `Fusion failed: ${errorMessage(error)}${errorArtifactSuffix(error)}`;
         if (!ctx.hasUI) throw new Error(message);
         ctx.ui.notify(message, 'error');
@@ -1113,6 +1129,7 @@ export function registerFusionExtension(pi: ExtensionAPI, deps: FusionExtensionD
   pi.registerCommand(FUSION_MODEL_COMMAND_NAME, {
     description: 'Open the five-slot global fusion model selector.',
     handler: async (_args, ctx) => {
+      assertFusionActive();
       const modeError =
         '/fusion-models requires Pi TUI mode; it is unavailable in RPC, JSON, and print modes.';
       if (!ctx.hasUI) throw new Error(modeError);
@@ -1127,10 +1144,12 @@ export function registerFusionExtension(pi: ExtensionAPI, deps: FusionExtensionD
         try {
           loaded = await runtime.loadFusionModelConfig(path);
         } catch (error) {
+          assertFusionActive();
           modelSelectorRuntime.assertOpen();
           ctx.ui.notify(`Cannot open ${path}: ${errorMessage(error)}`, 'error');
           return;
         }
+        assertFusionActive();
         modelSelectorRuntime.assertOpen();
         const choices = choicesForSelector(ctx, loaded.config);
         const result = await ctx.ui.custom<FusionModelSelectorResult>(
@@ -1140,8 +1159,10 @@ export function registerFusionExtension(pi: ExtensionAPI, deps: FusionExtensionD
               choices,
               theme,
               onSave: async (config) => {
+                assertFusionActive();
                 modelSelectorRuntime.assertOpen();
                 await runtime.saveFusionModelConfig(path, config, loaded.revision);
+                assertFusionActive();
                 modelSelectorRuntime.assertOpen();
               },
               onDone: done,
@@ -1159,6 +1180,7 @@ export function registerFusionExtension(pi: ExtensionAPI, deps: FusionExtensionD
             },
           },
         );
+        assertFusionActive();
         modelSelectorRuntime.assertOpen();
         if (result.type === 'saved')
           ctx.ui.notify(`Saved fusion model configuration to ${path}`, 'info');

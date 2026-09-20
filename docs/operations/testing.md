@@ -73,6 +73,8 @@ The benchmark exercises source TypeScript, not a compiled distribution. It suppo
 
 The package gate separately walks literal deferred imports and verifies every target is under the shipped `src/` closure. A packed-copy regression then removes one verifier/producer module from an otherwise real tarball: package startup and immediate inventory still work, the first producer invocation fails with the bounded module-specific error, and no delegate artifact is created. This characterizes damaged payload behavior without weakening the real payload-closure check.
 
+Lazy lifecycle SDK coverage deliberately blocks Fusion cleanup while asserting the shared synchronous fence has already closed delegate, result, command/UI, and both Fusion lanes. A real `AgentSession.reload()` control lets production delegate preparation finish a complete artifact tree before returning, then proves the unregistered transaction is rolled back with no starter or residual run bytes. A separate claim race proves shutdown cannot consume Fusion usage without a successful retrieval, and a registered-task control proves rollback never deletes registry-owned artifacts.
+
 Do not run full/default/root suites for documentation-only edits unless the operator explicitly asks. If the operator restricts verification to focused checks, report that `docs:verify`/attestation were not run.
 
 ## Evidence that must be preserved

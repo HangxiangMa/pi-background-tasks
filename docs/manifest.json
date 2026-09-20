@@ -75,7 +75,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:cecf91624a911595f5ba8e55486d9acdaa0940f3f20334d396b42f9326917da3",
+      "authored_body_sha256": "sha256:e43ec2c4566269f339085c1fd36c150437f4c333ebe2736c1b2fdee42877d955",
       "covers_sources": [
         "extensions/delegate-child.ts",
         "src/core/delegate/artifacts.ts",
@@ -99,7 +99,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:7e820844f15913b3c26b4c7110c55fcac168c62f0bcb581de175559e2d6d1294",
+      "authored_body_sha256": "sha256:4b523f39a8fc0d70dbea47b5a4e1023146248f075876fd6848ac50484e10f944",
       "covers_sources": [
         "extensions/fusion-child.ts",
         "src/core/fusion/artifacts.ts",
@@ -131,7 +131,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:d02ea217e46bfd11c072fc3b025a15d266299c8fdf8c810c937ff029aa6529b9",
+      "authored_body_sha256": "sha256:3d8c464ed645f91763ff61546816716bbe4ce3a2e95fd8c51eeeb7b6e9dbc518",
       "covers_sources": [
         "extensions/background-tasks.ts",
         "src/core/config.ts",
@@ -945,7 +945,7 @@
         "id": "command:bg",
         "kind": "command",
         "name": "bg",
-        "source": "src/extension.ts:578"
+        "source": "src/extension.ts:586"
       },
       {
         "availability": "always",
@@ -954,7 +954,7 @@
         "id": "command:bg-clear",
         "kind": "command",
         "name": "bg-clear",
-        "source": "src/extension.ts:620"
+        "source": "src/extension.ts:628"
       },
       {
         "availability": "always",
@@ -963,7 +963,7 @@
         "id": "command:bg-tasks",
         "kind": "command",
         "name": "bg-tasks",
-        "source": "src/extension.ts:612"
+        "source": "src/extension.ts:620"
       },
       {
         "availability": "always",
@@ -972,7 +972,7 @@
         "id": "command:bg-update",
         "kind": "command",
         "name": "bg-update",
-        "source": "src/extension.ts:628"
+        "source": "src/extension.ts:636"
       },
       {
         "availability": "feature:attribution",
@@ -990,7 +990,7 @@
         "id": "command:fusion",
         "kind": "command",
         "name": "fusion",
-        "source": "src/fusion-extension.ts:1080"
+        "source": "src/fusion-extension.ts:1089"
       },
       {
         "availability": "feature:fusion",
@@ -999,7 +999,7 @@
         "id": "command:fusion-models",
         "kind": "command",
         "name": "fusion-models",
-        "source": "src/fusion-extension.ts:1113"
+        "source": "src/fusion-extension.ts:1129"
       },
       {
         "availability": "always",
@@ -1008,7 +1008,7 @@
         "id": "command:jobs",
         "kind": "command",
         "name": "jobs",
-        "source": "src/extension.ts:677"
+        "source": "src/extension.ts:685"
       },
       {
         "availability": "always",
@@ -1017,7 +1017,7 @@
         "id": "command:kill",
         "kind": "command",
         "name": "kill",
-        "source": "src/extension.ts:721"
+        "source": "src/extension.ts:729"
       },
       {
         "availability": "always",
@@ -1026,7 +1026,7 @@
         "id": "command:logs",
         "kind": "command",
         "name": "logs",
-        "source": "src/extension.ts:690"
+        "source": "src/extension.ts:698"
       },
       {
         "availability": "always",
@@ -1035,7 +1035,7 @@
         "id": "command:tasks",
         "kind": "command",
         "name": "tasks",
-        "source": "src/extension.ts:604"
+        "source": "src/extension.ts:612"
       }
     ],
     "eventbus": [
@@ -1067,7 +1067,7 @@
         "id": "renderer:background-task-notification",
         "kind": "renderer",
         "name": "background-task-notification",
-        "source": "src/extension.ts:474"
+        "source": "src/extension.ts:482"
       },
       {
         "availability": "feature:fusion",
@@ -1075,7 +1075,7 @@
         "id": "renderer:fusion-result",
         "kind": "renderer",
         "name": "fusion-result",
-        "source": "src/fusion-extension.ts:1064"
+        "source": "src/fusion-extension.ts:1073"
       }
     ],
     "shortcut": [
@@ -1086,7 +1086,7 @@
         "id": "shortcut:ctrl+alt+b",
         "kind": "shortcut",
         "name": "ctrl+alt+b",
-        "source": "src/extension.ts:661"
+        "source": "src/extension.ts:669"
       },
       {
         "availability": "always",
@@ -1095,7 +1095,7 @@
         "id": "shortcut:ctrl+alt+c",
         "kind": "shortcut",
         "name": "ctrl+alt+c",
-        "source": "src/extension.ts:669"
+        "source": "src/extension.ts:677"
       },
       {
         "availability": "dock:shift+down",
@@ -1104,7 +1104,7 @@
         "id": "shortcut:shift+down",
         "kind": "shortcut",
         "name": "shift+down",
-        "source": "src/extension.ts:652"
+        "source": "src/extension.ts:660"
       }
     ],
     "tool": [
@@ -1195,7 +1195,7 @@
           ],
           "type": "object"
         },
-        "source": "src/delegate-extension.ts:445"
+        "source": "src/delegate-extension.ts:500"
       },
       {
         "availability": "always",
@@ -1221,7 +1221,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:983"
+        "source": "src/extension.ts:991"
       },
       {
         "availability": "always",
@@ -1257,7 +1257,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:938"
+        "source": "src/extension.ts:946"
       },
       {
         "availability": "any(feature:delegate,feature:fusion)",
@@ -1289,7 +1289,7 @@
           ],
           "type": "object"
         },
-        "source": "src/delegate-extension.ts:659"
+        "source": "src/delegate-extension.ts:757"
       },
       {
         "availability": "always",
@@ -1348,7 +1348,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:754"
+        "source": "src/extension.ts:762"
       },
       {
         "availability": "feature:attested",
@@ -1411,7 +1411,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:840"
+        "source": "src/extension.ts:848"
       },
       {
         "availability": "always",
@@ -1437,7 +1437,7 @@
           "required": [],
           "type": "object"
         },
-        "source": "src/extension.ts:907"
+        "source": "src/extension.ts:915"
       },
       {
         "availability": "feature:fusion",
@@ -1502,7 +1502,7 @@
           ],
           "type": "object"
         },
-        "source": "src/fusion-extension.ts:1289"
+        "source": "src/fusion-extension.ts:1311"
       },
       {
         "availability": "feature:fusion",
@@ -1532,7 +1532,7 @@
           ],
           "type": "object"
         },
-        "source": "src/fusion-extension.ts:1271"
+        "source": "src/fusion-extension.ts:1293"
       },
       {
         "availability": "feature:fusion",
@@ -1623,7 +1623,7 @@
           ],
           "type": "object"
         },
-        "source": "src/fusion-extension.ts:1308"
+        "source": "src/fusion-extension.ts:1330"
       },
       {
         "availability": "feature:fusion",
@@ -1755,7 +1755,7 @@
           ],
           "type": "object"
         },
-        "source": "src/fusion-extension.ts:1328"
+        "source": "src/fusion-extension.ts:1350"
       }
     ],
     "workflow": [

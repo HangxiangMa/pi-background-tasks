@@ -177,5 +177,16 @@ void describe('lazy facade runtime import graph', () => {
       /if \(config\.features\.delegate\)|if \(config\.features\.fusion\)/u,
       'facades must still only be instantiated by enabled conditional registrars',
     );
+    const closeBarrier = extensionSource.indexOf('activationCloseFence.close()');
+    const fusionRegistration = extensionSource.indexOf('registerFusionExtension(pi, {');
+    const delegateRegistration = extensionSource.indexOf('registerDelegateExtension(pi, {');
+    const resultRegistration = extensionSource.indexOf('registerBackgroundResultExtension(pi, {');
+    assert.ok(closeBarrier >= 0, 'the composed activation must install its close fence');
+    for (const registration of [fusionRegistration, delegateRegistration, resultRegistration]) {
+      assert.ok(
+        registration > closeBarrier,
+        'the one synchronous close barrier must be registered before every lazy facade',
+      );
+    }
   });
 });

@@ -1,9 +1,9 @@
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, rmdir } from 'node:fs/promises';
 import { canonicalJson } from '../attested-pi-run.js';
 import { replaceFileDurable } from '../durable-fs.js';
 import { resolveAnthropicAttributionExtensionPath } from '../anthropic-attribution-path.js';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DelegateArtifactStore, discardDelegateArtifactRoot } from './artifacts.js';
 import {
   buildDelegateChildArgv,
@@ -44,6 +44,8 @@ export interface PreparedDelegateLaunch {
   seedPathAbs: string;
   /** Exact prompt bytes delivered to the child over stdin. */
   stdinBytes: Buffer;
+  /** Remove this complete preparation while it is still unowned by a task. */
+  rollback: () => Promise<void>;
 }
 
 export interface PrepareDelegateLaunchInput extends DelegatePreflightInput {
@@ -55,6 +57,55 @@ export interface PrepareDelegateLaunchInput extends DelegatePreflightInput {
   attributionExtensionPath?: string | undefined;
   env?: NodeJS.ProcessEnv | undefined;
   now?: (() => Date) | undefined;
+  /** Activation closure cancels preparation before task ownership transfers. */
+  signal?: AbortSignal | undefined;
+}
+
+const PREPARATION_CLEANUP_ERROR_MAX_CHARS = 320;
+
+function boundedPreparationError(error: unknown): string {
+  const text = (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, ' ').trim();
+  if (text.length <= PREPARATION_CLEANUP_ERROR_MAX_CHARS) return text;
+  return `${text.slice(0, PREPARATION_CLEANUP_ERROR_MAX_CHARS)}…`;
+}
+
+function filesystemErrorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const code: unknown = Reflect.get(error, 'code');
+  return typeof code === 'string' ? code : undefined;
+}
+
+async function removeEmptyDirectory(path: string): Promise<boolean> {
+  try {
+    await rmdir(path);
+    return true;
+  } catch (error) {
+    const code = filesystemErrorCode(error);
+    if (code === 'ENOENT') return true;
+    if (code === 'ENOTEMPTY' || code === 'EEXIST') return false;
+    throw error;
+  }
+}
+
+async function discardUnownedDelegatePreparation(rootAbs: string): Promise<void> {
+  await discardDelegateArtifactRoot(rootAbs);
+  const runParent = dirname(rootAbs);
+  if (!(await removeEmptyDirectory(runParent))) return;
+  await removeEmptyDirectory(dirname(runParent));
+}
+
+function throwIfPreparationAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted !== true) return;
+  const reason: unknown = signal.reason;
+  if (reason instanceof Error) throw reason;
+  throw new Error('delegate launch preparation was cancelled before task registration');
+}
+
+function preparationCleanupFailure(original: unknown, cleanup: unknown): AggregateError {
+  return new AggregateError(
+    [original, cleanup],
+    `delegate launch preparation failed and rollback also failed: ${boundedPreparationError(cleanup)}`,
+  );
 }
 
 /**
@@ -62,12 +113,13 @@ export interface PrepareDelegateLaunchInput extends DelegatePreflightInput {
  *
  * Preflight runs first and completes entirely before the artifact directory is
  * created, so every admission refusal leaves zero children AND zero artifacts.
- * When a step after directory creation fails, the partially created directory
- * is removed, so a refused launch never leaves a half-formed run behind.
+ * When a step after directory creation fails or activation cancellation is
+ * observed, the producer removes the unowned directory before rejecting.
  */
 export async function prepareDelegateLaunch(
   input: PrepareDelegateLaunchInput,
 ): Promise<PreparedDelegateLaunch> {
+  throwIfPreparationAborted(input.signal);
   // Resolve the guard extension before anything is created: a package missing
   // its child guard must refuse rather than spawn an unguarded child.
   const childExtensionPath =
@@ -89,24 +141,29 @@ export async function prepareDelegateLaunch(
     }
   }
 
+  throwIfPreparationAborted(input.signal);
   const preflight = preflightDelegateLaunch(input);
+  throwIfPreparationAborted(input.signal);
 
-  const store = await DelegateArtifactStore.create({
-    cwd: input.cwd,
-    taskId: preflight.taskId,
-    launchNonce: preflight.launchNonce,
-    sessionId: input.sessionId,
-    childSessionId: preflight.childSessionId,
-    childSessionDir: '',
-    extensionMode: input.extensionMode,
-    route: input.route,
-    limits: preflight.limits,
-    seedSha256: preflight.seed.sha256,
-    ...(input.now === undefined ? {} : { now: input.now }),
-  });
-
+  let store: DelegateArtifactStore | undefined;
   try {
+    store = await DelegateArtifactStore.create({
+      cwd: input.cwd,
+      taskId: preflight.taskId,
+      launchNonce: preflight.launchNonce,
+      sessionId: input.sessionId,
+      childSessionId: preflight.childSessionId,
+      childSessionDir: '',
+      extensionMode: input.extensionMode,
+      route: input.route,
+      limits: preflight.limits,
+      seedSha256: preflight.seed.sha256,
+      ...(input.now === undefined ? {} : { now: input.now }),
+    });
+    throwIfPreparationAborted(input.signal);
+
     const seedRef = await store.writeSeed(preflight.seed.serialized);
+    throwIfPreparationAborted(input.signal);
     // The persisted seed bytes are the bytes the child reads. Nothing
     // re-serializes them between here and the child, and the child verifies the
     // hash before its first model call.
@@ -122,8 +179,11 @@ export async function prepareDelegateLaunch(
       );
     }
     await store.writeLedger(preflight.seed.ledger);
+    throwIfPreparationAborted(input.signal);
     await store.writeBudgetPlan(preflight.plan);
+    throwIfPreparationAborted(input.signal);
     const childSessionDirAbs = await ensureDelegateChildSessionDir(store.artifactDirAbs);
+    throwIfPreparationAborted(input.signal);
     const seedPathAbs = join(store.artifactDirAbs, 'seed.json');
     const argv = buildDelegateChildArgv({
       route: input.route,
@@ -169,6 +229,13 @@ export async function prepareDelegateLaunch(
     // The persisted prompt bytes must equal the bytes sent to the child, so the
     // artifact is evidence of what the child actually received.
     await store.writeChildPrompt(stdinBytes);
+    throwIfPreparationAborted(input.signal);
+    const artifactDirAbs = store.artifactDirAbs;
+    let rollbackPromise: Promise<void> | undefined;
+    const rollback = (): Promise<void> => {
+      rollbackPromise ??= discardUnownedDelegatePreparation(artifactDirAbs);
+      return rollbackPromise;
+    };
     return {
       preflight,
       store,
@@ -178,10 +245,15 @@ export async function prepareDelegateLaunch(
       childSessionDirAbs,
       seedPathAbs,
       stdinBytes,
+      rollback,
     };
   } catch (error) {
-    // A failure after directory creation must not leave a half-formed run.
-    await discardDelegateArtifactRoot(store.artifactDirAbs);
+    if (store === undefined) throw error;
+    try {
+      await discardUnownedDelegatePreparation(store.artifactDirAbs);
+    } catch (cleanupError) {
+      throw preparationCleanupFailure(error, cleanupError);
+    }
     throw error;
   }
 }

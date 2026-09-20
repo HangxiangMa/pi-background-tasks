@@ -12,7 +12,7 @@ covers_sources: []
 <!-- pi-docs:begin name="command-contract-fusion" generator="scripts/docs/generate.mjs" -->
 | Command | Availability | Default | Description | Provenance |
 | --- | --- | --- | --- | --- |
-| `/fusion` | `feature:fusion` | yes | Start fixed-purpose Fusion reason in the background and return immediately. | `src/fusion-extension.ts:1080` |
+| `/fusion` | `feature:fusion` | yes | Start fixed-purpose Fusion reason in the background and return immediately. | `src/fusion-extension.ts:1089` |
 <!-- pi-docs:end name="command-contract-fusion" -->
 
 Run the fixed-purpose Fusion **reason** workflow from the command line.

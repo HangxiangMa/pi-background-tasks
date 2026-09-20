@@ -59,6 +59,7 @@ import {
   dockShortcutFooterHint,
   parseBackgroundTasksConfig,
 } from './core/config.js';
+import { SynchronousActivationCloseFence } from './core/lazy-module.js';
 
 /**
  * Project-local Pi background task manager.
@@ -226,6 +227,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   let updateCheckStarted = false;
   let disposed = false;
   let shutdownCleanupStarted = false;
+  const activationCloseFence = new SynchronousActivationCloseFence();
 
   const registry = new BackgroundTaskRegistry({
     onChange: () => {
@@ -261,11 +263,12 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     }
   };
 
-  // Register the synchronous publication barrier before managed-workflow
-  // shutdown handlers. Fusion may settle while its own cleanup is awaited; the
-  // old registry must already be closed before that terminal continuation runs.
+  // Join the one synchronous all-lane barrier before any facade can register
+  // asynchronous cleanup. Pi awaits shutdown handlers sequentially, so every
+  // loader/controller/registry lane must already be closed before that wait.
+  activationCloseFence.add(beginSessionShutdown);
   pi.on('session_shutdown', () => {
-    beginSessionShutdown();
+    activationCloseFence.close();
   });
 
   if (config.features.fusion) {
@@ -276,6 +279,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       },
       snapshot: (task) => registry.snapshot(task),
       updateManagedTask: (task, state, line) => registry.updateManagedTask(task, state, line),
+      activationCloseFence,
     });
   }
 
@@ -286,6 +290,9 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
         return registry.startDelegateTask(ctx, options);
       },
       snapshot: (task) => registry.snapshot(task),
+      isDelegateTaskRegistered: (taskId) =>
+        registry.allTasks().some((task) => task.id === taskId && task.delegate !== undefined),
+      activationCloseFence,
     });
   }
 
@@ -293,6 +300,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     registerBackgroundResultExtension(pi, {
       resolveTask: (idOrPrefix) => registry.resolveTask(idOrPrefix),
       claimFusionUsage: (task) => registry.claimFusionUsage(task),
+      activationCloseFence,
     });
   }
 
