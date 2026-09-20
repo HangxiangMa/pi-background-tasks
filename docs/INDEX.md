@@ -106,6 +106,7 @@ Generated navigation for every package-local documentation page. This index inte
 | `eventbus:background-task-v1` | [api/eventbus-v1](./api/eventbus-v1.md) |
 | `renderer:background-task-notification` | [concepts/completion-delivery](./concepts/completion-delivery.md) |
 | `renderer:fusion-result` | [subsystems/fusion](./subsystems/fusion.md) |
+| `shortcut:ctrl+alt+b` | [reference/shortcuts-and-dock](./reference/shortcuts-and-dock.md) |
 | `shortcut:ctrl+alt+c` | [reference/shortcuts-and-dock](./reference/shortcuts-and-dock.md) |
 | `shortcut:shift+down` | [reference/shortcuts-and-dock](./reference/shortcuts-and-dock.md) |
 | `tool:bg_delegate` | [tools/bg_delegate](./tools/bg_delegate.md) |
@@ -126,36 +127,37 @@ Generated navigation for every package-local documentation page. This index inte
 
 ## Public surface inventory
 
-| Kind | Name | ID | Provenance |
-| --- | --- | --- | --- |
-| command | `bg` | `command:bg` | `src/extension.ts:517` |
-| command | `bg-clear` | `command:bg-clear` | `src/extension.ts:559` |
-| command | `bg-tasks` | `command:bg-tasks` | `src/extension.ts:551` |
-| command | `bg-update` | `command:bg-update` | `src/extension.ts:567` |
-| command | `claude-cache` | `command:claude-cache` | `src/core/anthropic-attribution.ts:3026` |
-| command | `fusion` | `command:fusion` | `src/fusion-extension.ts:996` |
-| command | `fusion-models` | `command:fusion-models` | `src/fusion-extension.ts:1029` |
-| command | `jobs` | `command:jobs` | `src/extension.ts:605` |
-| command | `kill` | `command:kill` | `src/extension.ts:649` |
-| command | `logs` | `command:logs` | `src/extension.ts:618` |
-| command | `tasks` | `command:tasks` | `src/extension.ts:543` |
-| tool | `bg_delegate` | `tool:bg_delegate` | `src/delegate-extension.ts:340` |
-| tool | `bg_kill` | `tool:bg_kill` | `src/extension.ts:908` |
-| tool | `bg_logs` | `tool:bg_logs` | `src/extension.ts:863` |
-| tool | `bg_result` | `tool:bg_result` | `src/delegate-extension.ts:516` |
-| tool | `bg_run` | `tool:bg_run` | `src/extension.ts:682` |
-| tool | `bg_run_pi_attested` | `tool:bg_run_pi_attested` | `src/extension.ts:767` |
-| tool | `bg_status` | `tool:bg_status` | `src/extension.ts:832` |
-| tool | `fusion_investigate` | `tool:fusion_investigate` | `src/fusion-extension.ts:1197` |
-| tool | `fusion_reason` | `tool:fusion_reason` | `src/fusion-extension.ts:1179` |
-| tool | `fusion_research` | `tool:fusion_research` | `src/fusion-extension.ts:1216` |
-| tool | `fusion_validate` | `tool:fusion_validate` | `src/fusion-extension.ts:1236` |
-| shortcut | `ctrl+alt+c` | `shortcut:ctrl+alt+c` | `src/extension.ts:597` |
-| shortcut | `shift+down` | `shortcut:shift+down` | `src/extension.ts:590` |
-| renderer | `background-task-notification` | `renderer:background-task-notification` | `src/extension.ts:426` |
-| renderer | `fusion-result` | `renderer:fusion-result` | `src/fusion-extension.ts:980` |
-| eventbus | `background-task-v1` | `eventbus:background-task-v1` | `src/core/extension-api.ts` |
-| workflow | `investigate` | `workflow:investigate` | `src/core/fusion/workflows.ts:80` |
-| workflow | `reason` | `workflow:reason` | `src/core/fusion/workflows.ts:61` |
-| workflow | `research` | `workflow:research` | `src/core/fusion/workflows.ts:99` |
-| workflow | `validate` | `workflow:validate` | `src/core/fusion/workflows.ts:118` |
+| Kind | Name | ID | Availability | Default | Provenance |
+| --- | --- | --- | --- | --- | --- |
+| command | `bg` | `command:bg` | `always` | yes | `src/extension.ts:574` |
+| command | `bg-clear` | `command:bg-clear` | `always` | yes | `src/extension.ts:616` |
+| command | `bg-tasks` | `command:bg-tasks` | `always` | yes | `src/extension.ts:608` |
+| command | `bg-update` | `command:bg-update` | `always` | yes | `src/extension.ts:624` |
+| command | `claude-cache` | `command:claude-cache` | `feature:attribution` | yes | `src/core/anthropic-attribution.ts:3206` |
+| command | `fusion` | `command:fusion` | `feature:fusion` | yes | `src/fusion-extension.ts:996` |
+| command | `fusion-models` | `command:fusion-models` | `feature:fusion` | yes | `src/fusion-extension.ts:1029` |
+| command | `jobs` | `command:jobs` | `always` | yes | `src/extension.ts:673` |
+| command | `kill` | `command:kill` | `always` | yes | `src/extension.ts:717` |
+| command | `logs` | `command:logs` | `always` | yes | `src/extension.ts:686` |
+| command | `tasks` | `command:tasks` | `always` | yes | `src/extension.ts:600` |
+| tool | `bg_delegate` | `tool:bg_delegate` | `feature:delegate` | yes | `src/delegate-extension.ts:343` |
+| tool | `bg_kill` | `tool:bg_kill` | `always` | yes | `src/extension.ts:979` |
+| tool | `bg_logs` | `tool:bg_logs` | `always` | yes | `src/extension.ts:934` |
+| tool | `bg_result` | `tool:bg_result` | `any(feature:delegate,feature:fusion)` | yes | `src/delegate-extension.ts:530` |
+| tool | `bg_run` | `tool:bg_run` | `always` | yes | `src/extension.ts:750` |
+| tool | `bg_run_pi_attested` | `tool:bg_run_pi_attested` | `feature:attested` | yes | `src/extension.ts:836` |
+| tool | `bg_status` | `tool:bg_status` | `always` | yes | `src/extension.ts:903` |
+| tool | `fusion_investigate` | `tool:fusion_investigate` | `feature:fusion` | yes | `src/fusion-extension.ts:1197` |
+| tool | `fusion_reason` | `tool:fusion_reason` | `feature:fusion` | yes | `src/fusion-extension.ts:1179` |
+| tool | `fusion_research` | `tool:fusion_research` | `feature:fusion` | yes | `src/fusion-extension.ts:1216` |
+| tool | `fusion_validate` | `tool:fusion_validate` | `feature:fusion` | yes | `src/fusion-extension.ts:1236` |
+| shortcut | `ctrl+alt+b` | `shortcut:ctrl+alt+b` | `dock:ctrl+alt+b` | no | `src/extension.ts:657` |
+| shortcut | `ctrl+alt+c` | `shortcut:ctrl+alt+c` | `always` | yes | `src/extension.ts:665` |
+| shortcut | `shift+down` | `shortcut:shift+down` | `dock:shift+down` | yes | `src/extension.ts:648` |
+| renderer | `background-task-notification` | `renderer:background-task-notification` | `always` | yes | `src/extension.ts:483` |
+| renderer | `fusion-result` | `renderer:fusion-result` | `feature:fusion` | yes | `src/fusion-extension.ts:980` |
+| eventbus | `background-task-v1` | `eventbus:background-task-v1` | `always` | yes | `src/core/extension-api.ts` |
+| workflow | `investigate` | `workflow:investigate` | `feature:fusion` | yes | `src/core/fusion/workflows.ts:80` |
+| workflow | `reason` | `workflow:reason` | `feature:fusion` | yes | `src/core/fusion/workflows.ts:61` |
+| workflow | `research` | `workflow:research` | `feature:fusion` | yes | `src/core/fusion/workflows.ts:99` |
+| workflow | `validate` | `workflow:validate` | `feature:fusion` | yes | `src/core/fusion/workflows.ts:118` |

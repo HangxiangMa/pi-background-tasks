@@ -48,6 +48,50 @@ void describe('docs package integration contract', () => {
     }
   });
 
+  void it('publishes finite capability and shortcut availability from runtime source', () => {
+    const manifest = JSON.parse(text('docs/manifest.json')) as {
+      default_public_surface_ids?: string[];
+      public_surfaces?: Record<
+        string,
+        Array<{ id?: string; availability?: string; default_available?: boolean }>
+      >;
+    };
+    assert.ok(Array.isArray(manifest.default_public_surface_ids));
+    const surfaces = Object.values(manifest.public_surfaces ?? {}).flat();
+    const byId = new Map(surfaces.map((surface) => [surface.id, surface]));
+    assert.deepEqual(
+      {
+        delegate: byId.get('tool:bg_delegate')?.availability,
+        fusion: byId.get('tool:fusion_reason')?.availability,
+        result: byId.get('tool:bg_result')?.availability,
+        attested: byId.get('tool:bg_run_pi_attested')?.availability,
+        attribution: byId.get('command:claude-cache')?.availability,
+        defaultDock: byId.get('shortcut:shift+down')?.availability,
+        alternateDock: byId.get('shortcut:ctrl+alt+b')?.availability,
+      },
+      {
+        delegate: 'feature:delegate',
+        fusion: 'feature:fusion',
+        result: 'any(feature:delegate,feature:fusion)',
+        attested: 'feature:attested',
+        attribution: 'feature:attribution',
+        defaultDock: 'dock:shift+down',
+        alternateDock: 'dock:ctrl+alt+b',
+      },
+    );
+    assert.equal(byId.get('shortcut:shift+down')?.default_available, true);
+    assert.equal(byId.get('shortcut:ctrl+alt+b')?.default_available, false);
+    assert.ok(manifest.default_public_surface_ids?.includes('shortcut:shift+down'));
+    assert.equal(manifest.default_public_surface_ids?.includes('shortcut:ctrl+alt+b'), false);
+
+    assert.match(text('docs/INDEX.md'), /Availability \| Default/);
+    assert.match(text('README.md'), /any\(feature:delegate,feature:fusion\)/);
+    assert.match(text('docs/tools/bg_result.md'), /any\(feature:delegate,feature:fusion\)/);
+    assert.match(text('docs/reference/shortcuts-and-dock.md'), /ctrl\+alt\+b/);
+    assert.match(text('docs/operations/configuration.md'), /PI_BG_FEATURES/);
+    assert.match(text('docs/operations/configuration.md'), /PI_BG_DOCK_SHORTCUT/);
+  });
+
   void it('pins reviewed runtime and generated artifact semantics', () => {
     const contracts = text('docs/reference/runtime-contracts.md');
     assert.match(contracts, /candidate-<slot>\.attempt-<n>/);

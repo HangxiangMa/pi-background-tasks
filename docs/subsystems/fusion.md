@@ -11,19 +11,19 @@ covers_sources: [extensions/fusion-child.ts, src/core/fusion/artifacts.ts, src/c
 # Fusion subsystem
 
 <!-- pi-docs:begin name="fusion-workflows" generator="scripts/docs/generate.mjs" -->
-| Workflow | Tool | Context | Candidate capability | Candidate tools | Evaluator/merger tools | Provenance |
-| --- | --- | --- | --- | --- | --- | --- |
-| `investigate` | `fusion_investigate` | `clean_task` | `inspect` | `read`, `grep`, `find`, `ls` | none | `src/core/fusion/workflows.ts:80` |
-| `reason` | `fusion_reason` | `session_projection` | `reason` | none | none | `src/core/fusion/workflows.ts:61` |
-| `research` | `fusion_research` | `clean_task` | `research` | `read`, `grep`, `find`, `ls`, `fusion_web_fetch` | none | `src/core/fusion/workflows.ts:99` |
-| `validate` | `fusion_validate` | `clean_task` | `inspect` | `read`, `grep`, `find`, `ls` | none | `src/core/fusion/workflows.ts:118` |
+| Workflow | Availability | Default | Tool | Context | Candidate capability | Candidate tools | Evaluator/merger tools | Provenance |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `investigate` | `feature:fusion` | yes | `fusion_investigate` | `clean_task` | `inspect` | `read`, `grep`, `find`, `ls` | none | `src/core/fusion/workflows.ts:80` |
+| `reason` | `feature:fusion` | yes | `fusion_reason` | `session_projection` | `reason` | none | none | `src/core/fusion/workflows.ts:61` |
+| `research` | `feature:fusion` | yes | `fusion_research` | `clean_task` | `research` | `read`, `grep`, `find`, `ls`, `fusion_web_fetch` | none | `src/core/fusion/workflows.ts:99` |
+| `validate` | `feature:fusion` | yes | `fusion_validate` | `clean_task` | `inspect` | `read`, `grep`, `find`, `ls` | none | `src/core/fusion/workflows.ts:118` |
 <!-- pi-docs:end name="fusion-workflows" -->
 
 This document is the primary behavioral owner for Fusion's package-owned source files listed in frontmatter. Shared parent-context and token-budget modules are referenced here only as dependencies; their behavior is not owned by this document.
 
 ## Public v1 surface
 
-Fusion v1 exposes exactly two commands and exactly four public tools:
+When `PI_BG_FEATURES` includes `fusion`, Fusion v1 exposes exactly two commands and exactly four public tools; all are absent otherwise:
 
 - `/fusion` — command shorthand for fixed-purpose `reason`.
 - `/fusion-models` — TUI-only global five-slot model selector.
@@ -109,7 +109,7 @@ Inspect/research candidates write sealed tool-call audit logs. The log contains 
 
 ## Child process isolation
 
-Fusion never calls direct completion APIs. It launches direct child `pi --mode text` processes and writes the prompt over stdin. Child argv includes `--no-session`, `--no-extensions`, `--no-skills`, `--no-prompt-templates`, `--no-themes`, and `--no-context-files`; explicit extensions still load. Non-Anthropic children receive only the package-owned compact metadata/runtime-governor extension. Anthropic children receive, in fixed order, the package-wide attribution/sanitization extension and the runtime governor. The same attribution implementation is globally loaded for ordinary package sessions; Fusion supplies its public extension entrypoint explicitly because ambient discovery is disabled. Attribution adds the Claude Code OAuth session header, linked account/device/session metadata, model-policy beta headers, system identity, beta-resource transport, cache surfaces, and model-aware cache usage pricing. It reads `userID` and `oauthAccount.accountUuid` from `~/.claude.json` without writing the file and fails loudly when required attribution data is absent or malformed. Its internal sanitizer removes all reviewed exact-match rejected prompt lines while preserving unrelated text and cache controls; no external sanitizer package is resolved.
+Fusion never calls direct completion APIs. It launches direct child `pi --mode text` processes and writes the prompt over stdin. Child argv includes `--no-session`, `--no-extensions`, `--no-skills`, `--no-prompt-templates`, `--no-themes`, and `--no-context-files`; explicit extensions still load. Non-Anthropic children receive only the package-owned compact metadata/runtime-governor extension. Anthropic children receive, in fixed order, the always-on `extensions/anthropic-attribution-child.ts` attribution/sanitization entrypoint and the runtime governor. Ordinary parent sessions use the separate feature-aware ambient entrypoint; disabling that ambient capability cannot disable explicit child safety. Attribution adds the Claude Code OAuth session header, linked account/device/session metadata, model-policy beta headers, system identity, beta-resource transport, cache surfaces, and model-aware cache usage pricing. It reads `userID` and `oauthAccount.accountUuid` from `~/.claude.json` without writing the file and fails loudly when required attribution data is absent or malformed. Its internal sanitizer removes all reviewed exact-match rejected prompt lines while preserving unrelated text and cache controls; no external sanitizer package is resolved.
 
 Child text mode writes the final full answer to stdout. The private child extension emits compact reasoning-free metadata frames to stderr for finalized assistant messages: provider/model, stop reason, text block byte counts and hashes, aggregate text hash, the complete Pi `Usage` object (including Anthropic `cacheWrite1h` and provider-reported reasoning subsets), and a closed cache-policy observation. It governs every final `before_provider_request` payload after attribution and sanitization. For Anthropic routes, the child environment defaults `PI_CACHE_RETENTION` to `long` before provider serialization, so the attribution/Pi adapter creates system, final-tool, and final-conversation breakpoints with `ttl: "1h"`; inherited `PI_CACHE_RETENTION=short|none|long` remains explicit, and call-level `cacheRetention="none"` still wins for compaction. The final governor validates and normalizes those upstream-selected breakpoints, falls back to short when model compatibility rejects long retention, preserves no-marker compaction payloads, enforces Anthropic's four-breakpoint ceiling, and appends the subscription prompt-caching-scope beta idempotently. Its `effective_retention` field describes the final payload, not provider acceptance. Provider usage is preserved verbatim: `cacheWrite1h > 0` proves a one-hour write, but zero is inconclusive on subscription OAuth. Live normal-spawn and exact Fusion-child controls each observed a unique cache read after 370 idle seconds despite `cacheWrite1h = 0`; therefore payload observations prove request intent and `cacheRead` proves reuse, while neither zero telemetry nor a six-minute hit alone proves the full one-hour lifetime. Malformed controls or policy values abort before transport. Non-Anthropic payloads and child environments remain unchanged apart from the governor's existing JSON normalization.
 

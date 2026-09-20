@@ -11,6 +11,30 @@ covers_sources: []
 
 This page lists operator-facing configuration found in source. It intentionally does not invent undocumented environment variables.
 
+## Capability and dock selection
+
+Configuration is read before any package registration on each extension activation and is re-read by a real Pi `/reload`. Invalid input throws a bounded `pi_bg_config_invalid` error; it never partially activates a requested subset or falls back to defaults.
+
+| Variable | Default | Accepted values and effect |
+|---|---|---|
+| `PI_BG_FEATURES` | `process,delegate,fusion,attested,attribution` | A comma-separated set of exact lowercase, unique tokens from `process`, `delegate`, `fusion`, `attested`, `attribution`. Whitespace, blanks, duplicates, unknown values, and omission of mandatory `process` are errors. |
+| `PI_BG_DOCK_SHORTCUT` | `shift+down` | Exactly `shift+down`, `ctrl+alt+b`, or `off`. Only the selected literal key is registered; `off` registers no dock shortcut. |
+
+Capabilities are independent except for the derived result surface:
+
+- `process` is mandatory and owns ordinary process commands/tools, the task UI/renderer, footer, and EventBus service.
+- `delegate` registers `bg_delegate`.
+- `fusion` registers `/fusion`, `/fusion-models`, the four `fusion_*` tools, and its result renderer.
+- `attested` registers `bg_run_pi_attested`.
+- `attribution` registers ambient parent-session Anthropic provider/hooks and `/claude-cache`.
+- `bg_result` is not a feature token. It is registered exactly once when `delegate` or `fusion` is enabled, and is absent when neither producer is enabled.
+
+Disabled tools, commands, renderers, and shortcuts are absent from registration and discovery; active-tool selection is also reconciled on session start so stale advanced names do not survive reload. `/tasks` and `/bg-tasks` are always available. With the dock shortcut off, the footer advertises `/tasks`; the alternate footer hint is `CtrlAltB`. `Ctrl+Alt+C` remains the terminal-dependent `/bg-clear` fallback in every configuration.
+
+Ambient attribution selection does not weaken package-owned isolated Anthropic children. Delegate, Fusion, and attested child argv always loads `extensions/anthropic-attribution-child.ts` before the child guard/governor, regardless of the parent `attribution` token.
+
+These flags select functionality only. They do not claim to reduce cold-start import cost; deferred loading and performance measurement are separate work.
+
 ## Update check
 
 At `session_start`, the extension performs a one-shot, time-boxed npm latest-version lookup. Failures are offline-safe: the footer simply shows no update segment.
@@ -61,7 +85,7 @@ Telemetry wrapping is best-effort and task-owned. Missing telemetry is reported 
 
 ## Global Anthropic attribution and caching
 
-Normal package installation loads the package-owned Anthropic attribution/sanitization extension before the background-task extension. Non-Anthropic routes are not rewritten; a non-target provider using `anthropic-messages` passes its host-owned model, legacy or normalized transcript context, endpoint, authentication, and options directly to the matching host SDK adapter. The adapter's stream/events/results are returned without reconstruction, preserving callbacks, live partial identity, optional fields, tool metadata, usage, and terminal error semantics. Anthropic sessions require Pi's subscription OAuth route and refuse metered Anthropic credentials.
+Normal package installation loads the feature-aware ambient Anthropic entrypoint before the background-task entrypoint. With the default `attribution` capability it registers the package-owned attribution/sanitization provider; without that capability it registers no parent provider, hooks, or `/claude-cache` command. Non-Anthropic routes are not rewritten; a non-target provider using `anthropic-messages` passes its host-owned model, legacy or normalized transcript context, endpoint, authentication, and options directly to the matching host SDK adapter. The adapter's stream/events/results are returned without reconstruction, preserving callbacks, live partial identity, optional fields, tool metadata, usage, and terminal error semantics. Anthropic sessions require Pi's subscription OAuth route and refuse metered Anthropic credentials.
 
 The account loader reads `userID` plus `oauthAccount.accountUuid` without writing the selected file. Precedence is an explicit absolute argument to the exported loader (programmatic/test use), then `PI_ANTHROPIC_ACCOUNT_CONFIG_PATH`, then `~/.claude.json`. The operator variable must name a non-empty absolute file path; relative/empty paths, unreadable or invalid JSON, and missing/blank required fields fail loudly. No alternate Claude directory variable is inferred. Package-owned Fusion, delegate, and attested children inherit this variable through their normal environment copies; account contents are neither copied to environment variables nor logged.
 
@@ -94,7 +118,7 @@ Use `/fusion-models` in TUI mode to configure five slots:
 
 Missing config means all five slots are `$current`. Config entries are qualified `provider/model` selections or `$current`; malformed config, stale explicit models, unavailable current models, and concurrent selector conflicts fail loudly before child inference.
 
-Fusion accepts frontier-model routes only through Pi Anthropic or Codex subscription OAuth where `ModelRegistry.isUsingOAuth` confirms the route. Metered frontier API-key/base-URL paths are rejected before child creation, and relevant metered environment variables are stripped from Fusion children. Anthropic children explicitly load the same package-owned global attribution/sanitization extension because Fusion disables ambient extension discovery. Missing or malformed attribution data fails loudly before Anthropic transport. Its subscription request policy is 200K, so Fusion clamps Anthropic budget capacity to 200K even when Pi's model catalog advertises a larger context.
+Fusion accepts frontier-model routes only through Pi Anthropic or Codex subscription OAuth where `ModelRegistry.isUsingOAuth` confirms the route. Metered frontier API-key/base-URL paths are rejected before child creation, and relevant metered environment variables are stripped from Fusion children. Anthropic children explicitly load the package-owned always-on child attribution/sanitization entrypoint because Fusion disables ambient extension discovery. This child safety path is independent of the parent ambient `attribution` capability. Missing or malformed attribution data fails loudly before Anthropic transport. Its subscription request policy is 200K, so Fusion clamps Anthropic budget capacity to 200K even when Pi's model catalog advertises a larger context.
 
 ## Fusion Claude prompt caching
 

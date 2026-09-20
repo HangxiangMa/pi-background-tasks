@@ -11,7 +11,9 @@ covers_sources: []
 
 <!-- pi-docs:begin name="tool-contract-bg_run" generator="scripts/docs/generate.mjs" -->
 - Label: **Background Run**
-- Source: `src/extension.ts:682`
+- Source: `src/extension.ts:750`
+- Availability: `always`
+- Available by default: **yes**
 - Description: Start a named long-running shell command in the background and return immediately with a task ID and output path. By default, completed, failed, or killed terminal state is delivered automatically as <background-task-notification> and starts a follow-up agent turn; do not sleep or poll merely to wait. Output is written to .pi/tasks and model-visible logs are bounded to 50.0KB.
 - Root schema: `object`
 
@@ -97,7 +99,7 @@ Legacy argument preparation can derive a missing `name` from `description` or `c
 
 Use for long-running tests, builds, servers, watchers, sleeps, and child agent work. Do not use normal foreground shell tools for commands expected to outlive the current turn.
 
-For an Anthropic child `pi`, keep normal extension discovery enabled. Do not pass `--no-extensions` unless the command also explicitly loads this package's `extensions/anthropic-attribution.ts` with `-e`/`--extension`.
+For an Anthropic child `pi`, keep normal extension discovery enabled when parent ambient attribution is enabled. Do not pass `--no-extensions` unless the command also explicitly loads this package's always-on `extensions/anthropic-attribution-child.ts` with `-e`/`--extension`.
 
 ## Defaults
 

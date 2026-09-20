@@ -11,7 +11,9 @@ covers_sources: []
 
 <!-- pi-docs:begin name="tool-contract-bg_result" generator="scripts/docs/generate.mjs" -->
 - Label: **Background Result**
-- Source: `src/delegate-extension.ts:516`
+- Source: `src/delegate-extension.ts:530`
+- Availability: `any(feature:delegate,feature:fusion)`
+- Available by default: **yes**
 - Description: Retrieve a hash-verified result from a bg_delegate or background Fusion task. Never blocks: a running task returns a typed not-ready result. Oversized answers are never truncated.
 - Root schema: `object`; additionalProperties: `false`
 
@@ -47,7 +49,7 @@ covers_sources: []
 </details>
 <!-- pi-docs:end name="tool-contract-bg_result" -->
 
-`bg_result` retrieves the result of a `bg_delegate` or background Fusion task. It never blocks: a running task returns a typed not-ready view, and a terminal task is verified before any answer bytes are returned.
+`bg_result` retrieves the result of a `bg_delegate` or background Fusion task. It is a derived surface: registered exactly once when `PI_BG_FEATURES` includes `delegate` or `fusion`, and absent when both producers are disabled. Delegate-only and Fusion-only configurations use the same verifier and retain their respective producer path. It never blocks: a running task returns a typed not-ready view, and a terminal task is verified before any answer bytes are returned.
 
 ## Public arguments
 

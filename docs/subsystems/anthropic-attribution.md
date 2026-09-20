@@ -5,15 +5,15 @@ mode: authored
 review_policy: behavioral
 stability: evolving
 covers_surfaces: []
-covers_sources: [extensions/anthropic-attribution.ts, src/core/anthropic-attribution-path.ts, src/core/anthropic-attribution.ts]
+covers_sources: [extensions/anthropic-attribution-child.ts, extensions/anthropic-attribution.ts, src/core/anthropic-attribution-path.ts, src/core/anthropic-attribution.ts]
 ---
 # Anthropic attribution subsystem
 
-This subsystem owns the package-wide Anthropic subscription attribution provider, exact-match system-prompt sanitization, cache-retention command, and the package extension path shared by isolated child Pi processes.
+This subsystem owns the package-wide Anthropic subscription attribution provider, exact-match system-prompt sanitization, cache-retention command, the feature-aware ambient parent entrypoint, and the distinct always-on extension path shared by isolated child Pi processes.
 
 ## Global package behavior
 
-`package.json.pi.extensions` loads `extensions/anthropic-attribution.ts` for every normal `pi-background-tasks` installation, before the background-task entrypoint. The extension is provider-gated: non-Anthropic sessions and payloads are unchanged.
+`package.json.pi.extensions` loads `extensions/anthropic-attribution.ts` for every normal `pi-background-tasks` installation, before the background-task entrypoint. It parses the complete shared configuration before registration. With the default `attribution` capability, it invokes the accepted attribution implementation; without that token it registers no parent provider, attribution lifecycle hooks, duplicate-owner responder, or `/claude-cache` command. An enabled ambient entrypoint removes only the provider registration it won through the duplicate-owner protocol during session shutdown, so a subsequent real reload with attribution disabled restores the host provider without adding a disabled-attribution cleanup hook. Invalid feature or dock configuration fails before any ambient attribution registration. When enabled, the transport remains provider-gated: non-Anthropic sessions and payloads are unchanged.
 
 For Anthropic sessions it registers the package-owned `anthropic` provider transport. Mandatory attribution is owned inside that transport from each request's Pi-supplied `options.sessionId`; `before_provider_request` remains optional middleware and is never an identity initializer. The transport applies the Claude Code subscription request contract:
 
@@ -54,15 +54,15 @@ Ownership is published only after all hooks and the command register. Extension 
 
 ## Isolated package children
 
-Ambient discovery is insufficient for child paths that use `--no-extensions`. `resolveAnthropicAttributionExtensionPath()` is the single package path seam used by:
+Ambient discovery and the parent capability flag are both insufficient for child paths that use `--no-extensions`. `resolveAnthropicAttributionExtensionPath()` resolves the distinct `extensions/anthropic-attribution-child.ts` entrypoint and is the single package path seam used by:
 
 - Fusion Anthropic children, before the Fusion runtime governor;
 - Anthropic delegate children, before the delegate guard;
 - Anthropic attested Pi children.
 
-Non-Anthropic child argv does not resolve or add this extension. Missing package extension bytes fail before child creation; no route substitution or sanitizer fallback is attempted.
+The child entrypoint directly invokes the accepted implementation and deliberately does not consult `PI_BG_FEATURES`. Non-Anthropic child argv does not resolve or add it. Missing package extension bytes fail before child creation; no route substitution or sanitizer fallback is attempted. Delegate and Fusion keep attribution before their guard/governor, and attested Anthropic argv adds the same entrypoint before the prompt.
 
-Arbitrary shell commands started through `bg_run` are not rewritten. An Anthropic child `pi` launched this way must keep normal extension discovery enabled. If the command deliberately uses `--no-extensions`, it must also explicitly load this package's `extensions/anthropic-attribution.ts` with `-e`/`--extension`; otherwise attribution and sanitization are bypassed and the launch is unsupported. The package does not parse or override arbitrary shell authority.
+Arbitrary shell commands started through `bg_run` are not rewritten. An Anthropic child `pi` launched this way may keep normal extension discovery enabled when ambient attribution is enabled. If the command deliberately uses `--no-extensions`, it must explicitly load this package's always-on `extensions/anthropic-attribution-child.ts` with `-e`/`--extension`; otherwise attribution and sanitization are bypassed and the launch is unsupported. The package does not parse or override arbitrary shell authority.
 
 ## Cache retention
 

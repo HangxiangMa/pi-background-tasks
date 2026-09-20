@@ -40,6 +40,11 @@ const ALLOWED_MODE = ['generated', 'authored', 'mixed'];
 const ALLOWED_REVIEW = ['contract', 'behavioral'];
 const ALLOWED_STABILITY = ['stable', 'evolving', 'frozen'];
 const PUBLIC_KINDS = ['command', 'tool', 'shortcut', 'renderer', 'eventbus', 'workflow'];
+const DOCS_FEATURE_VALUES = ['process', 'delegate', 'fusion', 'attested', 'attribution'];
+const DOCS_DEFAULT_FEATURES = ['process', 'delegate', 'fusion', 'attested', 'attribution'];
+const DOCS_DOCK_SHORTCUT_VALUES = ['shift+down', 'ctrl+alt+b', 'off'];
+const DOCS_DEFAULT_DOCK_SHORTCUT = 'shift+down';
+const ALWAYS_AVAILABLE = 'always';
 const EXCLUDED_PARENT_TOOL_NAMES = new Set(['delegate_read_artifact', 'fusion_web_fetch']);
 const ROOT_MARKDOWN_RELS = [
   'README.md',
@@ -346,6 +351,49 @@ function resolveIdentifierValue(ts, root, rel, name, cache, stack = []) {
   throw new DocsGateError(`${rel} references unsupported or non-literal identifier ${name}`);
 }
 
+function variantContractFromModule(ts, root, rel, cache) {
+  const read = (name) => resolveIdentifierValue(ts, root, rel, name, cache);
+  const featureValues = read('PI_BG_FEATURE_VALUES');
+  const defaultFeatures = read('PI_BG_DEFAULT_FEATURES');
+  const dockShortcutValues = read('PI_BG_DOCK_SHORTCUT_VALUES');
+  const defaultDockShortcut = read('PI_BG_DEFAULT_DOCK_SHORTCUT');
+  const assertExact = (label, actual, expected) => {
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new DocsGateError(
+        `${rel} runtime/docs variant enum drift for ${label}: expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}`,
+      );
+    }
+  };
+  assertExact('PI_BG_FEATURE_VALUES', featureValues, DOCS_FEATURE_VALUES);
+  assertExact('PI_BG_DEFAULT_FEATURES', defaultFeatures, DOCS_DEFAULT_FEATURES);
+  assertExact('PI_BG_DOCK_SHORTCUT_VALUES', dockShortcutValues, DOCS_DOCK_SHORTCUT_VALUES);
+  assertExact('PI_BG_DEFAULT_DOCK_SHORTCUT', defaultDockShortcut, DOCS_DEFAULT_DOCK_SHORTCUT);
+  return {
+    feature_values: [...featureValues],
+    default_features: [...defaultFeatures],
+    dock_shortcut_values: [...dockShortcutValues],
+    default_dock_shortcut: defaultDockShortcut,
+    source: rel,
+  };
+}
+
+function isDefaultAvailability(availability, variants) {
+  if (availability === ALWAYS_AVAILABLE) return true;
+  if (availability.startsWith('feature:')) {
+    return variants.default_features.includes(availability.slice('feature:'.length));
+  }
+  if (availability === 'any(feature:delegate,feature:fusion)') {
+    return (
+      variants.default_features.includes('delegate') ||
+      variants.default_features.includes('fusion')
+    );
+  }
+  if (availability.startsWith('dock:')) {
+    return variants.default_dock_shortcut === availability.slice('dock:'.length);
+  }
+  throw new DocsGateError(`unsupported normalized availability expression ${availability}`);
+}
+
 function resolveIdentifierExpr(ts, root, rel, name, cache, stack = []) {
   const key = `${rel}:${name}`;
   if (stack.includes(key)) throw new DocsGateError(`cyclic schema resolution for ${key}`);
@@ -578,7 +626,17 @@ const PUBLIC_REGISTRATION_METHODS = new Set([
 ]);
 const NON_PUBLIC_REGISTRATION_METHODS = new Set(['registerProvider']);
 
-function collectRegistrationsInFunction(ts, root, rel, fn, piParamName, cache, regs, visitedFns) {
+function collectRegistrationsInFunction(
+  ts,
+  root,
+  rel,
+  fn,
+  piParamName,
+  cache,
+  regs,
+  visitedFns,
+  inheritedAvailability = ALWAYS_AVAILABLE,
+) {
   const info = moduleInfo(ts, root, rel, cache);
   const localWrapperNames = new Set();
   const wrapperPublicKeys = [
@@ -618,6 +676,103 @@ function collectRegistrationsInFunction(ts, root, rel, fn, piParamName, cache, r
     if (!isPiHostExpression(unwrapped.expression)) return undefined;
     return unwrapped;
   };
+  const configBindings = new Map();
+  if (fn.body && ts.isBlock(fn.body)) {
+    for (const statement of fn.body.statements) {
+      if (!ts.isVariableStatement(statement)) continue;
+      if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+        const initializer = unwrapExpression(declaration.initializer);
+        if (!ts.isCallExpression(initializer) || initializer.arguments.length !== 0) continue;
+        const callee = calleeIdentifier(initializer.expression);
+        if (!callee) continue;
+        const imported = info.imports.get(callee.text);
+        if (!imported || imported.exported !== 'parseBackgroundTasksConfig') continue;
+        configBindings.set(
+          declaration.name.text,
+          variantContractFromModule(ts, root, imported.rel, cache),
+        );
+      }
+    }
+  }
+  const featureAvailabilityAtom = (condition) => {
+    const expression = unwrapExpression(condition);
+    if (!ts.isPropertyAccessExpression(expression)) return undefined;
+    const feature = expression.name.text;
+    const featuresAccess = unwrapExpression(expression.expression);
+    if (
+      !ts.isPropertyAccessExpression(featuresAccess) ||
+      featuresAccess.name.text !== 'features'
+    ) {
+      return undefined;
+    }
+    const binding = unwrapExpression(featuresAccess.expression);
+    if (!ts.isIdentifier(binding) || !configBindings.has(binding.text)) return undefined;
+    if (!['delegate', 'fusion', 'attested', 'attribution'].includes(feature)) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, condition, ts)} unsupported feature availability condition ${feature}`,
+      );
+    }
+    return `feature:${feature}`;
+  };
+  const dockAvailabilityAtom = (condition) => {
+    const expression = unwrapExpression(condition);
+    if (
+      !ts.isBinaryExpression(expression) ||
+      expression.operatorToken.kind !== ts.SyntaxKind.EqualsEqualsEqualsToken
+    ) {
+      return undefined;
+    }
+    const left = unwrapExpression(expression.left);
+    const right = unwrapExpression(expression.right);
+    if (!ts.isPropertyAccessExpression(left) || left.name.text !== 'dockShortcut') {
+      return undefined;
+    }
+    const binding = unwrapExpression(left.expression);
+    if (!ts.isIdentifier(binding) || !configBindings.has(binding.text)) return undefined;
+    if (!ts.isStringLiteral(right) && !ts.isNoSubstitutionTemplateLiteral(right)) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, condition, ts)} dock availability must compare with one literal shortcut`,
+      );
+    }
+    if (!['shift+down', 'ctrl+alt+b'].includes(right.text)) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, condition, ts)} dock availability ${right.text} cannot register a shortcut; off registers nothing`,
+      );
+    }
+    return `dock:${right.text}`;
+  };
+  const finiteAvailability = (condition) => {
+    const feature = featureAvailabilityAtom(condition);
+    if (feature !== undefined) return feature;
+    const dock = dockAvailabilityAtom(condition);
+    if (dock !== undefined) return dock;
+    const expression = unwrapExpression(condition);
+    if (
+      ts.isBinaryExpression(expression) &&
+      expression.operatorToken.kind === ts.SyntaxKind.BarBarToken
+    ) {
+      const left = featureAvailabilityAtom(expression.left);
+      const right = featureAvailabilityAtom(expression.right);
+      if (
+        left !== undefined &&
+        right !== undefined &&
+        new Set([left, right]).size === 2 &&
+        [left, right].every((value) =>
+          ['feature:delegate', 'feature:fusion'].includes(value),
+        )
+      ) {
+        return 'any(feature:delegate,feature:fusion)';
+      }
+      throw new DocsGateError(
+        `${lineOf(info.sf, condition, ts)} unsupported derived availability expression`,
+      );
+    }
+    throw new DocsGateError(
+      `${lineOf(info.sf, condition, ts)} unrecognized finite variant condition`,
+    );
+  };
   const isDirectCallTarget = (node) => {
     let current = node;
     while (
@@ -640,17 +795,38 @@ function collectRegistrationsInFunction(ts, root, rel, fn, piParamName, cache, r
     ts.isBinaryExpression(node) &&
     node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
     node.operatorToken.kind <= ts.SyntaxKind.LastAssignment;
-  const assertImmediateRegistrationCall = (call, body, context) => {
-    if (
-      !body ||
-      !ts.isBlock(body) ||
-      !ts.isExpressionStatement(call.parent) ||
-      call.parent.parent !== body
-    ) {
+  const registrationAvailability = (call, body, context, allowVariant = true) => {
+    if (!body || !ts.isBlock(body) || !ts.isExpressionStatement(call.parent)) {
       throw new DocsGateError(
         `${lineOf(info.sf, call, ts)} ${context} must be an immediate top-level statement`,
       );
     }
+    if (call.parent.parent === body) return inheritedAvailability;
+    const block = call.parent.parent;
+    const branch = block.parent;
+    if (
+      allowVariant &&
+      ts.isBlock(block) &&
+      ts.isIfStatement(branch) &&
+      branch.thenStatement === block &&
+      branch.elseStatement === undefined &&
+      branch.parent === body
+    ) {
+      if (inheritedAvailability !== ALWAYS_AVAILABLE) {
+        throw new DocsGateError(
+          `${lineOf(info.sf, call, ts)} nested availability expressions are unsupported`,
+        );
+      }
+      if (configBindings.size === 0) {
+        throw new DocsGateError(
+          `${lineOf(info.sf, call, ts)} ${context} must be an immediate top-level statement`,
+        );
+      }
+      return finiteAvailability(branch.expression);
+    }
+    throw new DocsGateError(
+      `${lineOf(info.sf, call, ts)} ${context} must be an immediate top-level statement`,
+    );
   };
   const expressionContainsLocalWrapper = (rootNode) => {
     let found = false;
@@ -845,10 +1021,11 @@ function collectRegistrationsInFunction(ts, root, rel, fn, piParamName, cache, r
       );
     }
     const registration = calls[0].call;
-    assertImmediateRegistrationCall(
+    registrationAvailability(
       registration,
       node.body,
       'tool wrapper registerTool call',
+      false,
     );
     const options = registration.arguments[0];
     if (!options) {
@@ -1045,31 +1222,51 @@ function collectRegistrationsInFunction(ts, root, rel, fn, piParamName, cache, r
       }
       const registration = directRegistrationAccess(node.expression);
       if (registration) {
-        assertImmediateRegistrationCall(node, fn.body, 'public registration call');
+        const availability = registrationAvailability(
+          node,
+          fn.body,
+          'public registration call',
+        );
         const method = registration.name.text;
         if (method === 'registerCommand') {
           const name = firstArgString(ts, root, rel, node, cache);
-          addSurface(regs, 'command', name, lineOf(info.sf, node, ts), commandDetails(ts, root, rel, name, node, cache));
+          addSurface(regs, 'command', name, lineOf(info.sf, node, ts), {
+            ...commandDetails(ts, root, rel, name, node, cache),
+            availability,
+          });
         } else if (method === 'registerShortcut') {
           const name = firstArgString(ts, root, rel, node, cache);
           const details = commandDetails(ts, root, rel, name, node, cache);
-          addSurface(regs, 'shortcut', name, lineOf(info.sf, node, ts), { description: details.description });
+          addSurface(regs, 'shortcut', name, lineOf(info.sf, node, ts), {
+            description: details.description,
+            availability,
+          });
         } else if (method === 'registerMessageRenderer') {
-          addSurface(regs, 'renderer', firstArgString(ts, root, rel, node, cache), lineOf(info.sf, node, ts));
+          addSurface(
+            regs,
+            'renderer',
+            firstArgString(ts, root, rel, node, cache),
+            lineOf(info.sf, node, ts),
+            { availability },
+          );
         } else if (method === 'registerTool') {
           const first = node.arguments[0];
           if (!first) throw new DocsGateError(`${lineOf(info.sf, node, ts)} registerTool has no options object`);
           const details = toolDetailsFromObject(ts, root, rel, first, cache, lineOf(info.sf, node, ts));
-          addSurface(regs, 'tool', details.name, details.source, details);
+          addSurface(regs, 'tool', details.name, details.source, { ...details, availability });
         }
       } else {
         const callee = calleeIdentifier(node.expression);
         if (callee && localWrapperNames.has(callee.text)) {
-          assertImmediateRegistrationCall(node, fn.body, 'local registration-wrapper call');
+          const availability = registrationAvailability(
+            node,
+            fn.body,
+            'local registration-wrapper call',
+          );
           const first = node.arguments[0];
           if (!first) throw new DocsGateError(`${lineOf(info.sf, node, ts)} local registration wrapper has no options object`);
           const details = toolDetailsFromObject(ts, root, rel, first, cache, lineOf(info.sf, node, ts));
-          addSurface(regs, 'tool', details.name, details.source, details);
+          addSurface(regs, 'tool', details.name, details.source, { ...details, availability });
         } else if (expressionContainsLocalWrapper(node.expression)) {
           throw new DocsGateError(
             `${lineOf(info.sf, node, ts)} unsupported derived registration-wrapper invocation`,
@@ -1082,7 +1279,11 @@ function collectRegistrationsInFunction(ts, root, rel, fn, piParamName, cache, r
           const imported = info.imports.get(callee.text);
           const first = node.arguments[0];
           if (imported && isPiHostExpression(first)) {
-            assertImmediateRegistrationCall(node, fn.body, 'imported registration-helper call');
+            const availability = registrationAvailability(
+              node,
+              fn.body,
+              'imported registration-helper call',
+            );
             const next = findExportedFunction(ts, root, imported.rel, imported.exported, cache);
             const nextKey = `${next.rel}:${imported.exported}`;
             if (visitedFns.has(nextKey)) {
@@ -1106,6 +1307,7 @@ function collectRegistrationsInFunction(ts, root, rel, fn, piParamName, cache, r
               cache,
               regs,
               visitedFns,
+              availability,
             );
           } else if (node.arguments.some((argument) => expressionContainsUnsafePiUse(argument))) {
             throw new DocsGateError(
@@ -1455,12 +1657,25 @@ export function buildCodeFacts(options = {}) {
   const cache = new Map();
   const tsSources = [...walkFiles(root, 'src', (f) => f.endsWith('.ts')), ...walkFiles(root, 'extensions', (f) => f.endsWith('.ts'))].sort();
   const governedSources = [...walkFiles(root, 'src', () => true), ...walkFiles(root, 'extensions', () => true)].sort();
-  const registrations = extractEntrypoint(root, pkg, ts, cache);
+  const configurationVariants = variantContractFromModule(
+    ts,
+    root,
+    'src/core/config.ts',
+    cache,
+  );
+  const registrations = extractEntrypoint(root, pkg, ts, cache).map((registration) => ({
+    ...registration,
+    availability: registration.availability ?? ALWAYS_AVAILABLE,
+    default_available: isDefaultAvailability(
+      registration.availability ?? ALWAYS_AVAILABLE,
+      configurationVariants,
+    ),
+  }));
   const eventBus = extractEventBus(ts, root, cache);
   const workflows = extractFusionWorkflows(ts, root, cache);
   const synthetic = [
-    { kind: 'eventbus', name: eventBus.id, id: `eventbus:${eventBus.id}`, source: eventBus.source, channels: eventBus.channels, operations: eventBus.operations },
-    ...workflows.map((workflow) => ({ kind: 'workflow', name: workflow.id, id: `workflow:${workflow.id}`, source: workflow.source, toolName: workflow.toolName, contextKind: workflow.contextKind })),
+    { kind: 'eventbus', name: eventBus.id, id: `eventbus:${eventBus.id}`, source: eventBus.source, channels: eventBus.channels, operations: eventBus.operations, availability: ALWAYS_AVAILABLE, default_available: true },
+    ...workflows.map((workflow) => ({ kind: 'workflow', name: workflow.id, id: `workflow:${workflow.id}`, source: workflow.source, toolName: workflow.toolName, contextKind: workflow.contextKind, availability: 'feature:fusion', default_available: isDefaultAvailability('feature:fusion', configurationVariants) })),
   ];
   const allSurfaces = uniqueRegistrations([...registrations, ...synthetic]);
   const byKind = Object.fromEntries(PUBLIC_KINDS.map((kind) => [kind, allSurfaces.filter((r) => r.kind === kind).map((r) => sortDeep(r))]));
@@ -1497,8 +1712,10 @@ export function buildCodeFacts(options = {}) {
   return sortDeep({
     package: packageFacts,
     lock: { name: lock.name, version: lock.version, rootVersion: lock.packages?.['']?.version ?? null },
+    configuration_variants: configurationVariants,
     public_surfaces: byKind,
     public_surface_ids: allSurfaces.map((r) => r.id).sort(),
+    default_public_surface_ids: allSurfaces.filter((r) => r.default_available).map((r) => r.id).sort(),
     tool_contracts: registrations.filter((r) => r.kind === 'tool').map((r) => sortDeep(r)).sort((a, b) => a.name.localeCompare(b.name)),
     command_contracts: registrations.filter((r) => r.kind === 'command').map((r) => sortDeep(r)).sort((a, b) => a.name.localeCompare(b.name)),
     shortcut_contracts: registrations.filter((r) => r.kind === 'shortcut').map((r) => sortDeep(r)).sort((a, b) => a.name.localeCompare(b.name)),
@@ -2040,7 +2257,9 @@ export function manifestObject(root, codeFacts, docsModel, coverage, regions, at
     generator: MARKER_GENERATOR,
     package: codeFacts.package,
     docs,
+    configuration_variants: codeFacts.configuration_variants,
     public_surface_ids: codeFacts.public_surface_ids,
+    default_public_surface_ids: codeFacts.default_public_surface_ids,
     public_surfaces: codeFacts.public_surfaces,
     surface_to_docs: coverage.surface_to_docs,
     source_to_docs: coverage.source_to_docs,
@@ -2079,9 +2298,24 @@ function replaceOrInsertRegion(body, name, regionBody, insertAfterHeading = true
   return `${region}\n${body}`;
 }
 
+function defaultAvailabilityLabel(item) {
+  return item.default_available ? 'yes' : 'no';
+}
+
 function surfaceRows(codeFacts) {
   const rows = [];
-  for (const kind of PUBLIC_KINDS) for (const item of codeFacts.public_surfaces[kind] ?? []) rows.push([kind, `\`${item.name}\``, `\`${item.id}\``, `\`${item.source}\``]);
+  for (const kind of PUBLIC_KINDS) {
+    for (const item of codeFacts.public_surfaces[kind] ?? []) {
+      rows.push([
+        kind,
+        `\`${item.name}\``,
+        `\`${item.id}\``,
+        `\`${item.availability}\``,
+        defaultAvailabilityLabel(item),
+        `\`${item.source}\``,
+      ]);
+    }
+  }
   return rows;
 }
 
@@ -2099,10 +2333,26 @@ function buildReadmePackageFacts(codeFacts) {
 }
 
 function buildReadmeSurfaceSummary(codeFacts) {
-  const counts = PUBLIC_KINDS.map((kind) => [kind, String((codeFacts.public_surfaces[kind] ?? []).length)]);
+  const counts = PUBLIC_KINDS.map((kind) => {
+    const surfaces = codeFacts.public_surfaces[kind] ?? [];
+    return [
+      kind,
+      String(surfaces.length),
+      String(surfaces.filter((surface) => surface.default_available).length),
+    ];
+  });
   const commandNames = codeFacts.public_surfaces.command.map((x) => `\`/${x.name}\``).join(', ');
   const toolNames = codeFacts.public_surfaces.tool.map((x) => `\`${x.name}\``).join(', ');
-  return `${mdTable(['Surface kind', 'Count'], counts)}\n\nPublic commands: ${commandNames}.\n\nPublic tools: ${toolNames}.\n\nFull owner map and generated contracts live in [docs/INDEX.md](docs/INDEX.md).`;
+  const variants = PUBLIC_KINDS.flatMap((kind) =>
+    (codeFacts.public_surfaces[kind] ?? [])
+      .filter((surface) => surface.availability !== ALWAYS_AVAILABLE)
+      .map((surface) => [
+        `\`${surface.id}\``,
+        `\`${surface.availability}\``,
+        defaultAvailabilityLabel(surface),
+      ]),
+  );
+  return `${mdTable(['Surface kind', 'Configured variants', 'Available by default'], counts)}\n\nPublic commands: ${commandNames}.\n\nPublic tools: ${toolNames}.\n\n### Configuration-dependent surfaces\n\n${mdTable(['Surface', 'Availability', 'Default'], variants)}\n\nFull owner map and generated contracts live in [docs/INDEX.md](docs/INDEX.md).`;
 }
 
 function buildIndexBody(codeFacts, docsModel, coverage) {
@@ -2123,7 +2373,7 @@ function buildIndexBody(codeFacts, docsModel, coverage) {
   }
   const categorySections = [...categories.keys()].sort().map((category) => `- **${category}**: ${categories.get(category).sort((a, b) => a.doc_id.localeCompare(b.doc_id)).map((doc) => `[${doc.doc_id}](./${posix.relative('docs', doc.rel)})`).join(', ')}`).join('\n');
   const ownerRows = Object.entries(coverage.surface_to_docs).map(([surface, docs]) => [`\`${surface}\``, `[${docs[0]}](./${docIdToHref(docs[0])})`]);
-  return `# Documentation index\n\nGenerated navigation for every package-local documentation page. This index intentionally owns no public surface and no production source; ownership is explicit in each primary doc's frontmatter.\n\n## Start here\n\n- [Getting started](./getting-started.md)\n- [Choose a workflow](./choose-a-workflow.md)\n- [Read before editing production sources](./read-before-edit.md)\n- [Runtime contracts](./reference/runtime-contracts.md)\n\n## Docs by audience\n\n${audienceSections}\n\n## Docs by category\n\n${categorySections}\n\n## Public surface owners\n\n${mdTable(['Surface', 'Primary doc'], ownerRows)}\n\n## Public surface inventory\n\n${mdTable(['Kind', 'Name', 'ID', 'Provenance'], surfaceRows(codeFacts))}\n`;
+  return `# Documentation index\n\nGenerated navigation for every package-local documentation page. This index intentionally owns no public surface and no production source; ownership is explicit in each primary doc's frontmatter.\n\n## Start here\n\n- [Getting started](./getting-started.md)\n- [Choose a workflow](./choose-a-workflow.md)\n- [Read before editing production sources](./read-before-edit.md)\n- [Runtime contracts](./reference/runtime-contracts.md)\n\n## Docs by audience\n\n${audienceSections}\n\n## Docs by category\n\n${categorySections}\n\n## Public surface owners\n\n${mdTable(['Surface', 'Primary doc'], ownerRows)}\n\n## Public surface inventory\n\n${mdTable(['Kind', 'Name', 'ID', 'Availability', 'Default', 'Provenance'], surfaceRows(codeFacts))}\n`;
 }
 
 function docIdToHref(docId) {
@@ -2132,12 +2382,19 @@ function docIdToHref(docId) {
 
 function buildReadBeforeEditBody(codeFacts, coverage) {
   const rows = codeFacts.governed_sources.map((s) => [`\`${s}\``, `[${coverage.source_to_docs[s][0]}](./${docIdToHref(coverage.source_to_docs[s][0])})`]);
-  return `# Read before editing production sources\n\nEvery production file under \`src/**\` and \`extensions/**\` has exactly one primary behavioral documentation owner. This file is generated from authored ownership frontmatter and owns no production source itself.\n\n## Source ownership\n\n${mdTable(['Source', 'Primary behavioral owner'], rows)}\n\n## Public surfaces\n\n${list(codeFacts.public_surface_ids.map((s) => `\`${s}\``))}\n`;
+  const surfaces = PUBLIC_KINDS.flatMap((kind) => codeFacts.public_surfaces[kind] ?? []).map(
+    (surface) => [
+      `\`${surface.id}\``,
+      `\`${surface.availability}\``,
+      defaultAvailabilityLabel(surface),
+    ],
+  );
+  return `# Read before editing production sources\n\nEvery production file under \`src/**\` and \`extensions/**\` has exactly one primary behavioral documentation owner. This file is generated from authored ownership frontmatter and owns no production source itself.\n\n## Source ownership\n\n${mdTable(['Source', 'Primary behavioral owner'], rows)}\n\n## Public surfaces\n\n${mdTable(['Surface', 'Availability', 'Default'], surfaces)}\n`;
 }
 
 function buildFreshnessRegion(codeFacts, docsModel, attestations) {
   const missing = attestations.filter((x) => x.state !== 'pass').length;
-  return `- Canonical package version: \`${codeFacts.package.version}\`\n- Governed markdown docs: ${String(docsModel.docs.length)}\n- Public surfaces extracted: ${String(codeFacts.public_surface_ids.length)}\n- Governed production sources: ${String(codeFacts.governed_sources.length)}\n- Tool contracts extracted: ${String(codeFacts.tool_contracts.length)}\n- Schema IDs extracted: ${String(codeFacts.schema_ids.length)}\n- Environment variable references extracted: ${String(codeFacts.environment_variables.length)}\n- Behavioral attestation receipts not passing: ${String(missing)}\n- Receipt store: \`${ATTESTATIONS_PATH}\`\n\n\`npm run docs:verify\` is read-only: it renders generated files twice in memory and compares them with committed bytes. \`npm run docs:generate\` is the only docs writer.`;
+  return `- Canonical package version: \`${codeFacts.package.version}\`\n- Governed markdown docs: ${String(docsModel.docs.length)}\n- Public surfaces extracted: ${String(codeFacts.public_surface_ids.length)}\n- Public surfaces available by default: ${String(codeFacts.default_public_surface_ids.length)}\n- Finite feature values: ${codeFacts.configuration_variants.feature_values.map((value) => `\`${value}\``).join(', ')}\n- Finite dock shortcut values: ${codeFacts.configuration_variants.dock_shortcut_values.map((value) => `\`${value}\``).join(', ')}\n- Governed production sources: ${String(codeFacts.governed_sources.length)}\n- Tool contracts extracted: ${String(codeFacts.tool_contracts.length)}\n- Schema IDs extracted: ${String(codeFacts.schema_ids.length)}\n- Environment variable references extracted: ${String(codeFacts.environment_variables.length)}\n- Behavioral attestation receipts not passing: ${String(missing)}\n- Receipt store: \`${ATTESTATIONS_PATH}\`\n\n\`npm run docs:verify\` is read-only: it renders generated files twice in memory and compares them with committed bytes. \`npm run docs:generate\` is the only docs writer.`;
 }
 
 function schemaType(schema) {
@@ -2169,19 +2426,40 @@ function propertyRows(schema, prefix = '') {
 }
 
 function buildToolContractRegion(tool) {
-  return `${tool.label ? `- Label: **${tool.label}**\n` : ''}- Source: \`${tool.source}\`\n- Description: ${tool.description ?? 'none'}\n- Root schema: \`${tool.schema.type}\`${tool.schema.additionalProperties !== undefined ? `; additionalProperties: \`${String(tool.schema.additionalProperties)}\`` : ''}\n\n${mdTable(['Field', 'Required', 'Type', 'Description', 'Constraints'], propertyRows(tool.schema))}\n\n<details>\n<summary>Normalized TypeBox contract</summary>\n\n${codeBlockJson(tool.schema)}\n</details>`;
+  return `${tool.label ? `- Label: **${tool.label}**\n` : ''}- Source: \`${tool.source}\`\n- Availability: \`${tool.availability}\`\n- Available by default: **${defaultAvailabilityLabel(tool)}**\n- Description: ${tool.description ?? 'none'}\n- Root schema: \`${tool.schema.type}\`${tool.schema.additionalProperties !== undefined ? `; additionalProperties: \`${String(tool.schema.additionalProperties)}\`` : ''}\n\n${mdTable(['Field', 'Required', 'Type', 'Description', 'Constraints'], propertyRows(tool.schema))}\n\n<details>\n<summary>Normalized TypeBox contract</summary>\n\n${codeBlockJson(tool.schema)}\n</details>`;
 }
 
 function buildCommandContractRegion(commands) {
-  return mdTable(['Command', 'Description', 'Provenance'], commands.map((cmd) => [`\`/${cmd.name}\``, cmd.description ?? '', `\`${cmd.source}\``]));
+  return mdTable(
+    ['Command', 'Availability', 'Default', 'Description', 'Provenance'],
+    commands.map((cmd) => [
+      `\`/${cmd.name}\``,
+      `\`${cmd.availability}\``,
+      defaultAvailabilityLabel(cmd),
+      cmd.description ?? '',
+      `\`${cmd.source}\``,
+    ]),
+  );
 }
 
 function buildShortcutRegion(codeFacts) {
-  return mdTable(['Shortcut', 'Description', 'Provenance'], codeFacts.shortcut_contracts.map((s) => [`\`${s.name}\``, s.description ?? '', `\`${s.source}\``]));
+  return mdTable(
+    ['Shortcut', 'Availability', 'Default', 'Description', 'Provenance'],
+    codeFacts.shortcut_contracts.map((shortcut) => [
+      `\`${shortcut.name}\``,
+      `\`${shortcut.availability}\``,
+      defaultAvailabilityLabel(shortcut),
+      shortcut.description ?? '',
+      `\`${shortcut.source}\``,
+    ]),
+  );
 }
 
 function buildEventBusRegion(codeFacts) {
-  return `${mdTable(['Channel purpose', 'Channel', 'Schema'], [
+  const surface = codeFacts.public_surfaces.eventbus.find(
+    (item) => item.id === 'eventbus:background-task-v1',
+  );
+  return `Availability: \`${surface?.availability ?? ALWAYS_AVAILABLE}\`; available by default: **${surface?.default_available ? 'yes' : 'no'}**.\n\n${mdTable(['Channel purpose', 'Channel', 'Schema'], [
     ['Request', `\`${codeFacts.event_bus.channels.request}\``, `\`${codeFacts.event_bus.schemas.request}\``],
     ['Response', `\`${codeFacts.event_bus.channels.response}\``, `\`${codeFacts.event_bus.schemas.response}\``],
     ['Terminal', `\`${codeFacts.event_bus.channels.terminal}\``, `\`${codeFacts.event_bus.schemas.terminal}\``],
@@ -2189,14 +2467,34 @@ function buildEventBusRegion(codeFacts) {
 }
 
 function buildFusionWorkflowRegion(codeFacts) {
-  return mdTable(['Workflow', 'Tool', 'Context', 'Candidate capability', 'Candidate tools', 'Evaluator/merger tools', 'Provenance'], codeFacts.fusion_workflows.map((w) => [`\`${w.id}\``, `\`${w.toolName}\``, `\`${w.contextKind}\``, `\`${w.candidateCapability}\``, w.candidateTools.length ? w.candidateTools.map((x) => `\`${x}\``).join(', ') : 'none', 'none', `\`${w.source}\``]));
+  return mdTable(
+    ['Workflow', 'Availability', 'Default', 'Tool', 'Context', 'Candidate capability', 'Candidate tools', 'Evaluator/merger tools', 'Provenance'],
+    codeFacts.fusion_workflows.map((workflow) => {
+      const surface = codeFacts.public_surfaces.workflow.find(
+        (item) => item.id === `workflow:${workflow.id}`,
+      );
+      return [
+        `\`${workflow.id}\``,
+        `\`${surface?.availability ?? 'feature:fusion'}\``,
+        surface?.default_available ? 'yes' : 'no',
+        `\`${workflow.toolName}\``,
+        `\`${workflow.contextKind}\``,
+        `\`${workflow.candidateCapability}\``,
+        workflow.candidateTools.length
+          ? workflow.candidateTools.map((x) => `\`${x}\``).join(', ')
+          : 'none',
+        'none',
+        `\`${workflow.source}\``,
+      ];
+    }),
+  );
 }
 
 function buildRuntimeRegion(codeFacts) {
   const envRows = codeFacts.environment_variables.map((e) => [`\`${e.name}\``, e.access.join(', '), e.sources.map((s) => `\`${s}\``).join('<br>')]);
   const pathRows = codeFacts.runtime_paths_and_artifacts.map((p) => [p.kind, `\`${p.value}\``, `\`${p.source}\``]);
   const schemaRows = codeFacts.schema_ids.map((s) => [`\`${s.id}\``, `\`${s.source}\``]);
-  return `### Environment variable references\n\n${mdTable(['Name', 'Access', 'Provenance'], envRows)}\n\n### Runtime paths and artifacts\n\n${mdTable(['Kind', 'Path/artifact', 'Provenance'], pathRows)}\n\n### Schema identifiers\n\n${mdTable(['Schema', 'Provenance'], schemaRows)}\n\n### Status vocabularies\n\n${codeBlockJson(codeFacts.status_vocabularies)}`;
+  return `### Configuration variants\n\n${codeBlockJson(codeFacts.configuration_variants)}\n### Environment variable references\n\n${mdTable(['Name', 'Access', 'Provenance'], envRows)}\n\n### Runtime paths and artifacts\n\n${mdTable(['Kind', 'Path/artifact', 'Provenance'], pathRows)}\n\n### Schema identifiers\n\n${mdTable(['Schema', 'Provenance'], schemaRows)}\n\n### Status vocabularies\n\n${codeBlockJson(codeFacts.status_vocabularies)}`;
 }
 
 function applyGeneratedRegionsToDoc(doc, codeFacts, coverage, docsModel, attestations) {

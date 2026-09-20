@@ -473,6 +473,7 @@ void describe('package', () => {
       'src/core/attested-pi-run.ts',
       'src/core/anthropic-attribution.ts',
       'src/core/anthropic-attribution-path.ts',
+      'src/core/config.ts',
       'src/core/pi-launch.ts',
       'src/core/fusion/orchestrator.ts',
       'src/core/fusion/pi-child.ts',
@@ -497,6 +498,7 @@ void describe('package', () => {
       'src/core/delegate/hook-contract-evidence.json',
       'src/delegate-extension.ts',
       'src/delegate-child-extension.ts',
+      'extensions/anthropic-attribution-child.ts',
       'extensions/anthropic-attribution.ts',
       'extensions/background-tasks.ts',
       'extensions/fusion-child.ts',
@@ -505,8 +507,12 @@ void describe('package', () => {
       assert.ok(existsSync(new URL(f, root)), f);
 
     const extensionSource = await text('src/extension.ts');
-    assert.match(extensionSource, /registerFusionExtension\(pi, \{/);
-    assert.match(extensionSource, /registerDelegateExtension\(pi, \{/);
+    assert.match(extensionSource, /if \(config\.features\.fusion\) \{[\s\S]*?registerFusionExtension\(pi, \{/);
+    assert.match(extensionSource, /if \(config\.features\.delegate\) \{[\s\S]*?registerDelegateExtension\(pi, \{/);
+    assert.match(
+      extensionSource,
+      /if \(config\.features\.delegate \|\| config\.features\.fusion\) \{[\s\S]*?registerBackgroundResultExtension\(pi, \{/,
+    );
     assert.match(p.scripts['test:hook-contract'] ?? '', /pi-hook-contract/);
     assert.match(
       p.scripts['test'] ?? '',
@@ -1992,6 +1998,7 @@ void describe('package', () => {
     assert.ok(firstEntry, 'npm pack must return one entry');
     const files = firstEntry.files.map((file) => file.path).sort();
     for (const f of [
+      'extensions/anthropic-attribution-child.ts',
       'extensions/anthropic-attribution.ts',
       'extensions/background-tasks.ts',
       'extensions/fusion-child.ts',
@@ -2001,6 +2008,7 @@ void describe('package', () => {
       'src/core/registry.ts',
       'src/core/anthropic-attribution.ts',
       'src/core/anthropic-attribution-path.ts',
+      'src/core/config.ts',
       'src/core/extension-api.ts',
       'src/core/attested-pi-run.ts',
       'src/core/pi-launch.ts',
@@ -2344,6 +2352,7 @@ void describe('package', () => {
         'docs/assets/architecture.svg',
         'docs/assets/footer-dock.svg',
         'docs/assets/logo.svg',
+        'extensions/anthropic-attribution-child.ts',
         'extensions/anthropic-attribution.ts',
         'extensions/background-tasks.ts',
         'extensions/fusion-child.ts',
@@ -2353,6 +2362,7 @@ void describe('package', () => {
         'src/core/registry.ts',
         'src/core/anthropic-attribution.ts',
         'src/core/anthropic-attribution-path.ts',
+        'src/core/config.ts',
         'src/core/extension-api.ts',
         'src/core/attested-pi-run.ts',
         'src/core/pi-launch.ts',

@@ -10,6 +10,8 @@ covers_sources: [src/core/extension-api.ts]
 # EventBus API v1
 
 <!-- pi-docs:begin name="eventbus-contract" generator="scripts/docs/generate.mjs" -->
+Availability: `always`; available by default: **yes**.
+
 | Channel purpose | Channel | Schema |
 | --- | --- | --- |
 | Request | `pi-background-tasks:request:v1` | `pi-background-tasks.extension-request.v1` |

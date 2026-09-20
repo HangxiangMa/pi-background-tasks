@@ -305,10 +305,13 @@ function optionalPositiveInteger(value: unknown, label: string): number | undefi
 export interface DelegateExtensionDependencies {
   startDelegateTask: (ctx: ExtensionContext, options: StartDelegateTaskOptions) => Promise<BgTask>;
   snapshot: (task: BgTask) => BgTaskSnapshot;
-  resolveTask: (idOrPrefix: string) => BgTask;
-  claimFusionUsage: (task: BgTask) => Promise<boolean>;
   /** Overridable so tests can supply observed evidence without touching disk. */
   loadHookEvidence?: (() => Promise<DelegateHookContractEvidence>) | undefined;
+}
+
+export interface BackgroundResultExtensionDependencies {
+  resolveTask: (idOrPrefix: string) => BgTask;
+  claimFusionUsage: (task: BgTask) => Promise<boolean>;
 }
 
 async function defaultHookEvidence(): Promise<DelegateHookContractEvidence> {
@@ -513,6 +516,17 @@ export function registerDelegateExtension(
     },
   });
 
+  pi.on('session_start', () => {
+    const active = pi.getActiveTools();
+    const missing = [DELEGATE_TOOL_NAME].filter((name) => !active.includes(name));
+    if (missing.length > 0) pi.setActiveTools([...active, ...missing]);
+  });
+}
+
+export function registerBackgroundResultExtension(
+  pi: ExtensionAPI,
+  deps: BackgroundResultExtensionDependencies,
+): void {
   pi.registerTool<typeof ResultParams, BackgroundResultDetails>({
     name: DELEGATE_RESULT_TOOL_NAME,
     label: 'Background Result',
@@ -796,9 +810,7 @@ export function registerDelegateExtension(
 
   pi.on('session_start', () => {
     const active = pi.getActiveTools();
-    const missing = [DELEGATE_TOOL_NAME, DELEGATE_RESULT_TOOL_NAME].filter(
-      (name) => !active.includes(name),
-    );
+    const missing = [DELEGATE_RESULT_TOOL_NAME].filter((name) => !active.includes(name));
     if (missing.length > 0) pi.setActiveTools([...active, ...missing]);
   });
 }

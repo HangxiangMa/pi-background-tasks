@@ -137,7 +137,7 @@ void describe('delegate child isolation', () => {
     childSessionId: 'delegate-child-1',
     childSessionDir: '/tmp/task/child-session',
     childExtensionPath: '/pkg/extensions/delegate-child.ts',
-    attributionExtensionPath: '/pkg/extensions/anthropic-attribution.ts',
+    attributionExtensionPath: '/pkg/extensions/anthropic-attribution-child.ts',
     systemPrompt: 'child system prompt',
   });
 
@@ -182,7 +182,7 @@ void describe('delegate child isolation', () => {
       entry === '--extension' ? [argv[index + 1] ?? ''] : [],
     );
     assert.deepEqual(extensionPaths, [
-      '/pkg/extensions/anthropic-attribution.ts',
+      '/pkg/extensions/anthropic-attribution-child.ts',
       '/pkg/extensions/delegate-child.ts',
     ]);
   });
@@ -246,7 +246,7 @@ void describe('delegate child isolation', () => {
       childSessionId: 'delegate-ambient',
       childSessionDir: '/tmp/task/ambient-session',
       childExtensionPath: '/pkg/extensions/delegate-child.ts',
-      attributionExtensionPath: '/pkg/extensions/anthropic-attribution.ts',
+      attributionExtensionPath: '/pkg/extensions/anthropic-attribution-child.ts',
       systemPrompt: 'child system prompt',
     });
     assert.ok(!ambient.includes('--no-extensions'));
@@ -265,7 +265,10 @@ void describe('delegate child isolation', () => {
       ambient.flatMap((entry, index) =>
         entry === '--extension' ? [ambient[index + 1] ?? ''] : [],
       ),
-      ['/pkg/extensions/anthropic-attribution.ts', '/pkg/extensions/delegate-child.ts'],
+      [
+        '/pkg/extensions/anthropic-attribution-child.ts',
+        '/pkg/extensions/delegate-child.ts',
+      ],
     );
     assert.equal(ambient[ambient.indexOf('--provider') + 1], 'anthropic');
     assert.equal(ambient[ambient.indexOf('--model') + 1], 'claude-test');

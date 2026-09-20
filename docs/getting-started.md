@@ -55,7 +55,7 @@ Use the footer dock or commands:
 /logs <task id> 20000
 ```
 
-Press **Shift↓** to open the dock when the `bg ...` footer appears. `/bg-clear` acknowledges finished-task footer notices.
+Press the configured dock key (**Shift↓** by default, or **Ctrl+Alt+B**) when the `bg ...` footer appears. With `PI_BG_DOCK_SHORTCUT=off`, use `/tasks` or `/bg-tasks`. `/bg-clear` acknowledges finished-task footer notices.
 
 ## 4. Start an agent-launched background task
 

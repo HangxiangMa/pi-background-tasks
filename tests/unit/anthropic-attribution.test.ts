@@ -479,7 +479,7 @@ void describe('global Anthropic attribution extension', () => {
     assert.deepEqual(
       buildAttestedPiArgv(
         { ...base, provider: 'anthropic' },
-        '/pkg/extensions/anthropic-attribution.ts',
+        '/pkg/extensions/anthropic-attribution-child.ts',
       ),
       [
         'pi',
@@ -490,7 +490,7 @@ void describe('global Anthropic attribution extension', () => {
         '--model',
         'model',
         '--extension',
-        '/pkg/extensions/anthropic-attribution.ts',
+        '/pkg/extensions/anthropic-attribution-child.ts',
         'write report.md',
       ],
     );

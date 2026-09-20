@@ -37,13 +37,28 @@ const codeFacts = buildCodeFacts();
 const docsModel = loadDocsModel();
 
 assert.equal(docsModel.docs.length, 42, 'all docs/**/*.md are governed');
-assert.equal(codeFacts.public_surface_ids.length, 31, 'all command/tool/shortcut/renderer/EventBus/workflow surfaces are extracted');
+assert.equal(codeFacts.public_surface_ids.length, 32, 'all command/tool/shortcut/renderer/EventBus/workflow surfaces are extracted');
+assert.equal(codeFacts.default_public_surface_ids.length, 31, 'alternate dock shortcut is the only non-default surface');
 assert.ok(codeFacts.public_surface_ids.includes('eventbus:background-task-v1'));
 assert.ok(codeFacts.public_surface_ids.includes('workflow:research'));
+const surfaceById = new Map(
+  Object.values(codeFacts.public_surfaces).flat().map((surface) => [surface.id, surface]),
+);
+assert.equal(surfaceById.get('tool:bg_delegate').availability, 'feature:delegate');
+assert.equal(surfaceById.get('tool:fusion_reason').availability, 'feature:fusion');
+assert.equal(
+  surfaceById.get('tool:bg_result').availability,
+  'any(feature:delegate,feature:fusion)',
+);
+assert.equal(surfaceById.get('tool:bg_run_pi_attested').availability, 'feature:attested');
+assert.equal(surfaceById.get('command:claude-cache').availability, 'feature:attribution');
+assert.equal(surfaceById.get('shortcut:shift+down').availability, 'dock:shift+down');
+assert.equal(surfaceById.get('shortcut:ctrl+alt+b').availability, 'dock:ctrl+alt+b');
+assert.equal(surfaceById.get('shortcut:ctrl+alt+b').default_available, false);
 assert.equal(docsModel.docs.find((doc) => doc.doc_id === 'INDEX').frontmatter.covers_surfaces.length, 0, 'INDEX must not own public surfaces');
 assert.equal(docsModel.docs.find((doc) => doc.doc_id === 'read-before-edit').frontmatter.covers_sources.length, 0, 'read-before-edit must not own sources');
 const envNames = new Set(codeFacts.environment_variables.map((entry) => entry.name));
-for (const expectedEnv of ['PI_BG_SHELL', 'PI_BG_SHELL_PATH', 'PI_BG_DISABLE_PI_TELEMETRY', 'ComSpec', 'SystemRoot', 'WINDIR']) assert.ok(envNames.has(expectedEnv), `missing env extraction for ${expectedEnv}`);
+for (const expectedEnv of ['PI_BG_FEATURES', 'PI_BG_DOCK_SHORTCUT', 'PI_BG_SHELL', 'PI_BG_SHELL_PATH', 'PI_BG_DISABLE_PI_TELEMETRY', 'ComSpec', 'SystemRoot', 'WINDIR']) assert.ok(envNames.has(expectedEnv), `missing env extraction for ${expectedEnv}`);
 assert.ok(!envNames.has('FUSION_CHILD_IDLE_TIMEOUT_MS'), 'fixed timeout constant must not be classified as env');
 const runtimeArtifacts = new Set(codeFacts.runtime_paths_and_artifacts.map((entry) => entry.value));
 for (const expectedArtifact of [
@@ -166,6 +181,92 @@ mustThrow(
   () => assertRegistrationFixture(`export default function x(pi){ function registerTool(options: any): void { pi.registerTool({ ...options }); } registerTool({ ${validToolFields} }); }`),
   /must not use object spread/,
 );
+const finiteVariantConfig = `
+export const PI_BG_FEATURE_VALUES = Object.freeze(['process', 'delegate', 'fusion', 'attested', 'attribution'] as const);
+export const PI_BG_DEFAULT_FEATURES = PI_BG_FEATURE_VALUES;
+export const PI_BG_DOCK_SHORTCUT_VALUES = Object.freeze(['shift+down', 'ctrl+alt+b', 'off'] as const);
+export const PI_BG_DEFAULT_DOCK_SHORTCUT = 'shift+down';
+export function parseBackgroundTasksConfig(){ return {} as any; }
+`;
+assert.deepEqual(
+  assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': `import { parseBackgroundTasksConfig } from './config.js'; import { registerFeature } from './feature.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); if (config.features.delegate) { pi.registerCommand('delegate-only', {}); } if (config.features.delegate || config.features.fusion) { registerFeature(pi); } if (config.dockShortcut === 'ctrl+alt+b') { pi.registerShortcut('ctrl+alt+b', {}); } }`,
+      'config.ts': finiteVariantConfig,
+      'feature.ts': "export function registerFeature(pi){ pi.registerCommand('shared-result', {}); }",
+    },
+  }),
+  ['command:delegate-only', 'command:shared-result', 'shortcut:ctrl+alt+b'],
+  'closed feature, derived-result, and shortcut variants must be extracted',
+);
+mustThrow(
+  'finite variant enum drift',
+  () => assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); if (config.features.delegate) { pi.registerCommand('hidden', {}); } }",
+      'config.ts': finiteVariantConfig.replace("'attribution'", "'attribution', 'invented'"),
+    },
+  }),
+  /variant enum drift|unsupported feature enum/,
+);
+mustThrow(
+  'finite shortcut enum drift',
+  () => assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); if (config.dockShortcut === 'ctrl+alt+b') { pi.registerShortcut('ctrl+alt+b', {}); } }",
+      'config.ts': finiteVariantConfig.replace("'ctrl+alt+b', 'off'", "'ctrl+alt+b', 'off', 'super+x'"),
+    },
+  }),
+  /variant enum drift/,
+);
+mustThrow(
+  'unknown finite feature condition',
+  () => assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); if (config.features.invented) { pi.registerCommand('hidden', {}); } }",
+      'config.ts': finiteVariantConfig,
+    },
+  }),
+  /unsupported feature availability condition|unrecognized finite variant condition/,
+);
+mustThrow(
+  'dock off cannot register a shortcut',
+  () => assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); if (config.dockShortcut === 'off') { pi.registerShortcut('shift+down', {}); } }",
+      'config.ts': finiteVariantConfig,
+    },
+  }),
+  /dock.*off|unrecognized finite variant condition/,
+);
+mustThrow(
+  'mutated derived availability expression',
+  () => assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); if (config.features.delegate && config.features.fusion) { pi.registerCommand('hidden', {}); } }",
+      'config.ts': finiteVariantConfig,
+    },
+  }),
+  /derived availability|unrecognized finite variant condition/,
+);
+mustThrow(
+  'aliased finite config binding',
+  () => assertRegistrationFixture({
+    entry: 'entry.ts',
+    files: {
+      'entry.ts': "import { parseBackgroundTasksConfig } from './config.js'; export default function x(pi){ const config = parseBackgroundTasksConfig(); const selected = config; if (selected.features.delegate) { pi.registerCommand('hidden', {}); } }",
+      'config.ts': finiteVariantConfig,
+    },
+  }),
+  /unrecognized finite variant condition|immediate top-level statement/,
+);
+
 mustThrow(
   'conditional registerTool inside wrapper',
   () => assertRegistrationFixture(`export default function x(pi){ function registerTool(options: any): void { if (enabled) { pi.registerTool({ name: options.name, label: options.label, description: options.description, promptSnippet: options.promptSnippet, promptGuidelines: options.promptGuidelines, parameters: options.parameters }); } } registerTool({ ${validToolFields} }); }`),
