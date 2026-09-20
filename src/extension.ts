@@ -255,6 +255,8 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   let disposed = false;
   let shutdownCleanupStarted = false;
   let reloadHandoffFailed = false;
+  let shutdownReason = 'shutdown';
+  const activationCloseFence = new SynchronousActivationCloseFence();
 
   const registryContext = (ctx: ExtensionContext): BackgroundTaskContext => ({
     cwd: ctx.cwd,
@@ -328,10 +330,16 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     if (handoffError !== undefined) throw handoffError;
   };
 
-  // Register the synchronous detach/publication barrier before any managed
-  // workflow shutdown handler. No old host closure survives this callback.
+  // Join the one synchronous all-lane barrier before any facade can register
+  // asynchronous cleanup. The core callback performs an eligible reload
+  // handoff first; every lazy lane then closes on the same call stack before
+  // Pi can await any later cleanup handler.
+  activationCloseFence.add(() => {
+    beginSessionShutdown(shutdownReason);
+  });
   pi.on('session_shutdown', (event) => {
-    beginSessionShutdown(event.reason);
+    shutdownReason = event.reason;
+    activationCloseFence.close();
   });
 
   // This is the first session_start callback. Claim synchronously before the
@@ -415,6 +423,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       },
       snapshot: (task) => registry.snapshot(task),
       updateManagedTask: (task, state, line) => registry.updateManagedTask(task, state, line),
+      activationCloseFence,
     });
   }
 
@@ -427,6 +436,9 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
         return registry.startDelegateTask(nextRegistryCtx, options);
       },
       snapshot: (task) => registry.snapshot(task),
+      isDelegateTaskRegistered: (taskId) =>
+        registry.allTasks().some((task) => task.id === taskId && task.delegate !== undefined),
+      activationCloseFence,
     });
   }
 
@@ -434,6 +446,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     registerBackgroundResultExtension(pi, {
       resolveTask: (idOrPrefix) => registry.resolveTask(idOrPrefix),
       claimFusionUsage: (task) => registry.claimFusionUsage(task),
+      activationCloseFence,
     });
   }
 

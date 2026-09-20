@@ -1163,7 +1163,8 @@ void describe('package', () => {
     assert.match(extension, /resultDetails: result\.details/);
     const resultExtension = await text('src/delegate-extension.ts');
     assert.match(resultExtension, /claimFusionUsage/);
-    assert.match(resultExtension, /usage: cloneFusionUsage\(verified\.details\.usage\)/);
+    assert.match(resultExtension, /const usage = cloneFusionUsage\(verified\.details\.usage\)/);
+    assert.match(resultExtension, /resultWithUsage:[\s\S]*?usage,/);
   });
 
   void it('keeps background Fusion retrieval durable, verified, and once-accounted', async () => {
@@ -1209,6 +1210,11 @@ void describe('package', () => {
       resultExtension.indexOf('loaded.readFusionCommittedResult') <
         resultExtension.indexOf('await deps.claimFusionUsage(task)'),
       'verification must finish before the once-only usage claim',
+    );
+    assert.ok(
+      resultExtension.indexOf('const usage = cloneFusionUsage(verified.details.usage)') <
+        resultExtension.indexOf('await deps.claimFusionUsage(task)'),
+      'usage cloning must finish before the durable claim settlement point',
     );
     assert.match(registry, /async claimFusionUsage/);
     assert.match(

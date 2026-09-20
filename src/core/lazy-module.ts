@@ -1,5 +1,36 @@
 export type LazyModuleState = 'unloaded' | 'loading' | 'loaded' | 'failed' | 'closed';
 
+/** Activation-local synchronous close callbacks installed by the entrypoint. */
+export class SynchronousActivationCloseFence {
+  private closed = false;
+  private readonly callbacks = new Set<() => void>();
+
+  add(callback: () => void): void {
+    this.callbacks.add(callback);
+    if (this.closed) callback();
+  }
+
+  close(): void {
+    this.closed = true;
+    // Re-run idempotent teardown callbacks on repeated lifecycle dispatch. The
+    // core callback deliberately clears handles assigned by racing continuations.
+    const failures: unknown[] = [];
+    for (const callback of this.callbacks) {
+      try {
+        callback();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        `synchronous activation close barrier failed in ${String(failures.length)} callback(s)`,
+      );
+    }
+  }
+}
+
 const MODULE_ID_MAX_CHARS = 120;
 const CAUSE_MAX_CHARS = 480;
 const CLOSE_REASON_MAX_CHARS = 160;

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +18,13 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import type { BgTask, DelegateTaskFacts } from '../../src/core/common.js';
 import type { DelegateHookContractEvidence } from '../../src/core/delegate/hook-contract.js';
+import { prepareDelegateLaunch } from '../../src/core/delegate/runner.js';
+import { SynchronousActivationCloseFence } from '../../src/core/lazy-module.js';
+import {
+  FUSION_RESULT_SCHEMA_VERSION,
+  type FusionResultDetails,
+  type FusionRunResult,
+} from '../../src/core/fusion/types.js';
 import {
   registerBackgroundResultExtension,
   registerDelegateExtension,
@@ -67,6 +75,16 @@ async function rejected(promise: Promise<unknown>): Promise<unknown> {
   assert.fail('expected rejection');
 }
 
+async function settlement(
+  promise: Promise<unknown>,
+): Promise<{ value: unknown; error?: undefined } | { value?: undefined; error: unknown }> {
+  try {
+    return { value: await promise };
+  } catch (error) {
+    return { error };
+  }
+}
+
 interface Harness {
   readonly session: AgentSession;
   readonly root: string;
@@ -110,6 +128,14 @@ async function harness(factory: ExtensionFactory, mode: 'json' | 'tui' = 'json')
   return { session, root, shutdown: false };
 }
 
+function installActivationCloseFence(pi: ExtensionAPI): SynchronousActivationCloseFence {
+  const fence = new SynchronousActivationCloseFence();
+  pi.on('session_shutdown', () => {
+    fence.close();
+  });
+  return fence;
+}
+
 async function close(h: Harness): Promise<void> {
   if (!h.shutdown) {
     h.shutdown = true;
@@ -121,6 +147,14 @@ async function close(h: Harness): Promise<void> {
 function tool(h: Harness, name: string) {
   const found = h.session.getToolDefinition(name);
   assert.ok(found, `missing tool ${name}`);
+  return found;
+}
+
+function command(h: Harness, name: string) {
+  const found = h.session.extensionRunner
+    .getRegisteredCommands()
+    .find((candidate) => candidate.invocationName === name);
+  assert.ok(found, `missing command ${name}`);
   return found;
 }
 
@@ -200,6 +234,7 @@ function successfulDelegateRuntime(): DelegateExtensionRuntime {
           extensionMode: 'isolated',
           autoDeliver: 'never',
         },
+        rollback: async () => undefined,
       }),
   };
 }
@@ -274,6 +309,43 @@ function fusionTask(id: string): BgTask {
   };
 }
 
+function verifiedFusionRun(runId: string): FusionRunResult {
+  const details: FusionResultDetails = {
+    schema_version: FUSION_RESULT_SCHEMA_VERSION,
+    run_id: runId,
+    workflow: 'reason',
+    source: 'tool',
+    status: 'completed',
+    context: { kind: 'session_projection', policy_id: 'lazy-lifecycle-test' },
+    tool_policy: { candidate_tools: [], evaluation_tools: [], merge_tools: [] },
+    artifact_dir: `.pi/fusion/${runId}`,
+    models: {
+      candidates: ['fixture/a', 'fixture/b', 'fixture/c'],
+      evaluator: 'fixture/evaluator',
+      merger: 'fixture/merger',
+      thinking_level: 'off',
+    },
+    evaluator_attempts: 1,
+    usage: {
+      input: 1,
+      output: 2,
+      cacheRead: 3,
+      cacheWrite: 4,
+      totalTokens: 10,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    budget: {
+      policy_id: 'lazy-lifecycle-test',
+      calibration_version: 'test',
+      route_table: [],
+      rate_sources: [],
+      unknown_provider_warnings: [],
+      calibration_warnings: [],
+    },
+  };
+  return { mergedText: 'verified answer', details };
+}
+
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -286,6 +358,7 @@ void describe('lazy delegate/Fusion facades through the real SDK runner', { conc
     let starters = 0;
     const h = await harness((pi: ExtensionAPI) => {
       registerDelegateExtension(pi, {
+        activationCloseFence: installActivationCloseFence(pi),
         startDelegateTask: async () => {
           starters += 1;
           throw new Error('starter must not run in this fixture');
@@ -293,6 +366,7 @@ void describe('lazy delegate/Fusion facades through the real SDK runner', { conc
         snapshot: () => {
           throw new Error('snapshot must not run in this fixture');
         },
+        isDelegateTaskRegistered: () => false,
         loadHookEvidence: async () => HOOK_EVIDENCE,
         loadRuntime: () => {
           imports += 1;
@@ -331,6 +405,7 @@ void describe('lazy delegate/Fusion facades through the real SDK runner', { conc
     let starters = 0;
     const h = await harness((pi: ExtensionAPI) => {
       registerFusionExtension(pi, {
+        activationCloseFence: installActivationCloseFence(pi),
         startManagedTask: async () => {
           starters += 1;
           throw new Error('managed starter must not run in this fixture');
@@ -379,11 +454,13 @@ void describe('lazy delegate/Fusion facades through the real SDK runner', { conc
     const h = await harness((pi: ExtensionAPI) => {
       activations += 1;
       registerDelegateExtension(pi, {
+        activationCloseFence: installActivationCloseFence(pi),
         startDelegateTask: async () => {
           starters += 1;
           return baseTask('fresh-success');
         },
         snapshot: (task) => task,
+        isDelegateTaskRegistered: () => false,
         loadHookEvidence: async () => HOOK_EVIDENCE,
         loadRuntime: async () => {
           imports += 1;
@@ -438,6 +515,7 @@ void describe('lazy delegate/Fusion facades through the real SDK runner', { conc
     let starters = 0;
     const h = await harness((pi: ExtensionAPI) => {
       registerDelegateExtension(pi, {
+        activationCloseFence: installActivationCloseFence(pi),
         startDelegateTask: async () => {
           starters += 1;
           throw new Error('late starter');
@@ -445,6 +523,7 @@ void describe('lazy delegate/Fusion facades through the real SDK runner', { conc
         snapshot: () => {
           throw new Error('late snapshot');
         },
+        isDelegateTaskRegistered: () => false,
         loadHookEvidence: async () => HOOK_EVIDENCE,
         loadRuntime: () => {
           imports += 1;
@@ -483,6 +562,7 @@ void describe('lazy delegate/Fusion facades through the real SDK runner', { conc
     let starters = 0;
     const h = await harness((pi: ExtensionAPI) => {
       registerFusionExtension(pi, {
+        activationCloseFence: installActivationCloseFence(pi),
         startManagedTask: async () => {
           starters += 1;
           throw new Error('late managed starter');
@@ -531,6 +611,7 @@ void describe('lazy delegate/Fusion facades through the real SDK runner', { conc
     let claims = 0;
     const h = await harness((pi: ExtensionAPI) => {
       registerBackgroundResultExtension(pi, {
+        activationCloseFence: installActivationCloseFence(pi),
         resolveTask: (id) => {
           const task = tasks.get(id);
           if (!task) throw new Error('unknown fixture task');
@@ -573,6 +654,350 @@ void describe('lazy delegate/Fusion facades through the real SDK runner', { conc
     }
   });
 
+  void it('closes every composed facade before blocked Fusion cleanup can pause shutdown', async () => {
+    const fusionBarrier = deferred<FusionExecutionRuntime>();
+    let fusionImports = 0;
+    let delegateRuntimeCalls = 0;
+    let delegateStarters = 0;
+    let resultResolutions = 0;
+    const h = await harness((pi: ExtensionAPI) => {
+      const activationCloseFence = new SynchronousActivationCloseFence();
+      pi.on('session_shutdown', () => {
+        activationCloseFence.close();
+      });
+      registerFusionExtension(pi, {
+        startManagedTask: async () => {
+          throw new Error('managed starter must remain fenced');
+        },
+        snapshot: () => {
+          throw new Error('snapshot must remain fenced');
+        },
+        updateManagedTask: async () => undefined,
+        activationCloseFence,
+        loadExecutionRuntime: () => {
+          fusionImports += 1;
+          return fusionBarrier.promise;
+        },
+      });
+      registerDelegateExtension(pi, {
+        startDelegateTask: async () => {
+          delegateStarters += 1;
+          throw new Error('delegate starter must remain fenced');
+        },
+        snapshot: () => {
+          throw new Error('delegate snapshot must remain fenced');
+        },
+        isDelegateTaskRegistered: () => false,
+        activationCloseFence,
+        loadHookEvidence: async () => HOOK_EVIDENCE,
+        loadRuntime: async () =>
+          delegateRuntime(() => {
+            delegateRuntimeCalls += 1;
+            throw new Error('delegate runtime ran after shutdown began');
+          }),
+      });
+      registerBackgroundResultExtension(pi, {
+        resolveTask: () => {
+          resultResolutions += 1;
+          throw new Error('result registry ran after shutdown began');
+        },
+        claimFusionUsage: async () => false,
+        activationCloseFence,
+      });
+    });
+    let releaseFusion = false;
+    try {
+      const pendingFusion = settlement(execute(h, 'fusion_reason', { prompt: 'blocked' }));
+      await waitUntil(() => fusionImports === 1);
+      const hostCalls: string[] = [];
+      const staleUi: ExtensionUIContext = {
+        ...h.session.extensionRunner.getUIContext(),
+        editor: async () => {
+          hostCalls.push('ui.editor');
+          return 'late prompt';
+        },
+        notify: () => {
+          hostCalls.push('ui.notify');
+        },
+      };
+      const staleCommandContext = new Proxy(
+        h.session.extensionRunner.createCommandContext(),
+        {
+          get(target, property, receiver) {
+            if (property === 'mode') return 'rpc';
+            if (property === 'waitForIdle') {
+              return async () => {
+                hostCalls.push('waitForIdle');
+              };
+            }
+            if (property === 'ui') return staleUi;
+            return Reflect.get(target, property, receiver);
+          },
+        },
+      );
+      h.shutdown = true;
+      let shutdownFinished = false;
+      const shutdown = h.session.extensionRunner
+        .emit({ type: 'session_shutdown', reason: 'reload' })
+        .then(() => {
+          shutdownFinished = true;
+        });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(shutdownFinished, false, 'Fusion settlement should still be blocking cleanup');
+
+      const staleContext = h.session.extensionRunner.createContext();
+      const staleDelegate = settlement(
+        tool(h, 'bg_delegate').execute(
+          'stale-delegate',
+          { name: 'stale', prompt: 'stale' },
+          undefined,
+          undefined,
+          staleContext,
+        ),
+      );
+      const staleResult = settlement(
+        tool(h, 'bg_result').execute(
+          'stale-result',
+          { taskId: 'stale' },
+          undefined,
+          undefined,
+          staleContext,
+        ),
+      );
+      const staleFusionDirect = settlement(
+        Promise.resolve(command(h, 'fusion').handler('late', staleCommandContext)),
+      );
+      const staleFusionEditor = settlement(
+        Promise.resolve(command(h, 'fusion').handler('', staleCommandContext)),
+      );
+      const staleSelector = settlement(
+        Promise.resolve(command(h, 'fusion-models').handler('', staleCommandContext)),
+      );
+      const staleSettlements = await Promise.all([
+        staleDelegate,
+        staleResult,
+        staleFusionDirect,
+        staleFusionEditor,
+        staleSelector,
+      ]);
+
+      releaseFusion = true;
+      fusionBarrier.resolve(
+        fusionRuntime(() => {
+          throw new Error('release blocked Fusion import');
+        }),
+      );
+      await Promise.all([pendingFusion, shutdown]);
+
+      for (const observed of staleSettlements) {
+        assert.ok(observed.error instanceof Error, 'every retained facade must reject');
+        assert.match(observed.error.message, /lazy_module_closed|closed activation|shutting down/u);
+      }
+      assert.deepEqual(hostCalls, [], 'stale commands must not touch their old host context');
+      assert.equal(delegateRuntimeCalls, 0);
+      assert.equal(delegateStarters, 0);
+      assert.equal(resultResolutions, 0);
+    } finally {
+      if (!releaseFusion) {
+        fusionBarrier.resolve(
+          fusionRuntime(() => {
+            throw new Error('test cleanup release');
+          }),
+        );
+      }
+      await close(h);
+    }
+  });
+
+  void it('rolls back a complete real delegate preparation closed by AgentSession.reload()', async () => {
+    const preparedReady = deferred<string>();
+    const releasePrepared = deferred<void>();
+    let starters = 0;
+    const runtime: DelegateExtensionRuntime = {
+      loadDelegateHookContractEvidence: () => HOOK_EVIDENCE,
+      resolveDelegateRoute: () => ({
+        provider: 'fixture',
+        model: 'fixture',
+        qualified_id: 'fixture/fixture',
+        context_window_tokens: 100_000_000,
+        thinking_level: 'off',
+        origin: 'explicit',
+      }),
+      prepareDelegateLaunch: async (input) => {
+        const prepared = await prepareDelegateLaunch(input);
+        preparedReady.resolve(prepared.store.artifactDirAbs);
+        await releasePrepared.promise;
+        return prepared;
+      },
+    };
+    const h = await harness((pi: ExtensionAPI) => {
+      registerDelegateExtension(pi, {
+        activationCloseFence: installActivationCloseFence(pi),
+        startDelegateTask: async () => {
+          starters += 1;
+          throw new Error('starter must remain fenced');
+        },
+        snapshot: (task) => task,
+        isDelegateTaskRegistered: () => false,
+        loadHookEvidence: async () => HOOK_EVIDENCE,
+        loadRuntime: async () => runtime,
+      });
+    });
+    try {
+      const oldTool = tool(h, 'bg_delegate');
+      const pending = settlement(
+        oldTool.execute(
+          'prepare-real-reload',
+          {
+            name: 'rollback real preparation',
+            prompt: 'write the complete launch transaction before returning',
+            route: { provider: 'fixture', model: 'fixture' },
+          },
+          undefined,
+          undefined,
+          h.session.extensionRunner.createContext(),
+        ),
+      );
+      const artifactDir = await preparedReady.promise;
+      assert.equal(existsSync(join(artifactDir, 'seed.json')), true);
+      assert.equal(existsSync(join(artifactDir, 'context-omission-ledger.json')), true);
+      assert.equal(existsSync(join(artifactDir, 'child-prompt.txt')), true);
+
+      const oldRunner = h.session.extensionRunner;
+      const reload = h.session.reload();
+      await new Promise((resolve) => setImmediate(resolve));
+      releasePrepared.resolve(undefined);
+      const [observed] = await Promise.all([pending, reload]);
+
+      assert.notEqual(h.session.extensionRunner, oldRunner);
+      assert.ok(observed.error instanceof Error);
+      assert.match(observed.error.message, /lazy_module_closed/u);
+      assert.equal(starters, 0);
+      assert.equal(existsSync(artifactDir), false, 'the unregistered run root must be removed');
+      assert.equal(
+        existsSync(join(h.root, 'project', '.pi', 'delegate')),
+        false,
+        'empty preparation parents must not retain delegate bytes or run directories',
+      );
+    } finally {
+      releasePrepared.resolve(undefined);
+      await close(h);
+    }
+  });
+
+  void it('does not roll back artifacts after delegate task ownership transfers', async () => {
+    const starterEntered = deferred<void>();
+    const releaseStarter = deferred<void>();
+    const baseRuntime = successfulDelegateRuntime();
+    let rollbacks = 0;
+    let registered = false;
+    const runtime: DelegateExtensionRuntime = {
+      ...baseRuntime,
+      prepareDelegateLaunch: async (input) => {
+        const prepared = await baseRuntime.prepareDelegateLaunch(input);
+        return {
+          ...prepared,
+          rollback: async () => {
+            rollbacks += 1;
+          },
+        };
+      },
+    };
+    const h = await harness((pi: ExtensionAPI) => {
+      registerDelegateExtension(pi, {
+        activationCloseFence: installActivationCloseFence(pi),
+        startDelegateTask: async () => {
+          registered = true;
+          starterEntered.resolve(undefined);
+          await releaseStarter.promise;
+          return baseTask('fresh-success');
+        },
+        snapshot: (task) => task,
+        isDelegateTaskRegistered: () => registered,
+        loadHookEvidence: async () => HOOK_EVIDENCE,
+        loadRuntime: async () => runtime,
+      });
+    });
+    try {
+      const pending = settlement(execute(h, 'bg_delegate', { name: 'owned', prompt: 'owned' }));
+      await starterEntered.promise;
+      h.shutdown = true;
+      const shutdown = h.session.extensionRunner.emit({
+        type: 'session_shutdown',
+        reason: 'reload',
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      releaseStarter.resolve(undefined);
+      const [observed] = await Promise.all([pending, shutdown]);
+      assert.ok(observed.error instanceof Error);
+      assert.match(observed.error.message, /lazy_module_closed/u);
+      assert.equal(rollbacks, 0, 'registered task artifacts belong to the registry lifecycle');
+    } finally {
+      releaseStarter.resolve(undefined);
+      await close(h);
+    }
+  });
+
+  void it('settles a started Fusion usage claim as the one successful retrieval across reload', async () => {
+    const task = fusionTask('usage-race');
+    const claimStarted = deferred<void>();
+    const releaseClaim = deferred<void>();
+    let activations = 0;
+    const claim = async (candidate: BgTask): Promise<boolean> => {
+      if (candidate.fusion === undefined || candidate.fusion.usageDelivered) return false;
+      candidate.fusion.usageDelivered = true;
+      claimStarted.resolve(undefined);
+      await releaseClaim.promise;
+      return true;
+    };
+    const h = await harness((pi: ExtensionAPI) => {
+      activations += 1;
+      registerBackgroundResultExtension(pi, {
+        activationCloseFence: installActivationCloseFence(pi),
+        resolveTask: () => task,
+        claimFusionUsage: claim,
+        loadFusionResultRuntime: async () => ({
+          readFusionCommittedResult: async () => verifiedFusionRun(task.id),
+          readFusionFailureResult: async () => {
+            throw new Error('failure verifier must stay unused');
+          },
+        }),
+        loadDelegateResultRuntime: async () => {
+          throw new Error('delegate verifier must stay unused');
+        },
+      });
+    });
+    try {
+      const oldTool = tool(h, 'bg_result');
+      const oldPending = settlement(
+        oldTool.execute(
+          'usage-old',
+          { taskId: task.id, delivery: 'inline' },
+          undefined,
+          undefined,
+          h.session.extensionRunner.createContext(),
+        ),
+      );
+      await claimStarted.promise;
+      await h.session.reload();
+      releaseClaim.resolve(undefined);
+      const old = await oldPending;
+
+      assert.equal(activations, 2);
+      assert.equal(old.error, undefined);
+      assert.equal(field(field(old.value, 'details'), 'usage_delivered'), true);
+      assert.ok(field(old.value, 'usage') !== undefined, 'the settled old call must carry usage');
+      assert.equal(task.fusion?.usageDelivered, true);
+
+      const fresh = await execute(h, 'bg_result', { taskId: task.id, delivery: 'inline' });
+      assert.equal(field(field(fresh, 'details'), 'usage_delivered'), false);
+      assert.equal(field(fresh, 'usage'), undefined, 'fresh retrieval must not duplicate usage');
+    } finally {
+      releaseClaim.resolve(undefined);
+      await close(h);
+    }
+  });
+
   void it('loads only the model-selector lane and leaves editor cancellation cold', async () => {
     let executionImports = 0;
     let selectorImports = 0;
@@ -598,6 +1023,7 @@ void describe('lazy delegate/Fusion facades through the real SDK runner', { conc
     };
     const h = await harness((pi: ExtensionAPI) => {
       registerFusionExtension(pi, {
+        activationCloseFence: installActivationCloseFence(pi),
         startManagedTask: async () => {
           throw new Error('managed starter must stay cold');
         },

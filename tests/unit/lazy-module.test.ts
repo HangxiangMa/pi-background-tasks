@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { LazyModule } from '../../src/core/lazy-module.js';
+import {
+  LazyModule,
+  SynchronousActivationCloseFence,
+} from '../../src/core/lazy-module.js';
 
 interface FixtureModule {
   readonly value: number;
@@ -30,6 +33,60 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
   }
   assert.fail('expected promise to reject');
 }
+
+void describe('synchronous activation close fence', () => {
+  void it('closes every lane before returning and preserves repeated teardown', () => {
+    const fence = new SynchronousActivationCloseFence();
+    const closed: string[] = [];
+
+    fence.add(() => {
+      closed.push('core');
+    });
+    fence.add(() => {
+      closed.push('fusion');
+    });
+    fence.add(() => {
+      closed.push('delegate');
+    });
+    fence.add(() => {
+      closed.push('result');
+    });
+
+    fence.close();
+    assert.deepEqual(closed, ['core', 'fusion', 'delegate', 'result']);
+    fence.close();
+    assert.deepEqual(closed, [
+      'core',
+      'fusion',
+      'delegate',
+      'result',
+      'core',
+      'fusion',
+      'delegate',
+      'result',
+    ]);
+
+    fence.add(() => {
+      closed.push('late');
+    });
+    assert.deepEqual(closed.slice(-1), ['late']);
+  });
+
+  void it('attempts every close callback before surfacing a barrier failure', () => {
+    const fence = new SynchronousActivationCloseFence();
+    let laterLaneClosed = false;
+    fence.add(() => {
+      throw new Error('close failure marker');
+    });
+    fence.add(() => {
+      laterLaneClosed = true;
+    });
+    assert.throws(() => {
+      fence.close();
+    }, /synchronous activation close barrier failed/u);
+    assert.equal(laterLaneClosed, true);
+  });
+});
 
 void describe('LazyModule', () => {
   void it('stores one cold import while concurrent callers run independently', async () => {

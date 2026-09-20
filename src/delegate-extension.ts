@@ -42,7 +42,10 @@ import {
   DELEGATE_DEFAULT_TIMEOUT_SECONDS,
   DELEGATE_INLINE_ANSWER_BYTES,
 } from './core/delegate/facade-contract.js';
-import { LazyModule } from './core/lazy-module.js';
+import {
+  LazyModule,
+  SynchronousActivationCloseFence,
+} from './core/lazy-module.js';
 
 /**
  * `bg_delegate` and `bg_result` registration.
@@ -337,6 +340,8 @@ export interface DelegatePreparedLaunch {
   stdinBytes: Buffer;
   env: NodeJS.ProcessEnv;
   facts: DelegateTaskFacts;
+  /** Producer-owned rollback, valid only before registry ownership transfers. */
+  rollback: () => Promise<void>;
 }
 
 export interface DelegateExtensionRuntime {
@@ -392,6 +397,10 @@ async function importFusionResultRuntime(): Promise<FusionResultRuntime> {
 export interface DelegateExtensionDependencies {
   startDelegateTask: (ctx: ExtensionContext, options: StartDelegateTaskOptions) => Promise<BgTask>;
   snapshot: (task: BgTask) => BgTaskSnapshot;
+  /** Exact ownership check used only after a rejected starter. */
+  isDelegateTaskRegistered: (taskId: string) => boolean;
+  /** Activation-local fence installed synchronously before asynchronous cleanup. */
+  activationCloseFence: SynchronousActivationCloseFence;
   /** Overridable so tests can supply observed evidence without touching disk. */
   loadHookEvidence?: (() => Promise<DelegateHookContractEvidence>) | undefined;
   /** Internal deterministic deferred-import seam. */
@@ -401,6 +410,8 @@ export interface DelegateExtensionDependencies {
 export interface BackgroundResultExtensionDependencies {
   resolveTask: (idOrPrefix: string) => BgTask;
   claimFusionUsage: (task: BgTask) => Promise<boolean>;
+  /** Activation-local fence installed synchronously before asynchronous cleanup. */
+  activationCloseFence: SynchronousActivationCloseFence;
   /** Internal deterministic deferred-import seams. */
   loadDelegateResultRuntime?: (() => Promise<DelegateResultRuntime>) | undefined;
   loadFusionResultRuntime?: (() => Promise<FusionResultRuntime>) | undefined;
@@ -428,6 +439,30 @@ async function defaultHookEvidence(
   return runtime.run((loaded) => loaded.loadDelegateHookContractEvidence(raw));
 }
 
+const DELEGATE_ROLLBACK_ERROR_MAX_CHARS = 320;
+
+function boundedDelegateRollbackError(error: unknown): string {
+  const text = (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, ' ').trim();
+  if (text.length <= DELEGATE_ROLLBACK_ERROR_MAX_CHARS) return text;
+  return `${text.slice(0, DELEGATE_ROLLBACK_ERROR_MAX_CHARS)}…`;
+}
+
+async function rollbackUnregisteredDelegatePreparation(
+  prepared: DelegatePreparedLaunch,
+  originalError: unknown,
+): Promise<void> {
+  try {
+    await prepared.rollback();
+  } catch (cleanupError) {
+    const failure = new AggregateError(
+      [originalError, cleanupError],
+      `bg_delegate could not remove an unregistered preparation: ${boundedDelegateRollbackError(cleanupError)}`,
+    );
+    console.error(`[delegate] ${failure.message}`);
+    throw failure;
+  }
+}
+
 export function registerDelegateExtension(
   pi: ExtensionAPI,
   deps: DelegateExtensionDependencies,
@@ -437,9 +472,29 @@ export function registerDelegateExtension(
     deps.loadRuntime ?? importDelegateExtensionRuntime,
   );
   const loadEvidence = deps.loadHookEvidence ?? (() => defaultHookEvidence(runtime));
+  const preparationAbort = new AbortController();
+  const pendingPreparations = new Set<Promise<void>>();
 
-  pi.on('session_shutdown', () => {
+  const trackPreparation = <T>(operation: Promise<T>): Promise<T> => {
+    const drained = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    pendingPreparations.add(drained);
+    void drained.then(() => {
+      pendingPreparations.delete(drained);
+    });
+    return operation;
+  };
+
+  const closeDelegateActivation = (): void => {
     runtime.close('Pi session shutdown');
+    preparationAbort.abort(new Error('Pi session shutdown cancelled delegate preparation'));
+  };
+  deps.activationCloseFence.add(closeDelegateActivation);
+
+  pi.on('session_shutdown', async () => {
+    await Promise.all([...pendingPreparations]);
   });
 
   pi.registerTool<typeof DelegateParams, DelegateLaunchDetails>({
@@ -528,40 +583,82 @@ export function registerDelegateExtension(
         });
 
         runtime.assertOpen();
-        const prepared = await loaded.prepareDelegateLaunch({
-          ctx: {
-            cwd: ctx.cwd,
-            sessionManager: ctx.sessionManager,
-            getSystemPrompt: () => ctx.getSystemPrompt(),
-          },
-          toolCallId,
-          prompt: params.prompt,
-          capability,
-          extensionMode,
-          route,
-          limitOverrides: {
-            maxTurns: params.maxTurns,
-            maxToolCalls: params.maxToolCalls,
-            timeoutSeconds: params.timeoutSeconds,
-          },
-          hookEvidence,
-          cwd: ctx.cwd,
-          sessionId: ctx.sessionManager.getSessionId(),
-          autoDeliver,
-        });
+        const transaction = (async () => {
+          let prepared: DelegatePreparedLaunch | undefined;
+          try {
+            prepared = await loaded.prepareDelegateLaunch({
+              ctx: {
+                cwd: ctx.cwd,
+                sessionManager: ctx.sessionManager,
+                getSystemPrompt: () => ctx.getSystemPrompt(),
+              },
+              toolCallId,
+              prompt: params.prompt,
+              capability,
+              extensionMode,
+              route,
+              limitOverrides: {
+                maxTurns: params.maxTurns,
+                maxToolCalls: params.maxToolCalls,
+                timeoutSeconds: params.timeoutSeconds,
+              },
+              hookEvidence,
+              cwd: ctx.cwd,
+              sessionId: ctx.sessionManager.getSessionId(),
+              autoDeliver,
+              signal: preparationAbort.signal,
+            });
+            runtime.assertOpen();
+          } catch (error) {
+            if (prepared !== undefined) {
+              await rollbackUnregisteredDelegatePreparation(prepared, error);
+            }
+            if (preparationAbort.signal.aborted) {
+              if (error instanceof AggregateError) {
+                console.error(
+                  `[delegate] cancelled preparation cleanup failed: ${boundedDelegateRollbackError(error)}`,
+                );
+              } else {
+                runtime.assertOpen();
+              }
+            }
+            throw error;
+          }
 
-        runtime.assertOpen();
-        const launchOptions: StartDelegateTaskOptions = {
-          name: params.name,
-          argv: prepared.argv,
-          stdinBytes: prepared.stdinBytes,
-          env: prepared.env,
-          facts: prepared.facts,
-          notifyOnCompletion: params.notifyOnCompletion ?? true,
-          triggerOnCompletion: params.triggerOnCompletion ?? true,
-          timeoutSeconds: prepared.preflight.limits.timeout_seconds,
-        };
-        const task = await deps.startDelegateTask(ctx, launchOptions);
+          const launchOptions: StartDelegateTaskOptions = {
+            name: params.name,
+            argv: prepared.argv,
+            stdinBytes: prepared.stdinBytes,
+            env: prepared.env,
+            facts: prepared.facts,
+            notifyOnCompletion: params.notifyOnCompletion ?? true,
+            triggerOnCompletion: params.triggerOnCompletion ?? true,
+            timeoutSeconds: prepared.preflight.limits.timeout_seconds,
+          };
+          let task: BgTask;
+          try {
+            task = await deps.startDelegateTask(ctx, launchOptions);
+          } catch (error) {
+            let registered: boolean;
+            try {
+              registered = deps.isDelegateTaskRegistered(prepared.facts.taskId);
+            } catch (ownershipError) {
+              const failure = new AggregateError(
+                [error, ownershipError],
+                `bg_delegate could not determine artifact ownership after starter failure: ${boundedDelegateRollbackError(ownershipError)}`,
+              );
+              console.error(`[delegate] ${failure.message}`);
+              throw failure;
+            }
+            if (!registered) {
+              await rollbackUnregisteredDelegatePreparation(prepared, error);
+            }
+            if (preparationAbort.signal.aborted) runtime.assertOpen();
+            throw error;
+          }
+          return { prepared, launchOptions, task };
+        })();
+        const { prepared, launchOptions, task } = await trackPreparation(transaction);
         runtime.assertOpen();
 
         const details: DelegateLaunchDetails = {
@@ -648,13 +745,14 @@ export function registerBackgroundResultExtension(
     if (resultClosedError !== undefined) throw resultClosedError;
   };
 
-  pi.on('session_shutdown', () => {
+  const closeResultActivation = (): void => {
     resultClosedError ??= new Error(
       'lazy_module_closed: background-result facade belongs to a closed activation (Pi session shutdown)',
     );
     delegateResultRuntime.close('Pi session shutdown');
     fusionResultRuntime.close('Pi session shutdown');
-  });
+  };
+  deps.activationCloseFence.add(closeResultActivation);
 
   pi.registerTool<typeof ResultParams, BackgroundResultDetails>({
     name: DELEGATE_RESULT_TOOL_NAME,
@@ -782,8 +880,12 @@ export function registerBackgroundResultExtension(
           );
         }
         fusionResultRuntime.assertOpen();
+        // The durable claim is the settlement point. Once started, this verified
+        // retrieval must return its usage even if shutdown closes the facade
+        // while registry metadata is being written. Everything after the await
+        // is activation-local result construction with no host side effects.
+        const usage = cloneFusionUsage(verified.details.usage);
         const usageDelivered = await deps.claimFusionUsage(task);
-        fusionResultRuntime.assertOpen();
         const details: FusionBackgroundResultDetails = {
           schema_version: 'pi-background-tasks.fusion-result-view.v1',
           task_id: task.id,
@@ -814,7 +916,7 @@ export function registerBackgroundResultExtension(
         if (!usageDelivered) return result;
         const resultWithUsage: typeof result & { usage: FusionUsage } = {
           ...result,
-          usage: cloneFusionUsage(verified.details.usage),
+          usage,
         };
         return resultWithUsage;
       }
