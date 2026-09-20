@@ -35,6 +35,12 @@ Ambient attribution selection does not weaken package-owned isolated Anthropic c
 
 These flags select functionality only. They do not claim to reduce cold-start import cost; deferred loading and performance measurement are separate work.
 
+## Initialized-host SDK contract
+
+Normal Pi TUI, RPC, print, and JSON modes provide lifecycle bindings that initialize post-bind package resources and cause `session_start` to run after reload. An SDK host must call `bindExtensions()` with at least one binding Pi counts (UI context, command-context actions, shutdown handling, or `onError`). With only `{}` or `{ mode: "print" }`, the first explicit bind initializes resources, but `reload()` does not emit the rebuilt runner's `session_start`; the host must explicitly bind again after every `reload()`.
+
+Bare `createAgentSession()` without `bindExtensions()` leaves ambient attribution, `/claude-cache`, its lifecycle hooks/owner claim, and session-start context services uninitialized. This remains a host API blocker pending a guaranteed post-bind/reload callback or owner-token provider registration; the package does not use a private fallback. The generated availability tables describe this initialized-host contract and are not a pre-bind availability guarantee.
+
 ## Update check
 
 At `session_start`, the extension performs a one-shot, time-boxed npm latest-version lookup. Failures are offline-safe: the footer simply shows no update segment.

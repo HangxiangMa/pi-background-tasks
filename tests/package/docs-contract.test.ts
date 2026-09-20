@@ -164,6 +164,27 @@ void describe('docs package integration contract', () => {
     }
   });
 
+  void it('states the initialized-host SDK boundary without narrowing the blocker', () => {
+    const gettingStarted = text('docs/getting-started.md');
+    const configuration = text('docs/operations/configuration.md');
+    const attribution = text('docs/subsystems/anthropic-attribution.md');
+    const eventBus = text('docs/api/eventbus-v1.md');
+    const cacheCommand = text('docs/commands/claude-cache.md');
+
+    assert.match(gettingStarted, /SDK embedding requirement/i);
+    assert.match(gettingStarted, /at least one counted binding/i);
+    assert.match(configuration, /bindExtensions\(\)/);
+    assert.match(configuration, /after every `reload\(\)`/i);
+    assert.match(attribution, /BLOCKED_SCOPE/);
+    assert.match(attribution, /bare `createAgentSession\(\)`/);
+    assert.match(eventBus, /normal Pi TUI, RPC, print, and JSON modes/i);
+    assert.match(cacheCommand, /bare SDK sessions and empty\/mode-only reloads require/i);
+    for (const prose of [gettingStarted, configuration, attribution, eventBus, cacheCommand]) {
+      assert.match(prose, /initialized-host contract/i);
+      assert.match(prose, /not a pre-bind availability guarantee/i);
+    }
+  });
+
   void it('pins reviewed runtime and generated artifact semantics', () => {
     const contracts = text('docs/reference/runtime-contracts.md');
     assert.match(contracts, /candidate-<slot>\.attempt-<n>/);

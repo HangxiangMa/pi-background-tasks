@@ -105,23 +105,42 @@ function restoreProviderInstallation(installation: ProviderInstallation): void {
     registry.registerProvider(before.effective);
     registry.registerProvider(ANTHROPIC_PROVIDER, before.legacy);
   } else {
-    registry.registerProvider(before.effective);
+    // The exact package token and absence of a later native owner were proven above.
+    // Public unregister is therefore owner-conditional here: it removes only this
+    // still-current package layer and restores the captured built-in source absence.
+    registry.unregisterProvider(ANTHROPIC_PROVIDER);
   }
 
   const restoredConfig = registry.getRegisteredProviderConfig(ANTHROPIC_PROVIDER);
   const restoredNative = registry.getRegisteredNativeProvider(ANTHROPIC_PROVIDER);
   const restoredEffective = registry.getProvider(ANTHROPIC_PROVIDER);
+  const restoredIds = registry.getRegisteredProviderIds();
   const registrationRestored =
     before.legacy !== undefined
       ? restoredNative === undefined &&
         restoredConfig !== undefined &&
         sameConfigValues(restoredConfig, before.legacy)
-      : restoredConfig === undefined && restoredNative === (before.native ?? before.effective);
+      : restoredConfig === undefined &&
+        (before.native !== undefined
+          ? restoredNative === before.native
+          : restoredNative === undefined);
   const streamIdentityRestored =
     before.legacy !== undefined
       ? restoredConfig?.streamSimple === before.legacy.streamSimple
       : restoredEffective?.streamSimple === before.effective.streamSimple;
-  if (!registrationRestored || restoredEffective === undefined || !streamIdentityRestored) {
+  const effectiveIdentityRestored =
+    before.legacy !== undefined || restoredEffective === before.effective;
+  const registeredIdRestored =
+    before.legacy !== undefined || before.native !== undefined
+      ? restoredIds.includes(ANTHROPIC_PROVIDER)
+      : !restoredIds.includes(ANTHROPIC_PROVIDER);
+  if (
+    !registrationRestored ||
+    restoredEffective === undefined ||
+    !streamIdentityRestored ||
+    !effectiveIdentityRestored ||
+    !registeredIdRestored
+  ) {
     throw new Error(
       'pi_anthropic_attribution_restore_failed: the preexisting host provider was not restored by identity',
     );

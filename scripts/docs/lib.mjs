@@ -45,6 +45,8 @@ const DOCS_DEFAULT_FEATURES = ['process', 'delegate', 'fusion', 'attested', 'att
 const DOCS_DOCK_SHORTCUT_VALUES = ['shift+down', 'ctrl+alt+b', 'off'];
 const DOCS_DEFAULT_DOCK_SHORTCUT = 'shift+down';
 const ALWAYS_AVAILABLE = 'always';
+const ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL = 'pi-anthropic-attribution:claim:v1';
+const ANTHROPIC_ATTRIBUTION_CLAIM_SCHEMA = 'pi-anthropic-attribution.claim.v1';
 const EXCLUDED_PARENT_TOOL_NAMES = new Set(['delegate_read_artifact', 'fusion_web_fetch']);
 const ROOT_MARKDOWN_RELS = [
   'README.md',
@@ -387,6 +389,28 @@ function topLevelConstInitializers(ts, fn) {
   return declarations;
 }
 
+function soleDirectReturn(ts, info, fn, context) {
+  const returns = [];
+  const scan = (node) => {
+    if (node !== fn && ts.isFunctionLike(node)) return;
+    if (ts.isReturnStatement(node)) returns.push(node);
+    ts.forEachChild(node, scan);
+  };
+  scan(fn.body);
+  const returned = returns[0];
+  if (
+    returns.length !== 1 ||
+    returned?.expression === undefined ||
+    returned.parent !== fn.body ||
+    fn.body.statements.at(-1) !== returned
+  ) {
+    throw new DocsGateError(
+      `${lineOf(info.sf, fn, ts)} ${context} must have exactly one reachable direct immutable return as its final statement`,
+    );
+  }
+  return returned;
+}
+
 function assertImmutableVariantParser(ts, root, rel, cache) {
   const info = moduleInfo(ts, root, rel, cache);
   const parser = findExportedFunction(
@@ -399,14 +423,11 @@ function assertImmutableVariantParser(ts, root, rel, cache) {
   if (parser.rel !== rel || !parser.node.body) {
     throw new DocsGateError(`${rel} variant parser must be a local function with a block body`);
   }
-  const parserReturns = parser.node.body.statements.filter(ts.isReturnStatement);
-  if (parserReturns.length !== 1 || parserReturns[0].expression === undefined) {
-    throw new DocsGateError(`${rel} variant parser must have one explicit immutable return`);
-  }
+  const parserReturn = soleDirectReturn(ts, info, parser.node, 'variant parser');
   const returnedConfig = frozenObjectLiteral(
     ts,
     info,
-    parserReturns[0].expression,
+    parserReturn.expression,
     `${rel} parseBackgroundTasksConfig`,
   );
   const returnedKeys = [];
@@ -438,14 +459,11 @@ function assertImmutableVariantParser(ts, root, rel, cache) {
   if (!featuresParser?.body || !parserBindings.has('dockShortcut')) {
     throw new DocsGateError(`${rel} variant parser must bind local feature and dock parsers`);
   }
-  const featureReturns = featuresParser.body.statements.filter(ts.isReturnStatement);
-  if (featureReturns.length !== 1 || featureReturns[0].expression === undefined) {
-    throw new DocsGateError(`${rel} feature parser must have one explicit immutable return`);
-  }
+  const featureReturn = soleDirectReturn(ts, info, featuresParser, 'feature parser');
   const returnedFeatures = frozenObjectLiteral(
     ts,
     info,
-    featureReturns[0].expression,
+    featureReturn.expression,
     `${rel} ${featuresParserName}`,
   );
   const featureProperties = new Map();
@@ -772,6 +790,7 @@ function collectRegistrationsInFunction(
   regs,
   visitedFns,
   inheritedAvailability = ALWAYS_AVAILABLE,
+  inheritedConfigBindings = new Map(),
 ) {
   const info = moduleInfo(ts, root, rel, cache);
   const localWrapperNames = new Set();
@@ -812,7 +831,70 @@ function collectRegistrationsInFunction(
     if (!isPiHostExpression(unwrapped.expression)) return undefined;
     return unwrapped;
   };
-  const configBindings = new Map();
+  const bindingNames = (name, out = new Set()) => {
+    if (ts.isIdentifier(name)) {
+      out.add(name.text);
+      return out;
+    }
+    if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
+      for (const element of name.elements) {
+        if (ts.isBindingElement(element)) bindingNames(element.name, out);
+      }
+    }
+    return out;
+  };
+  const destructuredRegistrationBinding = (name) => {
+    if (ts.isIdentifier(name)) return name.text.startsWith('register') ? name.text : undefined;
+    if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
+      for (const element of name.elements) {
+        if (!ts.isBindingElement(element)) continue;
+        const property = element.propertyName;
+        if (
+          property &&
+          (ts.isIdentifier(property) || ts.isStringLiteral(property)) &&
+          property.text.startsWith('register')
+        ) {
+          return property.text;
+        }
+        if (property && ts.isComputedPropertyName(property)) {
+          let computed;
+          try {
+            computed = literalValue(ts, root, rel, property.expression, cache);
+          } catch {
+            computed = undefined;
+          }
+          if (typeof computed === 'string' && computed.startsWith('register')) return computed;
+        }
+        const nested = destructuredRegistrationBinding(element.name);
+        if (nested !== undefined) return nested;
+      }
+    }
+    return undefined;
+  };
+  const localBindingNames = new Set();
+  for (const parameter of fn.parameters ?? []) bindingNames(parameter.name, localBindingNames);
+  const collectLocalBindings = (node) => {
+    if (node !== fn.body && ts.isFunctionLike(node)) {
+      if (ts.isFunctionDeclaration(node) && node.name) localBindingNames.add(node.name.text);
+      return;
+    }
+    if (ts.isVariableDeclaration(node)) bindingNames(node.name, localBindingNames);
+    if (ts.isClassDeclaration(node) && node.name) localBindingNames.add(node.name.text);
+    if (ts.isCatchClause(node) && node.variableDeclaration) {
+      bindingNames(node.variableDeclaration.name, localBindingNames);
+    }
+    ts.forEachChild(node, collectLocalBindings);
+  };
+  if (fn.body) collectLocalBindings(fn.body);
+
+  const configBindings = new Map(inheritedConfigBindings);
+  for (const name of inheritedConfigBindings.keys()) {
+    if (localBindingNames.has(name)) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, fn, ts)} registration-owning nested scope shadows inherited finite config authority ${name}`,
+      );
+    }
+  }
   if (fn.body && ts.isBlock(fn.body)) {
     for (const statement of fn.body.statements) {
       if (!ts.isVariableStatement(statement)) continue;
@@ -825,6 +907,15 @@ function collectRegistrationsInFunction(
         if (!callee) continue;
         const imported = info.imports.get(callee.text);
         if (!imported || imported.exported !== 'parseBackgroundTasksConfig') continue;
+        if (
+          localBindingNames.has(callee.text) ||
+          info.constDecls.has(callee.text) ||
+          info.localFunctions.has(callee.text)
+        ) {
+          throw new DocsGateError(
+            `${lineOf(info.sf, initializer, ts)} config parser call must resolve to the unshadowed imported parseBackgroundTasksConfig binding`,
+          );
+        }
         configBindings.set(
           declaration.name.text,
           variantContractFromModule(ts, root, imported.rel, cache),
@@ -1037,6 +1128,19 @@ function collectRegistrationsInFunction(
     scan(rootNode);
     return found;
   };
+  const expressionContainsConfigAuthority = (rootNode) => {
+    let found = false;
+    const scan = (node) => {
+      if (found) return;
+      if (ts.isIdentifier(node) && configBindings.has(node.text)) {
+        found = true;
+        return;
+      }
+      ts.forEachChild(node, scan);
+    };
+    scan(rootNode);
+    return found;
+  };
   const isTypeOnlyIdentifier = (node) => {
     let current = node.parent;
     while (current && current !== fn) {
@@ -1125,9 +1229,28 @@ function collectRegistrationsInFunction(
     return unsafe;
   };
 
+  const computedRegistrationMethod = (node) => {
+    if (!ts.isElementAccessExpression(node) || !node.argumentExpression) return undefined;
+    try {
+      const value = literalValue(ts, root, rel, node.argumentExpression, cache);
+      return typeof value === 'string' && value.startsWith('register') ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   for (const parameter of fn.parameters ?? []) {
+    if (!ts.isIdentifier(parameter.name)) {
+      const registrationBinding = destructuredRegistrationBinding(parameter.name);
+      if (registrationBinding !== undefined) {
+        throw new DocsGateError(
+          `${lineOf(info.sf, parameter, ts)} destructured registration binding ${registrationBinding} is unsupported`,
+        );
+      }
+    }
     if (!parameter.initializer) continue;
     let hasRegistrationAccess = false;
+    let hasInitializerControlFlow = false;
     const scanInitializer = (node) => {
       if (
         ts.isPropertyAccessExpression(node) &&
@@ -1135,9 +1258,27 @@ function collectRegistrationsInFunction(
       ) {
         hasRegistrationAccess = true;
       }
+      if (computedRegistrationMethod(node) !== undefined) hasRegistrationAccess = true;
+      if (
+        ts.isCallExpression(node) ||
+        ts.isNewExpression(node) ||
+        ts.isFunctionLike(node) ||
+        ts.isReturnStatement(node) ||
+        ts.isThrowStatement(node) ||
+        ts.isConditionalExpression(node) ||
+        ts.isAwaitExpression(node) ||
+        ts.isYieldExpression(node)
+      ) {
+        hasInitializerControlFlow = true;
+      }
       ts.forEachChild(node, scanInitializer);
     };
     scanInitializer(parameter.initializer);
+    if (hasInitializerControlFlow) {
+      throw new DocsGateError(
+        `${lineOf(info.sf, parameter, ts)} registration-owning parameter initializer contains unsupported throw or control flow`,
+      );
+    }
     if (
       (ts.isIdentifier(parameter.name) && parameter.name.text === piParamName) ||
       expressionContainsUnsafePiUse(parameter.initializer) ||
@@ -1313,7 +1454,9 @@ function collectRegistrationsInFunction(
 
   const containsUnsupportedNestedRegistration = (rootNode) => {
     let found =
-      expressionContainsUnsafePiUse(rootNode) || expressionContainsLocalWrapper(rootNode);
+      expressionContainsUnsafePiUse(rootNode) ||
+      expressionContainsLocalWrapper(rootNode) ||
+      expressionContainsConfigAuthority(rootNode);
     const scan = (node) => {
       if (found) return;
       if (
@@ -1332,13 +1475,24 @@ function collectRegistrationsInFunction(
         found = true;
         return;
       }
-      if (ts.isElementAccessExpression(node) && isPiHostExpression(node.expression)) {
+      if (
+        ts.isBindingElement(node) &&
+        destructuredRegistrationBinding(node.parent) !== undefined
+      ) {
+        found = true;
+        return;
+      }
+      if (
+        ts.isElementAccessExpression(node) &&
+        (isPiHostExpression(node.expression) ||
+          computedRegistrationMethod(node) !== undefined ||
+          isDirectCallTarget(node))
+      ) {
         found = true;
         return;
       }
       if (
         ts.isPropertyAccessExpression(node) &&
-        isPiHostExpression(node.expression) &&
         node.name.text.startsWith('register')
       ) {
         found = true;
@@ -1365,6 +1519,35 @@ function collectRegistrationsInFunction(
   const allowedClaimGuardReturns = new Set();
   if (fn.body && ts.isBlock(fn.body)) {
     const constInitializers = topLevelConstInitializers(ts, fn);
+    const directPiEventCall = (node, method) => {
+      const call = unwrapExpression(node);
+      if (!ts.isCallExpression(call)) return undefined;
+      const access = unwrapExpression(call.expression);
+      if (!ts.isPropertyAccessExpression(access) || access.name.text !== method) return undefined;
+      const eventsAccess = unwrapExpression(access.expression);
+      if (
+        !ts.isPropertyAccessExpression(eventsAccess) ||
+        eventsAccess.name.text !== 'events' ||
+        !isPiHostExpression(eventsAccess.expression)
+      ) {
+        return undefined;
+      }
+      return call;
+    };
+    const claimChannelValue = (expression, location) => {
+      let value;
+      try {
+        value = literalValue(ts, root, rel, expression, cache);
+      } catch {
+        value = undefined;
+      }
+      if (value !== ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL) {
+        throw new DocsGateError(
+          `${lineOf(info.sf, location, ts)} duplicate-owner claim guard must emit exact channel ${ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL}`,
+        );
+      }
+    };
+
     for (const [statementIndex, statement] of fn.body.statements.entries()) {
       if (!ts.isIfStatement(statement) || statement.elseStatement !== undefined) continue;
       const condition = unwrapExpression(statement.expression);
@@ -1406,37 +1589,84 @@ function collectRegistrationsInFunction(
 
       const candidate = fn.body.statements[statementIndex - 1];
       if (!candidate || !ts.isExpressionStatement(candidate)) continue;
-      const emit = unwrapExpression(candidate.expression);
-      if (
-        !ts.isCallExpression(emit) ||
-        emit.arguments.length !== 2 ||
-        !ts.isPropertyAccessExpression(unwrapExpression(emit.expression)) ||
-        unwrapExpression(emit.expression).name.text !== 'emit'
-      ) {
-        continue;
+      const emit = directPiEventCall(candidate.expression, 'emit');
+      if (!emit || emit.arguments.length !== 2) continue;
+      claimChannelValue(emit.arguments[0], emit);
+
+      for (const preceding of fn.body.statements.slice(0, statementIndex - 1)) {
+        if (!ts.isExpressionStatement(preceding)) continue;
+        const listener = directPiEventCall(preceding.expression, 'on');
+        if (!listener || listener.arguments.length < 1) continue;
+        let listenerChannel;
+        try {
+          listenerChannel = literalValue(ts, root, rel, listener.arguments[0], cache);
+        } catch {
+          listenerChannel = undefined;
+        }
+        if (listenerChannel === ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL) {
+          throw new DocsGateError(
+            `${lineOf(info.sf, listener, ts)} duplicate-owner claim guard must not install a local claim listener before its probe`,
+          );
+        }
       }
-      const eventsAccess = unwrapExpression(emit.expression).expression;
-      if (
-        !ts.isPropertyAccessExpression(eventsAccess) ||
-        eventsAccess.name.text !== 'events' ||
-        !isPiHostExpression(eventsAccess.expression)
-      ) {
-        continue;
-      }
+
       const probeArgument = unwrapExpression(emit.arguments[1]);
-      if (!ts.isIdentifier(probeArgument)) continue;
+      if (!ts.isIdentifier(probeArgument)) {
+        throw new DocsGateError(
+          `${lineOf(info.sf, emit, ts)} duplicate-owner claim guard must emit one validated probe binding`,
+        );
+      }
       const probeInitializer = constInitializers.get(probeArgument.text);
       const probeObject = probeInitializer && unwrapExpression(probeInitializer);
-      if (!probeObject || !ts.isObjectLiteralExpression(probeObject)) continue;
-      const acknowledgeProperty = probeObject.properties.find(
-        (property) =>
-          ts.isPropertyAssignment(property) &&
-          ((ts.isIdentifier(property.name) && property.name.text === 'acknowledge') ||
-            (ts.isStringLiteral(property.name) && property.name.text === 'acknowledge')),
-      );
-      if (!acknowledgeProperty || !ts.isPropertyAssignment(acknowledgeProperty)) continue;
+      if (!probeObject || !ts.isObjectLiteralExpression(probeObject)) {
+        throw new DocsGateError(
+          `${lineOf(info.sf, emit, ts)} duplicate-owner claim guard probe must be a top-level const object`,
+        );
+      }
+      const probeProperties = new Map();
+      for (const property of probeObject.properties) {
+        if (
+          !ts.isPropertyAssignment(property) ||
+          (!ts.isIdentifier(property.name) && !ts.isStringLiteral(property.name))
+        ) {
+          throw new DocsGateError(
+            `${lineOf(info.sf, property, ts)} duplicate-owner claim guard probe must use exact explicit fields`,
+          );
+        }
+        probeProperties.set(property.name.text, property);
+      }
+      if (
+        probeProperties.size !== 2 ||
+        !probeProperties.has('schema_version') ||
+        !probeProperties.has('acknowledge')
+      ) {
+        throw new DocsGateError(
+          `${lineOf(info.sf, probeObject, ts)} duplicate-owner claim guard probe must contain exactly schema_version and acknowledge`,
+        );
+      }
+      const schemaProperty = probeProperties.get('schema_version');
+      let schemaValue;
+      try {
+        schemaValue = literalValue(ts, root, rel, schemaProperty.initializer, cache);
+      } catch {
+        schemaValue = undefined;
+      }
+      if (schemaValue !== ANTHROPIC_ATTRIBUTION_CLAIM_SCHEMA) {
+        throw new DocsGateError(
+          `${lineOf(info.sf, schemaProperty, ts)} duplicate-owner claim guard must use exact schema ${ANTHROPIC_ATTRIBUTION_CLAIM_SCHEMA}`,
+        );
+      }
+
+      const acknowledgeProperty = probeProperties.get('acknowledge');
       const callback = unwrapExpression(acknowledgeProperty.initializer);
-      if (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) continue;
+      if (
+        (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) ||
+        callback.parameters.length !== 0
+      ) {
+        throw new DocsGateError(
+          `${lineOf(info.sf, acknowledgeProperty, ts)} duplicate-owner claim guard acknowledge field must be a zero-argument callback`,
+        );
+      }
       const callbackStatement = ts.isBlock(callback.body)
         ? callback.body.statements.length === 1
           ? callback.body.statements[0]
@@ -1460,7 +1690,9 @@ function collectRegistrationsInFunction(
         unwrapExpression(unwrapExpression(appendExpression.expression).expression).text !==
           acknowledgements
       ) {
-        continue;
+        throw new DocsGateError(
+          `${lineOf(info.sf, acknowledgeProperty, ts)} duplicate-owner claim guard acknowledge callback must append true to its acknowledgement array`,
+        );
       }
       let acknowledgementUses = 0;
       let probeUses = 0;
@@ -1544,6 +1776,7 @@ function collectRegistrationsInFunction(
           regs,
           visitedFns,
           callbackAvailability,
+          configBindings,
         );
         return;
       }
@@ -1612,9 +1845,32 @@ function collectRegistrationsInFunction(
         `${lineOf(info.sf, node, ts)} assigning a Pi registration host or registration wrapper alias is unsupported`,
       );
     }
+    if (ts.isBindingElement(node)) {
+      const registrationBinding = destructuredRegistrationBinding(node.parent);
+      if (registrationBinding !== undefined) {
+        throw new DocsGateError(
+          `${lineOf(info.sf, node, ts)} destructured registration binding ${registrationBinding} is unsupported`,
+        );
+      }
+    }
     if (ts.isElementAccessExpression(node) && isPiHostExpression(node.expression)) {
       throw new DocsGateError(
         `${lineOf(info.sf, node, ts)} element access on the Pi registration host is unsupported`,
+      );
+    }
+    const computedMethod = computedRegistrationMethod(node);
+    if (
+      ts.isElementAccessExpression(node) &&
+      !isPiHostExpression(node.expression) &&
+      isDirectCallTarget(node)
+    ) {
+      if (computedMethod !== undefined) {
+        throw new DocsGateError(
+          `${lineOf(info.sf, node, ts)} computed registration method ${computedMethod} uses an unsupported registration host`,
+        );
+      }
+      throw new DocsGateError(
+        `${lineOf(info.sf, node, ts)} computed invocation on an unknown host is unsupported in a registration-owning scope`,
       );
     }
     if (

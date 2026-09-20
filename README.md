@@ -72,8 +72,7 @@ Public tools: `bg_delegate`, `bg_kill`, `bg_logs`, `bg_result`, `bg_run`, `bg_ru
 Full owner map and generated contracts live in [docs/INDEX.md](docs/INDEX.md).
 <!-- pi-docs:end name="readme-public-surfaces" -->
 
-
-
+“Available by default” means after Pi has initialized extensions. Normal TUI/RPC/print/JSON modes do this; SDK embedders must provide a counted `bindExtensions()` binding and ensure post-reload binding. Bare `createAgentSession()` and empty/mode-only reload are blocked by the current public host lifecycle API. See [Getting started](docs/getting-started.md#sdk-embedding-requirement).
 
 ## Why use it?
 

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
+import type { Context } from '@earendil-works/pi-ai';
 import {
   createAgentSession,
   createEventBus,
@@ -158,6 +159,7 @@ interface SessionHarness {
 interface SessionHarnessOptions {
   setupModelRuntime?: (runtime: ModelRuntime) => void;
   onExtensionError?: (error: { event: string; error: string }) => void;
+  skipBind?: boolean;
 }
 
 async function makeSession(
@@ -196,16 +198,35 @@ async function makeSession(
     noTools: 'builtin',
   });
   assert.deepEqual(created.extensionsResult.errors, []);
-  await created.session.bindExtensions({
-    onError: (error) => {
-      if (options.onExtensionError) {
-        options.onExtensionError(error);
-        return;
-      }
-      assert.fail(`extension error: ${error.event}: ${error.error}`);
+  if (!options.skipBind) {
+    await created.session.bindExtensions({
+      onError: (error) => {
+        if (options.onExtensionError) {
+          options.onExtensionError(error);
+          return;
+        }
+        assert.fail(`extension error: ${error.event}: ${error.error}`);
+      },
+    });
+  }
+  return { session: created.session, loader, eventBus, modelRuntime, cwd, agentDir };
+}
+
+function attributionClaimCount(eventBus: EventBus): number {
+  let count = 0;
+  eventBus.emit('pi-anthropic-attribution:claim:v1', {
+    schema_version: 'pi-anthropic-attribution.claim.v1',
+    acknowledge: () => {
+      count += 1;
     },
   });
-  return { session: created.session, loader, eventBus, modelRuntime, cwd, agentDir };
+  return count;
+}
+
+function hasCacheCommand(session: AgentSession): boolean {
+  return session.extensionRunner
+    .getRegisteredCommands()
+    .some((command) => command.invocationName === 'claude-cache');
 }
 
 function sessionInventory(session: AgentSession): RegistrationInventory {
@@ -375,19 +396,41 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
     );
   });
 
-  void it('restores a preexisting host provider by public registration and stream identity', async () => {
+  void it('restores preexisting public config, routing, auth, stream, and future merges', async () => {
     configure('process,attribution', 'off');
-    function hostStream(): never {
-      throw new Error('host stream marker');
-    }
-    let hostProviderBefore: ReturnType<ModelRuntime['getProvider']>;
+    const routeContext: Context = { systemPrompt: 'provider route fixture', messages: [], tools: [] };
+    const routeCalls: Array<{
+      baseUrl: string | undefined;
+      contextIdentity: boolean;
+      sessionId: string | undefined;
+      apiKeyMatches: boolean;
+      hostHeader: string | null | undefined;
+    }> = [];
+    const hostStream: NonNullable<
+      NonNullable<ReturnType<ModelRuntime['getRegisteredProviderConfig']>>['streamSimple']
+    > = (
+      model,
+      context,
+      options,
+    ) => {
+      routeCalls.push({
+        baseUrl: model.baseUrl,
+        contextIdentity: context === routeContext,
+        sessionId: options?.sessionId,
+        apiKeyMatches: options?.apiKey === 'host-secret-marker',
+        hostHeader: options?.headers?.['x-host-route'],
+      });
+      throw new Error('host-route-invoked');
+    };
     const { session, modelRuntime } = await makeSession([], {
       setupModelRuntime: (runtime) => {
         runtime.registerProvider('anthropic', {
           api: 'anthropic-messages',
+          apiKey: 'host-secret-marker',
+          baseUrl: 'https://host-route.invalid/v1',
+          headers: { 'x-host-route': 'original' },
           streamSimple: hostStream,
         });
-        hostProviderBefore = runtime.getProvider('anthropic');
       },
     });
     try {
@@ -398,13 +441,79 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
       );
       configure('process', 'off');
       await session.reload();
-      assert.equal(
-        modelRuntime.getRegisteredProviderConfig('anthropic')?.streamSimple,
-        hostStream,
-        'the exact preexisting dynamic host stream must be restored',
-      );
-      assert.ok(hostProviderBefore, 'fixture must capture the preexisting effective provider');
-      assert.ok(modelRuntime.getProvider('anthropic'), 'restored host provider must remain effective');
+      const restored = modelRuntime.getRegisteredProviderConfig('anthropic');
+      assert.equal(restored?.streamSimple, hostStream);
+      assert.equal(restored?.baseUrl, 'https://host-route.invalid/v1');
+      assert.equal(restored?.headers?.['x-host-route'], 'original');
+      assert.equal((await modelRuntime.getAuth('anthropic'))?.auth.apiKey, 'host-secret-marker');
+
+      const model = modelRuntime
+        .getModels('anthropic')
+        .find((candidate) => candidate.api === 'anthropic-messages');
+      assert.ok(model, 'fixture requires an Anthropic messages model');
+      const restoredResult = await modelRuntime
+        .streamSimple(model, routeContext, { sessionId: 'restored-route' })
+        .result();
+      assert.equal(restoredResult.stopReason, 'error');
+      assert.match(restoredResult.errorMessage ?? '', /host-route-invoked/);
+
+      modelRuntime.registerProvider('anthropic', {
+        baseUrl: 'https://future-merge.invalid/v1',
+      });
+      const future = modelRuntime.getRegisteredProviderConfig('anthropic');
+      assert.equal(future?.streamSimple, hostStream);
+      assert.equal(future?.headers?.['x-host-route'], 'original');
+      assert.equal(future?.baseUrl, 'https://future-merge.invalid/v1');
+      assert.equal((await modelRuntime.getAuth('anthropic'))?.auth.apiKey, 'host-secret-marker');
+      const futureModel = modelRuntime
+        .getModels('anthropic')
+        .find((candidate) => candidate.api === 'anthropic-messages');
+      assert.ok(futureModel, 'future merge must retain an Anthropic messages model');
+      const futureResult = await modelRuntime
+        .streamSimple(futureModel, routeContext, { sessionId: 'future-route' })
+        .result();
+      assert.equal(futureResult.stopReason, 'error');
+      assert.match(futureResult.errorMessage ?? '', /host-route-invoked/);
+      assert.deepEqual(routeCalls, [
+        {
+          baseUrl: 'https://host-route.invalid/v1',
+          contextIdentity: true,
+          sessionId: 'restored-route',
+          apiKeyMatches: true,
+          hostHeader: 'original',
+        },
+        {
+          baseUrl: 'https://future-merge.invalid/v1',
+          contextIdentity: true,
+          sessionId: 'future-route',
+          apiKeyMatches: true,
+          hostHeader: 'original',
+        },
+      ]);
+    } finally {
+      await closeSession(session);
+    }
+  });
+
+  void it('restores exact public absence when no dynamic provider existed before activation', async () => {
+    configure('process,attribution', 'off');
+    let builtinProvider: ReturnType<ModelRuntime['getProvider']>;
+    const { session, modelRuntime } = await makeSession([], {
+      setupModelRuntime: (runtime) => {
+        assert.equal(runtime.getRegisteredProviderConfig('anthropic'), undefined);
+        assert.equal(runtime.getRegisteredNativeProvider('anthropic'), undefined);
+        builtinProvider = runtime.getProvider('anthropic');
+        assert.ok(builtinProvider, 'fixture requires the built-in Anthropic provider');
+      },
+    });
+    try {
+      assert.ok(modelRuntime.getRegisteredProviderConfig('anthropic'));
+      configure('process', 'off');
+      await session.reload();
+      assert.equal(modelRuntime.getRegisteredProviderConfig('anthropic'), undefined);
+      assert.equal(modelRuntime.getRegisteredNativeProvider('anthropic'), undefined);
+      assert.equal(modelRuntime.getRegisteredProviderIds().includes('anthropic'), false);
+      assert.equal(modelRuntime.getProvider('anthropic'), builtinProvider);
     } finally {
       await closeSession(session);
     }
@@ -452,6 +561,35 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
         'later dynamic owner must survive package shutdown',
       );
       assert.ok(modelRuntime.getProvider('anthropic'), 'later provider must remain effective');
+    } finally {
+      if (!shutdown) await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+      session.dispose();
+    }
+  });
+
+  void it('does not remove a later native provider owner', async () => {
+    configure('process,attribution', 'off');
+    let hostProvider: ReturnType<ModelRuntime['getProvider']>;
+    const { session, modelRuntime } = await makeSession([], {
+      setupModelRuntime: (runtime) => {
+        hostProvider = runtime.getProvider('anthropic');
+        assert.ok(hostProvider);
+      },
+    });
+    assert.ok(hostProvider);
+    const laterNative = Object.freeze({
+      ...hostProvider,
+      name: `${hostProvider.name} later-owner`,
+    });
+    let shutdown = false;
+    try {
+      modelRuntime.registerNativeProvider(laterNative);
+      assert.equal(modelRuntime.getRegisteredNativeProvider('anthropic'), laterNative);
+      await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+      shutdown = true;
+      assert.equal(modelRuntime.getRegisteredNativeProvider('anthropic'), laterNative);
+      assert.equal(modelRuntime.getProvider('anthropic'), laterNative);
+      assert.equal(modelRuntime.getRegisteredProviderConfig('anthropic'), undefined);
     } finally {
       if (!shutdown) await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
       session.dispose();
@@ -557,6 +695,76 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
       assert.equal(claimAcks, 1, 'duplicate copies must publish one successful owner');
     } finally {
       await closeSession(session);
+    }
+  });
+
+  void it('characterizes counted host bindings versus bare, empty, and mode-only SDK paths', async () => {
+    configure('process,attribution', 'off');
+    const bare = await makeSession([], { skipBind: true });
+    try {
+      assert.equal(attributionClaimCount(bare.eventBus), 0, 'bare createAgentSession is blocked');
+      assert.equal(hasCacheCommand(bare.session), false);
+      assert.equal(bare.modelRuntime.getRegisteredProviderConfig('anthropic'), undefined);
+      assert.equal(bare.modelRuntime.getRegisteredNativeProvider('anthropic'), undefined);
+    } finally {
+      await closeSession(bare.session);
+    }
+
+    configure('process,attribution', 'off');
+    const empty = await makeSession([], { skipBind: true });
+    try {
+      await empty.session.bindExtensions({});
+      assert.equal(attributionClaimCount(empty.eventBus), 1);
+      assert.equal(hasCacheCommand(empty.session), true);
+      configure('process', 'off');
+      await empty.session.reload();
+      assert.equal(empty.modelRuntime.getRegisteredProviderConfig('anthropic'), undefined);
+      assert.equal(empty.modelRuntime.getRegisteredNativeProvider('anthropic'), undefined);
+      configure('process,attribution', 'off');
+      await empty.session.reload();
+      assert.equal(attributionClaimCount(empty.eventBus), 0, 'empty-binding reload remains blocked');
+      assert.equal(hasCacheCommand(empty.session), false);
+      await empty.session.bindExtensions({});
+      assert.equal(attributionClaimCount(empty.eventBus), 1, 'explicit post-reload rebind initializes');
+      assert.equal(hasCacheCommand(empty.session), true);
+    } finally {
+      await closeSession(empty.session);
+    }
+
+    configure('process,attribution', 'off');
+    const modeOnly = await makeSession([], { skipBind: true });
+    try {
+      await modeOnly.session.bindExtensions({ mode: 'print' });
+      assert.equal(attributionClaimCount(modeOnly.eventBus), 1);
+      configure('process', 'off');
+      await modeOnly.session.reload();
+      configure('process,attribution', 'off');
+      await modeOnly.session.reload();
+      assert.equal(attributionClaimCount(modeOnly.eventBus), 0, 'mode-only reload remains blocked');
+      assert.equal(hasCacheCommand(modeOnly.session), false);
+    } finally {
+      await closeSession(modeOnly.session);
+    }
+
+    configure('process,attribution', 'off');
+    const counted = await makeSession([], { skipBind: true });
+    try {
+      const extensionErrors: Array<{ event: string; error: string }> = [];
+      await counted.session.bindExtensions({
+        mode: 'print',
+        onError: (error) => extensionErrors.push(error),
+      });
+      assert.equal(attributionClaimCount(counted.eventBus), 1);
+      assert.equal(hasCacheCommand(counted.session), true);
+      configure('process', 'off');
+      await counted.session.reload();
+      configure('process,attribution', 'off');
+      await counted.session.reload();
+      assert.equal(attributionClaimCount(counted.eventBus), 1);
+      assert.equal(hasCacheCommand(counted.session), true);
+      assert.deepEqual(extensionErrors, []);
+    } finally {
+      await closeSession(counted.session);
     }
   });
 

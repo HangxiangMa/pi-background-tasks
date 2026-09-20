@@ -1,16 +1,15 @@
 {
   "attestation_state": [
     {
-      "authored_body_sha256": "sha256:8b8a883eb261dd221d348724fb43ae13fac19eb52a30f688d55ff80b2039be98",
+      "authored_body_sha256": "sha256:876a6e861a20b0665150b4eef19fdd397671565cccf28dc59dd3d53251378d7d",
       "covers_sources": [
         "src/core/extension-api.ts"
       ],
       "doc_id": "api/eventbus-v1",
-      "notes": "Reviewed EventBus channels, closed schemas, operations, request correlation and rejection, close unsubscribe behavior, terminal ordering, latched publication, retry semantics, and at-least-once deduplication guidance.",
       "rel": "docs/api/eventbus-v1.md",
       "required": true,
       "reviewer": "gpt-5.5-final-eventbus-reviewer",
-      "state": "pass"
+      "state": "stale-authored-prose"
     },
     {
       "authored_body_sha256": "sha256:810591c82ced086e1622be9b037db88c8a667856580895dc90cd5af54c6e2107",
@@ -26,7 +25,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:7898e1dcc03174bd5028cad116e378dae47838f9bf641f4c6e7ae9ceee7c3d02",
+      "authored_body_sha256": "sha256:2e93d5a38b5de24d8c42c74577dbd7b88ec36fea233ddfb0dd5fd747f57af706",
       "covers_sources": [
         "extensions/anthropic-attribution-child.ts",
         "extensions/anthropic-attribution.ts",

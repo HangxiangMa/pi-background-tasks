@@ -37,6 +37,12 @@ Operations: `capabilities`, `kill`, `logs`, `run`, `status`.
 
 Primary source: `src/core/extension-api.ts`. Code is authoritative.
 
+## Initialized-host SDK requirement
+
+The service accepts requests only after `session_start` supplies its session context. Normal Pi TUI, RPC, print, and JSON modes provide counted lifecycle bindings. An SDK embedder must call `bindExtensions()` with at least one counted UI/command/shutdown/error binding so reload emits `session_start`; an empty or mode-only host must explicitly bind again after every reload.
+
+Bare `createAgentSession()` does not initialize this context, and an empty or mode-only binding does not preserve post-bind initialization across `reload()`. Calls before initialization fail as unavailable; consumers must not fabricate context. This public-host limitation remains a `BLOCKED_SCOPE` SDK compatibility blocker. The generated API availability describes the initialized-host contract and is not a pre-bind availability guarantee.
+
 ## Channels and schema ids
 
 | Purpose | Channel | `schema_version` |
