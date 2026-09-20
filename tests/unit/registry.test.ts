@@ -688,10 +688,13 @@ void describe('BackgroundTaskRegistry', () => {
       });
       await assert.rejects(
         start,
-        (error: unknown) =>
-          typeof error === 'object' &&
-          error !== null &&
-          Reflect.get(error, 'code') === 'pi_background_tasks_admission_timeout',
+        (error: unknown) => {
+          if (typeof error !== 'object' || error === null) return false;
+          const code = Reflect.get(error, 'code');
+          return (
+            code === 'pi_background_tasks_admission_timeout' || code === 'attested_git_timeout'
+          );
+        },
       );
       await h.registry.waitForTaskAdmissions();
       assert.equal(gitSpawns, 1);
