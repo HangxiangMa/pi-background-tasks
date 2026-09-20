@@ -263,6 +263,7 @@ function baseTask(id: string): BgTask {
     endTime: 2,
     bytesWritten: 0,
     isAgent: true,
+    surviveReload: false,
     notified: false,
     notifyOnCompletion: true,
     triggerOnCompletion: true,

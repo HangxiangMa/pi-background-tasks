@@ -73,6 +73,7 @@ import {
   dockShortcutFooterHint,
   parseBackgroundTasksConfig,
 } from './core/config.js';
+import { SynchronousActivationCloseFence } from './core/lazy-module.js';
 
 /**
  * Project-local Pi background task manager.
