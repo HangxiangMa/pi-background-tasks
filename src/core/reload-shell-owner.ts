@@ -822,8 +822,10 @@ async function writeOwnerMetadata(
   );
 }
 
-async function closeOwnerOutputStream(stream: NodeJS.WritableStream | undefined): Promise<void> {
-  if (stream === undefined) return;
+async function closeOwnerOutputStream(
+  stream: ReturnType<typeof createWriteStream> | undefined,
+): Promise<void> {
+  if (stream === undefined || stream.destroyed || stream.closed) return;
   await new Promise<void>((resolve, reject) => {
     let settled = false;
     const finish = () => {
@@ -1425,10 +1427,13 @@ export function createReloadableShellExecutionV1(
     async requestStop(kind, reason) {
       if (execution.phase === 'released') return task;
       if (execution.phase === 'terminal') return task;
-      if (stopKind === undefined) stopKind = kind;
-      task.killKind = kind === 'handoff_expired' ? 'shutdown' : kind;
-      if (reason !== undefined) task.error = reason;
-      if (kind === 'handoff_expired' && !task.error?.startsWith('pi_bg_reload_handoff_expired')) {
+      const firstStop = stopKind === undefined;
+      if (firstStop) {
+        stopKind = kind;
+        task.killKind = kind === 'handoff_expired' ? 'shutdown' : kind;
+        if (reason !== undefined) task.error = reason;
+      }
+      if (firstStop && kind === 'handoff_expired' && !task.error?.startsWith('pi_bg_reload_handoff_expired')) {
         task.error = `pi_bg_reload_handoff_expired: ${task.error ?? 'reload handoff expired'}`;
       }
       if (execution.phase === 'finalizing') return terminal;

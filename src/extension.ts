@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -28,15 +30,27 @@ import {
   type BgStatusDetails,
   type BgTask,
   type BgTaskSnapshot,
+  type ReloadShellActivationClaimV1,
+  type ReloadShellActivationLeaseV1,
+  type ReloadShellIdentityV1,
   type StartAttestedPiTaskOptions,
   type StartTaskOptions,
+  ReloadSurvivalError,
+  rejectSurvivalForTaskKind,
 } from './core/common.js';
 import {
   fetchLatestVersion,
   readPackageInfo,
   type FetchLatestVersionOptions,
 } from './core/update-check.js';
-import { BackgroundTaskRegistry } from './core/registry.js';
+import {
+  BackgroundTaskRegistry,
+  type BackgroundTaskContext,
+} from './core/registry.js';
+import {
+  getProcessReloadShellOwnerV1,
+  makeReloadShellIdentity,
+} from './core/reload-shell-owner.js';
 import {
   createShellPolicyGuidanceHandler,
   initializeShellPolicy,
@@ -66,8 +80,9 @@ import {
  * Scope:
  * - Explicit background shell jobs only: /bg and bg_run spawn commands directly.
  * - No Ctrl+B support for backgrounding an already-running built-in bash tool.
- * - No detached/restart reattachment: live child processes belong to this Pi
- *   extension runtime and are killed on session shutdown/reload.
+ * - Opted ordinary shell jobs can hand their same live process ownership to a
+ *   fresh extension activation on real same-process reload only.
+ * - No PID/file adoption, process-restart survival, or crash recovery.
  */
 
 const STATUS_INTERVAL_MS = 1000;
@@ -102,6 +117,7 @@ interface BgToolArgumentRecord {
   readonly timeoutSeconds?: unknown;
   readonly notifyOnCompletion?: unknown;
   readonly triggerOnCompletion?: unknown;
+  readonly surviveReload?: unknown;
 }
 
 interface BgPiAttestedArgumentRecord {
@@ -113,6 +129,7 @@ interface BgPiAttestedArgumentRecord {
   readonly extraPiArgs?: unknown;
   readonly thinking?: unknown;
   readonly timeoutSeconds?: unknown;
+  readonly surviveReload?: unknown;
 }
 
 function optionalTrimmed(value: string): string | undefined {
@@ -146,6 +163,12 @@ const BgRunParams = Type.Object({
     Type.Boolean({
       description:
         'Whether that notification should automatically trigger a follow-up agent turn. Default: true for bg_run; requires notifyOnCompletion.',
+    }),
+  ),
+  surviveReload: Type.Optional(
+    Type.Boolean({
+      description:
+        'Opt in to retaining this exact ordinary isAgent:false shell execution across a real same-process Pi reload. Default: false. Unsupported for agent, managed, delegate, Fusion, and attested tasks.',
     }),
   ),
 });
@@ -217,15 +240,28 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   const config = parseBackgroundTasksConfig();
   const dockEntryHint = dockShortcutFooterHint(config.dockShortcut);
   const shellPolicy = initializeShellPolicy();
+  const reloadShellOwner = getProcessReloadShellOwnerV1();
   pi.on('before_agent_start', createShellPolicyGuidanceHandler(shellPolicy));
   const seenTaskIds = new Set<string>();
   let currentCtx: ExtensionContext | undefined;
+  let currentRegistryCtx: BackgroundTaskContext | undefined;
+  let activationLease: ReloadShellActivationLeaseV1 | undefined;
+  let activationIdentity: ReloadShellIdentityV1 | undefined;
+  let pendingActivationClaim: ReloadShellActivationClaimV1 | undefined;
   let dockOpen = false;
   let statusInterval: NodeJS.Timeout | undefined;
   let latestKnownVersion: string | undefined;
   let updateCheckStarted = false;
   let disposed = false;
   let shutdownCleanupStarted = false;
+  let reloadHandoffFailed = false;
+
+  const registryContext = (ctx: ExtensionContext): BackgroundTaskContext => ({
+    cwd: ctx.cwd,
+    sessionId: ctx.sessionManager.getSessionId(),
+    modelRegistry: ctx.modelRegistry,
+    model: ctx.model,
+  });
 
   const registry = new BackgroundTaskRegistry({
     onChange: () => {
@@ -238,41 +274,144 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       eventService.publishTerminal(task);
     },
     shellPolicy,
+    reloadShellOwner,
   });
   const eventService: BackgroundTaskExtensionService = installBackgroundTaskExtensionApi({
     events: pi.events,
     registry,
-    getContext: () => currentCtx,
+    getContext: () => currentRegistryCtx,
     isShuttingDown: () => registry.isShuttingDown(),
   });
 
-  const beginSessionShutdown = (): void => {
+  const beginSessionShutdown = (reason: string): void => {
+    let handoffError: unknown;
     if (!disposed) {
       disposed = true;
+      registry.closeTaskAdmissions();
+      if (pendingActivationClaim !== undefined) {
+        const claim = pendingActivationClaim;
+        pendingActivationClaim = undefined;
+        registry.abortReloadActivation(claim);
+        try {
+          reloadShellOwner.abortActivation(
+            claim,
+            new ReloadSurvivalError(
+              'pi_bg_reload_owner_stale_claim',
+              'activation shut down while its reload claim was staging',
+            ),
+          );
+        } catch (error) {
+          handoffError = error;
+        }
+      } else if (reason === 'reload' && activationLease !== undefined) {
+        const lease = activationLease;
+        try {
+          registry.prepareReloadHandoff(lease);
+          activationLease = undefined;
+          activationIdentity = undefined;
+        } catch (error) {
+          reloadHandoffFailed = true;
+          handoffError = error;
+        }
+      }
       registry.setShuttingDown(true);
       eventService.close();
     }
     // Teardown remains active on repeated calls so even a handle assigned by a
     // racing continuation is still disposed rather than hidden by idempotence.
     currentCtx = undefined;
+    currentRegistryCtx = undefined;
     if (statusInterval !== undefined) {
       clearInterval(statusInterval);
       statusInterval = undefined;
     }
+    if (handoffError !== undefined) throw handoffError;
   };
 
-  // Register the synchronous publication barrier before managed-workflow
-  // shutdown handlers. Fusion may settle while its own cleanup is awaited; the
-  // old registry must already be closed before that terminal continuation runs.
-  pi.on('session_shutdown', () => {
-    beginSessionShutdown();
+  // Register the synchronous detach/publication barrier before any managed
+  // workflow shutdown handler. No old host closure survives this callback.
+  pi.on('session_shutdown', (event) => {
+    beginSessionShutdown(event.reason);
+  });
+
+  // This is the first session_start callback. Claim synchronously before the
+  // first await, stage/import durably, then expose the fresh host adapter.
+  pi.on('session_start', async (event, ctx) => {
+    if (disposed) return;
+    const nextRegistryCtx = registryContext(ctx);
+    const identity = makeReloadShellIdentity(
+      nextRegistryCtx.sessionId ?? '',
+      realpathSync(ctx.cwd),
+    );
+    if (activationLease !== undefined && registry.hasCurrentReloadLease()) {
+      if (
+        activationIdentity?.hostPid !== identity.hostPid ||
+        activationIdentity.sessionId !== identity.sessionId ||
+        activationIdentity.cwdRealpath !== identity.cwdRealpath
+      ) {
+        throw new ReloadSurvivalError(
+          'pi_bg_reload_owner_activation_conflict',
+          'a repeated session_start changed the bound reload owner identity without shutdown',
+        );
+      }
+      currentCtx = ctx;
+      currentRegistryCtx = nextRegistryCtx;
+      return;
+    }
+    const activationNonce = randomBytes(16).toString('hex');
+    const claim = reloadShellOwner.beginActivation(identity, event.reason, activationNonce);
+    pendingActivationClaim = claim;
+    try {
+      const adapter = await registry.stageReloadActivation(claim);
+      if (pendingActivationClaim !== claim) {
+        // The synchronous shutdown barrier already aborted this claim and
+        // detached staged records while the durable import awaited.
+        registry.abortReloadActivation(claim);
+        return;
+      }
+      if (disposed) {
+        registry.abortReloadActivation(claim);
+        pendingActivationClaim = undefined;
+        reloadShellOwner.abortActivation(
+          claim,
+          new ReloadSurvivalError(
+            'pi_bg_reload_owner_stale_claim',
+            'activation was disposed before reload claim commit',
+          ),
+        );
+        return;
+      }
+      const lease = reloadShellOwner.commitActivation(claim, adapter);
+      pendingActivationClaim = undefined;
+      activationLease = lease;
+      activationIdentity = identity;
+      currentCtx = ctx;
+      currentRegistryCtx = nextRegistryCtx;
+    } catch (error) {
+      registry.abortReloadActivation(claim);
+      if (pendingActivationClaim === claim) pendingActivationClaim = undefined;
+      try {
+        reloadShellOwner.abortActivation(claim, error);
+      } catch (abortError) {
+        if (
+          typeof abortError !== 'object' ||
+          abortError === null ||
+          Reflect.get(abortError, 'code') !== 'pi_bg_reload_owner_stale_claim'
+        ) {
+          throw new AggregateError([error, abortError], 'Reload activation claim and abort failed');
+        }
+      }
+      throw error;
+    }
   });
 
   if (config.features.fusion) {
     registerFusionExtension(pi, {
       startManagedTask: async (ctx, options) => {
         currentCtx = ctx;
-        return registry.startManagedTask(ctx, options);
+        const nextRegistryCtx = registryContext(ctx);
+        currentRegistryCtx = nextRegistryCtx;
+        return registry.startManagedTask(nextRegistryCtx, options);
       },
       snapshot: (task) => registry.snapshot(task),
       updateManagedTask: (task, state, line) => registry.updateManagedTask(task, state, line),
@@ -283,7 +422,9 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     registerDelegateExtension(pi, {
       startDelegateTask: async (ctx, options) => {
         currentCtx = ctx;
-        return registry.startDelegateTask(ctx, options);
+        const nextRegistryCtx = registryContext(ctx);
+        currentRegistryCtx = nextRegistryCtx;
+        return registry.startDelegateTask(nextRegistryCtx, options);
       },
       snapshot: (task) => registry.snapshot(task),
     });
@@ -373,7 +514,9 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     options: StartTaskOptions = {},
   ): Promise<BgTask> {
     currentCtx = ctx;
-    return registry.startTask(ctx, command, options);
+    const nextRegistryCtx = registryContext(ctx);
+    currentRegistryCtx = nextRegistryCtx;
+    return registry.startTask(nextRegistryCtx, command, options);
   }
 
   async function startAttestedPiTask(
@@ -381,7 +524,9 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     options: StartAttestedPiTaskOptions,
   ): Promise<BgTask> {
     currentCtx = ctx;
-    return registry.startAttestedPiTask(ctx, options);
+    const nextRegistryCtx = registryContext(ctx);
+    currentRegistryCtx = nextRegistryCtx;
+    return registry.startAttestedPiTask(nextRegistryCtx, options);
   }
 
   async function openTaskManager(
@@ -421,6 +566,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
               const rerunOptions: StartTaskOptions = {
                 name: taskDisplayName(task),
                 isAgent: task.isAgent,
+                surviveReload: task.surviveReload,
                 notifyOnCompletion: true,
                 triggerOnCompletion: false,
               };
@@ -525,7 +671,9 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     if (disposed) return;
     registry.setShuttingDown(false);
     currentCtx = ctx;
-    await registry.ensureRuntimeDir(ctx);
+    const nextRegistryCtx = currentRegistryCtx ?? registryContext(ctx);
+    currentRegistryCtx = nextRegistryCtx;
+    await registry.ensureRuntimeDir(nextRegistryCtx);
     if (disposed) return;
     updateUi(ctx);
     if (disposed) return;
@@ -543,8 +691,8 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     if (!disposed) void scheduleUpdateCheck(ctx);
   });
 
-  pi.on('session_shutdown', async (_event, ctx) => {
-    beginSessionShutdown();
+  pi.on('session_shutdown', async (event, ctx) => {
+    beginSessionShutdown(event.reason);
     if (shutdownCleanupStarted) return;
     shutdownCleanupStarted = true;
     try {
@@ -559,7 +707,11 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       await Promise.all(
         running.map(async (task) => {
           try {
-            await registry.stopTask(task, 'shutdown', 'Killed during Pi session shutdown/reload');
+            await registry.stopTask(
+              task,
+              'shutdown',
+              `Killed during Pi session shutdown (${event.reason})`,
+            );
           } catch (error) {
             const message = `${task.id}: ${error instanceof Error ? error.message : String(error)}`;
             failures.push(message);
@@ -572,17 +724,31 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
       }
     } finally {
       eventService.close();
+      if (
+        (event.reason !== 'reload' || reloadHandoffFailed) &&
+        activationLease !== undefined
+      ) {
+        try {
+          await registry.waitForReloadHostSettlement();
+        } catch (error) {
+          console.error('[background-tasks] reload owner host settlement failed during shutdown:', error);
+        }
+        registry.releaseReloadActivation(activationLease);
+        activationLease = undefined;
+        activationIdentity = undefined;
+      }
     }
   });
 
   pi.registerCommand('bg', {
     description:
-      'Start a shell command as a tracked background task: /bg [--agent] [--name "Task name"] <command>',
+      'Start a tracked shell command: /bg [--survive-reload] [--agent] [--name "Task name"] <command>',
     handler: async (args, ctx) => {
       try {
         const parsed = parseBgCommandArgs(args);
         const taskOptions: StartTaskOptions = {
           isAgent: parsed.isAgent,
+          surviveReload: parsed.surviveReload,
           notifyOnCompletion: true,
           triggerOnCompletion: false,
         };
@@ -777,6 +943,21 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
           'bg_run requires isAgent boolean. Set true only for LLM/agent tasks; set false for scripts, tests, servers, sleeps, and ordinary shell commands.',
         );
       }
+      if (
+        Object.prototype.hasOwnProperty.call(input, 'surviveReload') &&
+        typeof input.surviveReload !== 'boolean'
+      ) {
+        throw new ReloadSurvivalError(
+          'pi_bg_survive_reload_invalid',
+          'bg_run surviveReload must be boolean when present',
+        );
+      }
+      if (input.surviveReload === true && input.isAgent) {
+        throw new ReloadSurvivalError(
+          'pi_bg_survive_reload_requires_non_agent',
+          'bg_run surviveReload requires isAgent:false',
+        );
+      }
       const prepared: BgRunParamsValue = {
         command: input.command,
         name:
@@ -791,6 +972,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
         prepared.notifyOnCompletion = input.notifyOnCompletion;
       if (typeof input.triggerOnCompletion === 'boolean')
         prepared.triggerOnCompletion = input.triggerOnCompletion;
+      if (typeof input.surviveReload === 'boolean') prepared.surviveReload = input.surviveReload;
       return prepared;
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -799,9 +981,16 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
           'bg_run requires isAgent boolean. Set true only for LLM/agent tasks; set false for scripts, tests, servers, sleeps, and ordinary shell commands.',
         );
       }
+      if (params.surviveReload === true && params.isAgent) {
+        throw new ReloadSurvivalError(
+          'pi_bg_survive_reload_requires_non_agent',
+          'bg_run surviveReload requires isAgent:false',
+        );
+      }
       const taskOptions: StartTaskOptions = {
         name: params.name,
         isAgent: params.isAgent,
+        surviveReload: params.surviveReload ?? false,
         notifyOnCompletion: params.notifyOnCompletion ?? true,
         triggerOnCompletion: params.triggerOnCompletion ?? true,
       };
@@ -853,6 +1042,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
         if (!args || typeof args !== 'object')
           throw new Error('bg_run_pi_attested arguments must be an object');
         const input = args as BgPiAttestedArgumentRecord;
+        rejectSurvivalForTaskKind(input, 'attested Pi tasks');
         if (typeof input.name !== 'string') throw new Error('bg_run_pi_attested requires name');
         if (typeof input.provider !== 'string')
           throw new Error('bg_run_pi_attested requires provider');

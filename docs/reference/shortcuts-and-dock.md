@@ -12,9 +12,9 @@ covers_sources: []
 <!-- pi-docs:begin name="shortcut-contracts" generator="scripts/docs/generate.mjs" -->
 | Shortcut | Availability | Default | Description | Provenance |
 | --- | --- | --- | --- | --- |
-| `ctrl+alt+b` | `dock:ctrl+alt+b` | no | Open focused background task footer dock | `src/extension.ts:661` |
-| `ctrl+alt+c` | `always` | yes | Clear finished background task footer notices (terminal-dependent fallback for /bg-clear) | `src/extension.ts:669` |
-| `shift+down` | `dock:shift+down` | yes | Open focused background task footer dock | `src/extension.ts:652` |
+| `ctrl+alt+b` | `dock:ctrl+alt+b` | no | Open focused background task footer dock | `src/extension.ts:827` |
+| `ctrl+alt+c` | `always` | yes | Clear finished background task footer notices (terminal-dependent fallback for /bg-clear) | `src/extension.ts:835` |
+| `shift+down` | `dock:shift+down` | yes | Open focused background task footer dock | `src/extension.ts:818` |
 <!-- pi-docs:end name="shortcut-contracts" -->
 
 ## Registered shortcuts
@@ -61,6 +61,12 @@ The `/bg-clear` hint is hidden while the dock is open, where the entry hint beco
 - [`/bg-tasks`](../commands/task-manager.md).
 
 All enabled entry points open the same task manager when an interactive UI is available. The commands remain available with the shortcut off and are the conflict-free fallback.
+
+## Rerun and reload survival
+
+`R` reruns only ordinary shell tasks. If the selected task used `surviveReload:true`, rerun preserves that opt-in but deliberately creates a new execution with a new task id and launch nonce. It resolves the current activation's shell policy and captures current timeout/output-cap configuration; it never reuses or restarts the selected process. Delegate and Fusion rows remain typed-workflow refusals.
+
+A currently running opted ordinary task that crosses a supported real reload remains the same row/id/PID/output path in the fresh dock. The dock does not scan metadata or adopt PIDs.
 
 ## Dock output detail
 

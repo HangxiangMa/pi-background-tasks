@@ -1,7 +1,7 @@
 {
   "attestation_state": [
     {
-      "authored_body_sha256": "sha256:5c7aabba9448acc2a36485d2b07022cd064e0d0e49aa4c1ffa2d1b1dce7841d5",
+      "authored_body_sha256": "sha256:078476916ca5c7e505c6c5b825dc70f34ac7b1b13252c4d4cf76fa02a3a26d59",
       "covers_sources": [
         "src/core/extension-api.ts"
       ],
@@ -49,10 +49,11 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:ae279f1ddef2005fd1d2b6152188ebefe70fd556c04073e7a2bd409636989650",
+      "authored_body_sha256": "sha256:c0fa757f3af57aefbc48737fb2bec43ebcf9321e5eb3d23d743c8ac59390d348",
       "covers_sources": [
         "src/core/common.ts",
         "src/core/registry.ts",
+        "src/core/reload-shell-owner.ts",
         "src/core/shell-policy.ts",
         "src/core/windows-taskkill.ts"
       ],
@@ -128,7 +129,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:d02ea217e46bfd11c072fc3b025a15d266299c8fdf8c810c937ff029aa6529b9",
+      "authored_body_sha256": "sha256:584218c9892926eda6118f90157e3331a739d4d56c48ee41ff097032c5b3d9c9",
       "covers_sources": [
         "extensions/background-tasks.ts",
         "src/core/config.ts",
@@ -472,6 +473,7 @@
       "covers_sources": [
         "src/core/common.ts",
         "src/core/registry.ts",
+        "src/core/reload-shell-owner.ts",
         "src/core/shell-policy.ts",
         "src/core/windows-taskkill.ts"
       ],
@@ -935,11 +937,11 @@
       {
         "availability": "always",
         "default_available": true,
-        "description": "Start a shell command as a tracked background task: /bg [--agent] [--name \"Task name\"] <command>",
+        "description": "Start a tracked shell command: /bg [--survive-reload] [--agent] [--name \"Task name\"] <command>",
         "id": "command:bg",
         "kind": "command",
         "name": "bg",
-        "source": "src/extension.ts:578"
+        "source": "src/extension.ts:743"
       },
       {
         "availability": "always",
@@ -948,7 +950,7 @@
         "id": "command:bg-clear",
         "kind": "command",
         "name": "bg-clear",
-        "source": "src/extension.ts:620"
+        "source": "src/extension.ts:786"
       },
       {
         "availability": "always",
@@ -957,7 +959,7 @@
         "id": "command:bg-tasks",
         "kind": "command",
         "name": "bg-tasks",
-        "source": "src/extension.ts:612"
+        "source": "src/extension.ts:778"
       },
       {
         "availability": "always",
@@ -966,7 +968,7 @@
         "id": "command:bg-update",
         "kind": "command",
         "name": "bg-update",
-        "source": "src/extension.ts:628"
+        "source": "src/extension.ts:794"
       },
       {
         "availability": "feature:attribution",
@@ -1002,7 +1004,7 @@
         "id": "command:jobs",
         "kind": "command",
         "name": "jobs",
-        "source": "src/extension.ts:677"
+        "source": "src/extension.ts:843"
       },
       {
         "availability": "always",
@@ -1011,7 +1013,7 @@
         "id": "command:kill",
         "kind": "command",
         "name": "kill",
-        "source": "src/extension.ts:721"
+        "source": "src/extension.ts:887"
       },
       {
         "availability": "always",
@@ -1020,7 +1022,7 @@
         "id": "command:logs",
         "kind": "command",
         "name": "logs",
-        "source": "src/extension.ts:690"
+        "source": "src/extension.ts:856"
       },
       {
         "availability": "always",
@@ -1029,7 +1031,7 @@
         "id": "command:tasks",
         "kind": "command",
         "name": "tasks",
-        "source": "src/extension.ts:604"
+        "source": "src/extension.ts:770"
       }
     ],
     "eventbus": [
@@ -1061,7 +1063,7 @@
         "id": "renderer:background-task-notification",
         "kind": "renderer",
         "name": "background-task-notification",
-        "source": "src/extension.ts:474"
+        "source": "src/extension.ts:620"
       },
       {
         "availability": "feature:fusion",
@@ -1080,7 +1082,7 @@
         "id": "shortcut:ctrl+alt+b",
         "kind": "shortcut",
         "name": "ctrl+alt+b",
-        "source": "src/extension.ts:661"
+        "source": "src/extension.ts:827"
       },
       {
         "availability": "always",
@@ -1089,7 +1091,7 @@
         "id": "shortcut:ctrl+alt+c",
         "kind": "shortcut",
         "name": "ctrl+alt+c",
-        "source": "src/extension.ts:669"
+        "source": "src/extension.ts:835"
       },
       {
         "availability": "dock:shift+down",
@@ -1098,7 +1100,7 @@
         "id": "shortcut:shift+down",
         "kind": "shortcut",
         "name": "shift+down",
-        "source": "src/extension.ts:652"
+        "source": "src/extension.ts:818"
       }
     ],
     "tool": [
@@ -1215,7 +1217,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:983"
+        "source": "src/extension.ts:1173"
       },
       {
         "availability": "always",
@@ -1251,7 +1253,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:938"
+        "source": "src/extension.ts:1128"
       },
       {
         "availability": "any(feature:delegate,feature:fusion)",
@@ -1326,6 +1328,10 @@
               "description": "Whether to deliver the durable terminal notification. Default: true; disable only when deliberately taking over completion monitoring.",
               "type": "boolean"
             },
+            "surviveReload": {
+              "description": "Opt in to retaining this exact ordinary isAgent:false shell execution across a real same-process Pi reload. Default: false. Unsupported for agent, managed, delegate, Fusion, and attested tasks.",
+              "type": "boolean"
+            },
             "timeoutSeconds": {
               "description": "Optional timeout; task is failed and killed when exceeded",
               "type": "number"
@@ -1342,7 +1348,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:754"
+        "source": "src/extension.ts:920"
       },
       {
         "availability": "feature:attested",
@@ -1405,7 +1411,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:840"
+        "source": "src/extension.ts:1029"
       },
       {
         "availability": "always",
@@ -1431,7 +1437,7 @@
           "required": [],
           "type": "object"
         },
-        "source": "src/extension.ts:907"
+        "source": "src/extension.ts:1097"
       },
       {
         "availability": "feature:fusion",
@@ -1924,6 +1930,9 @@
       "subsystems/child-launch-durability-and-safety"
     ],
     "src/core/registry.ts": [
+      "subsystems/background-task-runtime"
+    ],
+    "src/core/reload-shell-owner.ts": [
       "subsystems/background-task-runtime"
     ],
     "src/core/shell-policy.ts": [

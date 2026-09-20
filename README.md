@@ -78,7 +78,7 @@ Full owner map and generated contracts live in [docs/INDEX.md](docs/INDEX.md).
 
 | You want to... | Use this package because... |
 |---|---|
-| Start a dev server, watch build, migration dry run, or long check | `bg_run` and `/bg` return immediately, write durable output files, show a footer dock, and notify on terminal state. |
+| Start a dev server, watch build, migration dry run, or long check | `bg_run` and `/bg` return immediately, write durable output files, show a footer dock, and notify on terminal state. Ordinary `isAgent:false` jobs can explicitly keep the same live execution across a real same-process reload. |
 | Let Pi keep working instead of sleeping or polling | Default `bg_run` completion delivery sends a durable terminal notification and can wake a follow-up turn. |
 | Ask a second agent to inspect the repo with the current conversation as context | `bg_delegate` starts one read/search/list child, isolated from ambient extensions by default; `bg_result` verifies the committed result before returning it. |
 | Compare model perspectives without exposing arbitrary parent context | Fusion children receive only the workflow input and fixed tool policy; no silent route substitution or fallback is used on delegate/Fusion paths. |
@@ -118,7 +118,7 @@ Local paths are loaded from disk without copying; use the path to this package f
    /bg --name "Typecheck watch" npm run typecheck -- --watch
    ```
 
-   `/bg` starts a tracked shell task and returns the task id plus output path. User-launched `/bg` tasks notify in the UI but do not automatically wake a follow-up model turn.
+   `/bg` starts a tracked shell task and returns the task id plus output path. User-launched `/bg` tasks notify in the UI but do not automatically wake a follow-up model turn. Add one leading `--survive-reload` only when this ordinary shell process must keep running across a real same-process `/reload`; default tasks are still killed.
 
 3. Open the footer dock with the default **Shift↓** binding or list tasks:
 
@@ -182,8 +182,8 @@ Full contract: [Configuration](docs/operations/configuration.md) and [Shortcuts 
 | Workflow | Blocking? | Context | Tools/network/write boundary | Best for | Expected behavior |
 |---|---:|---|---|---|---|
 | Ordinary foreground Pi work | Yes | Full current session | Whatever tools the active session has | Short reads/edits/commands where you want live back-and-forth | Pi waits for the work before responding. |
-| `/bg` | No | No model child unless your command starts one | Runs your shell command; **not sandboxed** | User-started local commands, servers, watches | UI notification and footer tracking; `/bg` uses notification-only by default. |
-| `bg_run` | No | No model child unless command starts one | Runs your shell command; **not sandboxed** | Agent-started long commands | Returns task id/output path; defaults to notification plus automatic follow-up wake. For an Anthropic child `pi`, do not pass `--no-extensions` unless you also explicitly load this package's attribution extension. |
+| `/bg` | No | No model child unless your command starts one | Runs your shell command; **not sandboxed** | User-started local commands, servers, watches | UI notification and footer tracking; `/bg` uses notification-only by default. Optional `--survive-reload` is ordinary-shell-only. |
+| `bg_run` | No | No model child unless command starts one | Runs your shell command; **not sandboxed** | Agent-started long commands | Returns task id/output path; defaults to notification plus automatic follow-up wake. Optional `surviveReload:true` requires `isAgent:false`. For an Anthropic child `pi`, do not pass `--no-extensions` unless you also explicitly load this package's attribution extension. |
 | `bg_delegate` + `bg_result` | No launch; retrieval is point-in-time | Frozen visible conversation projection | Inspect-only child: read, grep, find, ls, artifact read; no shell, writes, network, recursion | Context-aware read-only investigation while parent continues | Launch returns immediately; result is committed by child and hash-verified by retrieval. |
 | `bg_run_pi_attested` | No | Prompt passed to one direct child Pi run | Direct `pi --mode json`; no shell command; writes requested report path | Evidence-oriented direct Pi task | Emits local attestation sidecar only after successful completion. |
 | `/fusion` / `fusion_reason` | Background launch; point-in-time `bg_result` retrieval | Versioned conversation projection plus prompt | Candidates/evaluator/repair/merger run with no tools | Self-contained reasoning and synthesis | Returns after durable preflight; three candidates → blind evaluator → optional bounded repair → merger. |
@@ -202,11 +202,12 @@ See [Choose a workflow](docs/choose-a-workflow.md) for a decision tree and trade
   "name": "Docs preview",
   "command": "npm run docs:dev",
   "isAgent": false,
-  "timeoutSeconds": 3600
+  "timeoutSeconds": 3600,
+  "surviveReload": true
 }
 ```
 
-Expected: returns immediately with a task id, PID when available, and `.pi/tasks/...output`. The command runs as an ordinary local shell command with your user permissions; it can invoke networked tools or paid services if the command itself does so.
+Expected: returns immediately with a task id, PID when available, and `.pi/tasks/...output`. Here the explicit flag retains that exact child/id/PID/nonce/path, launch policy, absolute timeout, and cumulative cap across a supported real reload. Omit it for compatible kill-on-reload behavior. New/resume/fork/clone/quit, hard crash, process restart, empty/mode-only SDK reload, and direct `AgentSession.dispose()` are not supported survival paths. The command runs as an ordinary local shell command with your user permissions; it can invoke networked tools or paid services if the command itself does so.
 
 If `bg_run` starts an Anthropic child `pi`, keep normal extension discovery enabled when ambient attribution is enabled. Do not add `--no-extensions` unless the command also supplies this package's always-on `extensions/anthropic-attribution-child.ts` via `-e`/`--extension`; `bg_run` does not rewrite arbitrary shell argv.
 

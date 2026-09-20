@@ -5,7 +5,7 @@ mode: authored
 review_policy: behavioral
 stability: stable
 covers_surfaces: []
-covers_sources: [src/core/common.ts, src/core/registry.ts, src/core/shell-policy.ts, src/core/windows-taskkill.ts]
+covers_sources: [src/core/common.ts, src/core/registry.ts, src/core/reload-shell-owner.ts, src/core/shell-policy.ts, src/core/windows-taskkill.ts]
 ---
 # Background task runtime
 
@@ -16,7 +16,7 @@ The runtime owns task identity, shell invocation, process lifecycle, bounded log
 - Task statuses are exactly `running`, `completed`, `failed`, and `killed`.
 - Terminal statuses are exactly `completed`, `failed`, and `killed`.
 - Runtime directory: `.pi/tasks/<session-id>-<pid>/` under the project cwd.
-- Per task: `<task-id>.output` and `<task-id>.json`; some agent modes may add wrapper or attestation files. Ordinary shell-task snapshots and metadata include the non-secret activation shell facts (`policy`, `executable`, `argvPrefix`, and `dialect`) used for that launch.
+- Per task: `<task-id>.output` and `<task-id>.json`; some agent modes may add wrapper or attestation files. Ordinary shell-task snapshots and metadata include the non-secret activation shell facts (`policy`, `executable`, `argvPrefix`, and `dialect`) used for that launch. New records also emit `surviveReload`; missing legacy fields mean false. Opted records carry `reloadSurvival` audit facts, but those bytes never grant process authority or permit adoption.
 - In-memory recent retention prunes oldest finished tasks over the limit while preserving running tasks and newest-result recency. If the oldest finished task still owns pending publication, pruning first abandons and disposes that publication as `retention_limit`; pending gates cannot force eviction of a newer result or grow retained finished tasks without bound.
 - `resolveTask` accepts exact ids or unambiguous prefixes and fails loudly for empty, unknown, or ambiguous ids.
 
@@ -25,6 +25,8 @@ The runtime owns task identity, shell invocation, process lifecycle, bounded log
 Every registry starter (ordinary, managed, delegate, and attested Pi) holds a counted admission scope with a one-way `AbortSignal` and a 30 second overall preflight deadline. Session shutdown closes admissions and aborts every live scope before cleanup. Cooperative preflight receives that signal; all other started operations remain tracked until they settle. Insertion plus spawn retain immediate checks with no yielding gap between them. Shutdown drains accepted admissions before taking its running-task snapshot. Therefore a preflight crossing closure cannot insert or spawn, while a child that spawned before closure was already inserted and is owned by shutdown cleanup.
 
 Interrupted managed work is cancelled immediately and its workflow/child cleanup promise is awaited before the lease is released; if it was already inserted, terminal finalization remains registry-owned. A process child already inserted/spawned is bound to the admission signal and receives the normal stop path even while an admission-time metadata write is still settling. Interrupted wrapper/durable-file preflight awaits opened-handle/stream cleanup and removes owned partial task files. Node does not provide physical cancellation for every filesystem syscall: such a syscall remains admission-owned and shutdown waits for its settlement rather than racing it and allowing late artifact work. Cleanup failures are surfaced; they are not treated as successful cancellation.
+
+For reload survival, only an opted ordinary execution whose initial metadata write and admission commit both completed is transferable. A pre-commit child remains old-registry shutdown work and can never appear in a reload claim.
 
 ## Starting managed tasks
 
@@ -39,6 +41,8 @@ Managed task ids are explicit and path-safe. Fusion uses its run id as the singl
 Shell commands are spawned in the task cwd using `stdio: ['ignore','pipe','pipe']`, `windowsHide:true`, the extension environment, and detached process groups on non-Windows. Shell commands are **not sandboxed**.
 
 Default delivery at registry level is `notifyOnCompletion:true` and `triggerOnCompletion:false`; surface tools may override that. [`bg_run`](../tools/bg_run.md) explicitly defaults both to true.
+
+`surviveReload:true` is opt-in and requires `isAgent:false`. Validation occurs before admission timers, runtime directories, files, wrappers, insertion, or spawn. The task keeps the exact same child, PID, detached group/tree authority, pipes, output stream/path, launch nonce, completion id, shell policy, timeout deadline, output cap, and cumulative byte count across a supported reload. It is never restarted. Agent, managed, delegate, Fusion, and attested work refuse survival-shaped input; EventBus request v1 cannot request it. Dock rerun preserves the flag but creates a new execution/id/nonce under the current activation policy.
 
 ## Shell policy
 
@@ -80,11 +84,21 @@ Publication gates race both activation closure and task-local abandonment. Gate 
 
 Synchronous emission has its own in-flight settlement phase. Reentrant shutdown/service close clears queued work but does not log abandonment or prune that task while its emitter is on the stack. A normal emitter return settles delivered; a throw settles abandonment/retry policy once, with the thrown failure in the diagnostic. This prevents contradictory abandoned-then-delivered outcomes.
 
+For a survivor, pending/delivered/abandoned state and the attempt count move with the live execution. Reload clears old physical gates/retry handles without recording abandonment; a fresh adapter resumes the same cumulative three-attempt budget. A terminal close during the hostless gap is queued. Notification uses a task-owned sending token, so a successful old or fresh send latches `notified` once and reload never resets it.
+
 ## Stopping tasks
 
 Only `running` tasks can be stopped. Managed tasks invoke their task-owned cancellation callback and wait for workflow settlement; process tasks use the platform paths below.
 
-Session shutdown atomically closes task admission and terminal publication before managed-workflow cleanup starts, aborts admission-owned cancellable work, drains admission cleanup, then applies the normal stop paths. Pending publication is abandoned, not reported as delivered. Registry admission/publication closure is one-way: session replacement receives a fresh registry, while the old registry cannot be reopened by late lifecycle, admission, or gate continuations.
+Session shutdown atomically closes task admission before managed-workflow cleanup starts. For a real `reason:"reload"`, it first detaches and removes only admission-committed opted ordinary executions, then closes old publication/EventBus and applies normal stop paths to everything else. Pending survivor publication is transferred without false abandonment. For `quit`, `new`, `resume`, or `fork` (including clone), nothing transfers: all work follows normal cleanup. Registry admission/publication closure is one-way; stale lifecycle, admission, gate, lease, claim, adapter, and retry continuations cannot mutate a newer activation.
+
+## Same-process reload owner
+
+`src/core/reload-shell-owner.ts` installs a structurally checked process-global v1 hub under `Symbol.for('pi-background-tasks.reload-shell-owner.v1')`. Identity is the length-delimited tuple `(process.pid, exact session id, canonical cwd)`. It uses random activation/claim nonces, monotonic generations, and a two-phase claim: the fresh registry imports the same task objects and durably advances audit facts before the adapter becomes visible. There is no `instanceof` protocol test, metadata scan, PID adoption, external daemon, or liveness-derived exit result.
+
+The adapter is the only retained closure over the current registry/Pi/EventBus/notification host and is removed synchronously before shutdown awaits. The owner retains only the living Node child, pipes/listeners, stream, timers, immutable launch facts, tree authority, metadata chain, and logical delivery state. A fixed referenced 30-second handoff deadline is not reset by claim/abort. No compatible claimant (including extension removal, config/factory failure, or an incompatible package copy) triggers retained-tree cleanup and `pi_bg_reload_handoff_expired`; a real close code/signal and tree proof remain required. Force/proof uncertainty stays loud and retains minimal authority rather than fabricating cleanup.
+
+Supported scope is same-process normal Pi reload with the same session id and canonical cwd. Hard crash, SIGKILL, power loss, process restart, resume/new/fork/clone, and PID/file reconstruction are unsupported. Normal TUI/RPC/print/JSON modes provide lifecycle binding. Empty or mode-only SDK reload lacks the fresh `session_start` in Pi 0.84/0.86 and is blocked upstream; direct `AgentSession.dispose()` also lacks `session_shutdown`, while `AgentSessionRuntime.dispose()` is supported.
 
 POSIX stop path:
 
@@ -116,4 +130,4 @@ Windows never falls back to root-only `child.kill` for tree termination. The tas
 
 ## Source ownership/reference
 
-Primary source ownership for this document is `src/core/common.ts`, `src/core/registry.ts`, `src/core/shell-policy.ts`, and `src/core/windows-taskkill.ts`.
+Primary source ownership for this document is `src/core/common.ts`, `src/core/registry.ts`, `src/core/reload-shell-owner.ts`, `src/core/shell-policy.ts`, and `src/core/windows-taskkill.ts`.

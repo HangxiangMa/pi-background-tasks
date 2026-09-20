@@ -67,7 +67,7 @@ Closed object; unknown keys fail.
 Payloads:
 
 - `capabilities`: `{}` only.
-- `run`: `{ name, command, isAgent, notifyOnCompletion, triggerOnCompletion, timeoutSeconds? }`; strings are non-empty, booleans are booleans, `timeoutSeconds` is a positive integer when present.
+- `run`: `{ name, command, isAgent, notifyOnCompletion, triggerOnCompletion, timeoutSeconds? }`; strings are non-empty, booleans are booleans, `timeoutSeconds` is a positive integer when present. V1 cannot request reload survival: `surviveReload` remains an unknown-key error and every v1 run uses the compatible default `false`.
 - `status`: `{ taskId? }`; `taskId` is non-empty when present.
 - `logs`: `{ taskId, maxBytes?, tail? }`; `maxBytes` is positive when present and is still bounded by runtime log caps.
 - `kill`: `{ taskId }`.
@@ -128,7 +128,7 @@ Terminal events are emitted on `pi-background-tasks:terminal:v1`:
 }
 ```
 
-The terminal event carries no request id; consumers correlate by `task.id` returned from `run`/`kill`/`status`.
+The terminal event carries no request id; consumers correlate by `task.id` returned from `run`/`kill`/`status`. The additive task snapshot can include `surviveReload` and `reloadSurvival` when a task was launched through `bg_run` or `/bg`; the request side remains unchanged. A fresh activation may emit that survivor's pending terminal on this same v1 channel.
 
 ## Ordering and durability barrier
 
@@ -138,7 +138,9 @@ The registry publishes terminal snapshots only after the output stream has finis
 
 If `EventBus.emit` throws, the registry retries after 100 ms for at most three total emit attempts. Persistent failure then becomes `abandoned` with bounded diagnostics. Because one listener may have received a frame before a later listener threw, delivery is **at least once under emission failure** and the same task can be observed up to the attempt bound. Consumers must deduplicate by `task.id`.
 
-Shutdown, service disposal, a rejected publication gate, retry exhaustion, or retention-limit eviction can abandon the terminal frame without changing durable task metadata, waiter completion, or notification truth. Shutdown/service disposal clears pending retry timers and races any gate wait against one-way activation closure. Retention eviction abandons and releases an oldest pending publication before deleting that old task, so a newer notified result remains retrievable and finished-task retention stays bounded. After either gate resolution or rejection, lifecycle is checked again, so a late gate cannot emit or re-arm an old activation. Tasks made terminal by session shutdown intentionally do not publish onto the disposed activation's EventBus.
+Shutdown, service disposal, a rejected publication gate, retry exhaustion, retention-limit eviction, or reload-handoff expiry can abandon the terminal frame without changing durable task metadata, waiter completion, or notification truth. Shutdown/service disposal clears pending retry timers and races any gate wait against one-way activation closure. Retention eviction abandons and releases an oldest pending publication before deleting that old task, so a newer notified result remains retrievable and finished-task retention stays bounded. After either gate resolution or rejection, lifecycle is checked again, so a late gate cannot emit or re-arm an old activation. Tasks made terminal by ordinary session shutdown intentionally do not publish onto the disposed activation's EventBus.
+
+A valid opted reload handoff removes the survivor before old publication closure, clears only old physical gate/retry handles, and retains its logical state plus cumulative attempt count. Completion in the gap queues for the fresh service. The three-attempt cap and typed closed-service handling do not reset across reload; physical delivery remains at-least-once and consumers still deduplicate by task id.
 
 If a synchronous terminal listener calls `close()` while emission is on the stack, queued publication work is disposed but that emission settles only when the emitter returns or throws. A normal return is delivered without an abandonment diagnostic; a throw is abandoned once with truthful diagnostics. Closure never records both outcomes.
 
