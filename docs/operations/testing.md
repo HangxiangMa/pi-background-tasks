@@ -60,7 +60,16 @@ From current `package.json`:
 | Docs attestation | `npm run docs:attest/record -- <doc_id> --reviewer <identity-after-semantic-review> --verdict PASS --notes <review-notes>` | Computes hashes and records an explicit semantic PASS receipt after review; `npm run docs:attest` is an alias and still needs args. |
 | Docs unit/package gate | `npm run test:docs` | Docs-gate unit/package tests. |
 | Payload check | `npm run payload:check` | Package payload policy check. |
+| Cold-load benchmark | `node scripts/benchmark-cold-load.mjs --root "$PWD" --label <label> --output <owned.json> --samples 30 --scratch <owned-dir>` | Fresh-process source/Jiti load and first-use distributions; evidence only, never a CI timing threshold. |
 | Release version check | `npm run release:check-version` | Tag-only version sanity; requires explicit `GITHUB_REF_TYPE=tag`/`GITHUB_REF_NAME=v$VERSION` and never publishes. |
+
+### Cold-load measurement discipline
+
+The cold-load driver starts a new Node process for every sample and gives each worker isolated project, agent, session, HOME, and temporary roots with offline/telemetry suppression. It records raw samples plus median, p90, median absolute deviation, minimum, and maximum for direct delegate/Fusion facade imports, real SDK package loading, first delegate/Fusion launch and subtype result verification with deterministic fake children, and first model-selector invocation with mocked UI. One warm-up is excluded and at least 30 measured samples are expected for comparative evidence.
+
+Here, **cold** means a fresh process and empty JavaScript/Jiti module cache. It does not mean a flushed filesystem cache. Baseline and candidate must use the same driver and worker bytes, Node/Pi/dependency tree, host, features, and root conditions. If worktree limits force sequential baseline-then-candidate collection rather than simultaneous AB/BA, record that host-drift risk; do not fabricate interleaving. There is no machine-specific pass threshold.
+
+The benchmark exercises source TypeScript, not a compiled distribution. It supports no native-Windows or compiled-Bun speed claim without separate runs. P1a also leaves a deliberate process-only limitation: `src/extension.ts` statically imports light delegate/Fusion facade source even when their registrars are disabled. Remaining extension/dock/attested startup seams and any precompiled packaging decision belong to later work.
 
 Do not run full/default/root suites for documentation-only edits unless the operator explicitly asks. If the operator restricts verification to focused checks, report that `docs:verify`/attestation were not run.
 

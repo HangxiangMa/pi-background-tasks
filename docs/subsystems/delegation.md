@@ -5,7 +5,7 @@ mode: authored
 review_policy: behavioral
 stability: evolving
 covers_surfaces: []
-covers_sources: [extensions/delegate-child.ts, src/core/delegate/artifacts.ts, src/core/delegate/budget.ts, src/core/delegate/hook-contract-evidence.json, src/core/delegate/hook-contract.ts, src/core/delegate/launch.ts, src/core/delegate/result-package.ts, src/core/delegate/runner.ts, src/core/delegate/seed.ts, src/core/delegate/types.ts, src/delegate-child-extension.ts, src/delegate-extension.ts]
+covers_sources: [extensions/delegate-child.ts, src/core/delegate/artifacts.ts, src/core/delegate/budget.ts, src/core/delegate/facade-contract.ts, src/core/delegate/hook-contract-evidence.json, src/core/delegate/hook-contract.ts, src/core/delegate/launch.ts, src/core/delegate/result-package.ts, src/core/delegate/runner.ts, src/core/delegate/seed.ts, src/core/delegate/types.ts, src/core/lazy-module.ts, src/delegate-child-extension.ts, src/delegate-extension.ts]
 ---
 # Delegation subsystem
 
@@ -15,6 +15,7 @@ This document is the primary behavioral owner for delegation runtime code:
 - `src/delegate-child-extension.ts`
 - `extensions/delegate-child.ts`
 - every current file under `src/core/delegate/**`, including `hook-contract-evidence.json`
+- the internal activation-local loader in `src/core/lazy-module.ts`, shared with the Fusion facade
 
 It does **not** claim ownership of shared `common`, `registry`, `pi-launch`, or `durable-fs`; delegation consumes those integration points.
 
@@ -31,6 +32,14 @@ The design deliberately separates:
 - child answer commit (`result.json`),
 - parent adjudication (`outcome.json`),
 - user retrieval (`bg_result`).
+
+## Lazy facade activation
+
+Enabled schemas, descriptions, argument preparation, renderers, and tool registration are immediate. Delegate launch/seed/budget/runner code is imported only on the first valid `bg_delegate` execution. `bg_result` has independent delegate and Fusion verifier loaders and selects one only after task facts identify the producer; a running result imports neither verifier.
+
+Each loader is activation-local and single-flight: simultaneous cold calls await one module import but continue as independent runs. Its states are `unloaded`, `loading`, `loaded`, `failed`, and `closed`. An import failure is wrapped with a bounded module-specific diagnostic and remains sticky for that activation. Session shutdown closes loaders synchronously before cleanup awaits, so a module arriving after shutdown is discarded before its operation can create an artifact, task, or child or touch stale host APIs. Reload constructs a new facade and may retry; the closed instance is never reopened and no process-global cache retains `pi` or session context.
+
+This is execution-module deferral, not a claim that process-only startup parses no advanced source. `src/extension.ts` still statically imports the light delegate and Fusion facade files in this P1a slice, and the npm package remains source TypeScript loaded through Pi/Jiti.
 
 ## Seed and context policy
 

@@ -104,7 +104,7 @@ This generated registry lists production environment-variable references, runtim
 
 | Kind | Path/artifact | Provenance |
 | --- | --- | --- |
-| config | `fusion-models.json` | `src/core/fusion/config.ts:21` |
+| config | `fusion-models.json` | `src/core/fusion/config.ts:22` |
 | delegate-artifact | `budget-plan.json` | `src/core/delegate/artifacts.ts:44` |
 | delegate-artifact | `child-prompt.txt` | `src/core/delegate/artifacts.ts:48` |
 | delegate-artifact | `context-omission-ledger.json` | `src/core/delegate/artifacts.ts:43` |
@@ -151,12 +151,12 @@ This generated registry lists production environment-variable references, runtim
 | `pi-background-tasks.delegate-budget-plan.v3` | `src/core/delegate/types.ts:21` |
 | `pi-background-tasks.delegate-child-terminal.v1` | `src/delegate-child-extension.ts:584` |
 | `pi-background-tasks.delegate-hook-contract.v1` | `src/core/delegate/hook-contract.ts:15` |
-| `pi-background-tasks.delegate-launch.v1` | `src/delegate-extension.ts:461` |
+| `pi-background-tasks.delegate-launch.v1` | `src/delegate-extension.ts:568` |
 | `pi-background-tasks.delegate-ledger.v1` | `src/core/delegate/types.ts:16` |
 | `pi-background-tasks.delegate-manifest.v2` | `src/core/delegate/types.ts:22` |
 | `pi-background-tasks.delegate-outcome.v1` | `src/core/delegate/runner.ts:228` |
 | `pi-background-tasks.delegate-receipt.v1` | `src/core/delegate/types.ts:19` |
-| `pi-background-tasks.delegate-result-view.v1` | `src/delegate-extension.ts:748` |
+| `pi-background-tasks.delegate-result-view.v1` | `src/delegate-extension.ts:894` |
 | `pi-background-tasks.delegate-result.v1` | `src/core/delegate/types.ts:18` |
 | `pi-background-tasks.delegate-runtime-budget.v1` | `src/delegate-child-extension.ts:489` |
 | `pi-background-tasks.delegate-seed.v2` | `src/core/delegate/types.ts:15` |
@@ -177,13 +177,13 @@ This generated registry lists production environment-variable references, runtim
 | `pi-background-tasks.fusion-failure-summary.v1` | `src/core/fusion/types.ts:34` |
 | `pi-background-tasks.fusion-input.v4` | `src/core/fusion/types.ts:14` |
 | `pi-background-tasks.fusion-input.v5` | `src/core/fusion/types.ts:15` |
-| `pi-background-tasks.fusion-launch.v1` | `src/fusion-extension.ts:1125` |
+| `pi-background-tasks.fusion-launch.v1` | `src/fusion-extension.ts:1217` |
 | `pi-background-tasks.fusion-manifest.v3` | `src/core/fusion/types.ts:23` |
 | `pi-background-tasks.fusion-manifest.v4` | `src/core/fusion/types.ts:24` |
 | `pi-background-tasks.fusion-merge-input.v1` | `src/core/fusion/prompts.ts:336` |
 | `pi-background-tasks.fusion-models.v1` | `src/core/fusion/types.ts:13` |
-| `pi-background-tasks.fusion-progress.v1` | `src/fusion-extension.ts:59` |
-| `pi-background-tasks.fusion-result-view.v1` | `src/delegate-extension.ts:789` |
+| `pi-background-tasks.fusion-progress.v1` | `src/fusion-extension.ts:52` |
+| `pi-background-tasks.fusion-result-view.v1` | `src/delegate-extension.ts:935` |
 | `pi-background-tasks.fusion-result.v4` | `src/core/fusion/types.ts:19` |
 | `pi-background-tasks.fusion-result.v5` | `src/core/fusion/types.ts:20` |
 | `pi-background-tasks.fusion-runtime-guard.v2` | `src/core/fusion/child-protocol.ts:24` |

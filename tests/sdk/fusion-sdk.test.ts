@@ -1029,42 +1029,24 @@ void describe('fusion SDK integration', { concurrency: false }, () => {
       await h.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'reload' });
       const resultTool = h.session.getToolDefinition('bg_result');
       assert.ok(resultTool);
-      const terminal = await resultTool.execute(
-        'result-shutdown',
-        { taskId, delivery: 'artifact' },
-        undefined,
-        undefined,
-        h.session.extensionRunner.createContext(),
-      );
-      assert.ok(isRecord(terminal.details));
-      assert.equal(terminal.details['state'], 'cancelled');
-      assert.equal(terminal.details['delivery'], 'none');
-      assert.deepEqual(terminal.details['answer'], { present: false, reason: 'run_did_not_commit' });
-      assert.equal(terminal.details['summary_status'], 'verified');
-      assert.equal(terminal.details['usage_delivered'], undefined);
-      assert.equal('usage' in terminal, false);
+      for (const delivery of ['artifact', undefined, 'inline'] as const) {
+        await assert.rejects(
+          resultTool.execute(
+            `result-shutdown-${delivery ?? 'default'}`,
+            delivery === undefined ? { taskId } : { taskId, delivery },
+            undefined,
+            undefined,
+            h.session.extensionRunner.createContext(),
+          ),
+          /lazy_module_closed.*background-result facade.*closed activation/,
+          'a tool retained from the old activation must reject after shutdown',
+        );
+      }
       assert.equal(
         terminalTaskIds.filter((publishedId) => publishedId === taskId).length,
         0,
         'managed terminal publication is abandoned once reload shutdown begins',
       );
-      for (const delivery of [undefined, 'inline'] as const) {
-        const repeat = await resultTool.execute(
-          `result-shutdown-${delivery ?? 'default'}`,
-          delivery === undefined ? { taskId } : { taskId, delivery },
-          undefined,
-          undefined,
-          h.session.extensionRunner.createContext(),
-        );
-        assert.ok(isRecord(repeat.details));
-        assert.equal(repeat.details['state'], 'cancelled');
-        assert.equal(repeat.details['delivery'], 'none');
-        assert.deepEqual(repeat.details['answer'], {
-          present: false,
-          reason: 'run_did_not_commit',
-        });
-        assert.equal('usage' in repeat, false);
-      }
       h.session.dispose();
       disposed = true;
     } finally {

@@ -76,11 +76,12 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:fb110ef1a126acc32a549ba4706fe9bad7f3e9fef22d71ab3a7c8981afe7e71c",
+      "authored_body_sha256": "sha256:cecf91624a911595f5ba8e55486d9acdaa0940f3f20334d396b42f9326917da3",
       "covers_sources": [
         "extensions/delegate-child.ts",
         "src/core/delegate/artifacts.ts",
         "src/core/delegate/budget.ts",
+        "src/core/delegate/facade-contract.ts",
         "src/core/delegate/hook-contract-evidence.json",
         "src/core/delegate/hook-contract.ts",
         "src/core/delegate/launch.ts",
@@ -88,6 +89,7 @@
         "src/core/delegate/runner.ts",
         "src/core/delegate/seed.ts",
         "src/core/delegate/types.ts",
+        "src/core/lazy-module.ts",
         "src/delegate-child-extension.ts",
         "src/delegate-extension.ts"
       ],
@@ -98,7 +100,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:35b694e44a750c2cce5d63064df141db25296275f1d2f51dd0f8e64c354f7a4c",
+      "authored_body_sha256": "sha256:7e820844f15913b3c26b4c7110c55fcac168c62f0bcb581de175559e2d6d1294",
       "covers_sources": [
         "extensions/fusion-child.ts",
         "src/core/fusion/artifacts.ts",
@@ -109,6 +111,7 @@
         "src/core/fusion/config.ts",
         "src/core/fusion/context.ts",
         "src/core/fusion/evaluation.ts",
+        "src/core/fusion/facade-contract.ts",
         "src/core/fusion/orchestrator.ts",
         "src/core/fusion/output-contract.ts",
         "src/core/fusion/pi-child.ts",
@@ -501,6 +504,7 @@
         "extensions/delegate-child.ts",
         "src/core/delegate/artifacts.ts",
         "src/core/delegate/budget.ts",
+        "src/core/delegate/facade-contract.ts",
         "src/core/delegate/hook-contract-evidence.json",
         "src/core/delegate/hook-contract.ts",
         "src/core/delegate/launch.ts",
@@ -508,6 +512,7 @@
         "src/core/delegate/runner.ts",
         "src/core/delegate/seed.ts",
         "src/core/delegate/types.ts",
+        "src/core/lazy-module.ts",
         "src/delegate-child-extension.ts",
         "src/delegate-extension.ts"
       ],
@@ -538,6 +543,7 @@
         "src/core/fusion/config.ts",
         "src/core/fusion/context.ts",
         "src/core/fusion/evaluation.ts",
+        "src/core/fusion/facade-contract.ts",
         "src/core/fusion/orchestrator.ts",
         "src/core/fusion/output-contract.ts",
         "src/core/fusion/pi-child.ts",
@@ -986,7 +992,7 @@
         "id": "command:fusion",
         "kind": "command",
         "name": "fusion",
-        "source": "src/fusion-extension.ts:996"
+        "source": "src/fusion-extension.ts:1080"
       },
       {
         "availability": "feature:fusion",
@@ -995,7 +1001,7 @@
         "id": "command:fusion-models",
         "kind": "command",
         "name": "fusion-models",
-        "source": "src/fusion-extension.ts:1029"
+        "source": "src/fusion-extension.ts:1113"
       },
       {
         "availability": "always",
@@ -1071,7 +1077,7 @@
         "id": "renderer:fusion-result",
         "kind": "renderer",
         "name": "fusion-result",
-        "source": "src/fusion-extension.ts:980"
+        "source": "src/fusion-extension.ts:1064"
       }
     ],
     "shortcut": [
@@ -1191,7 +1197,7 @@
           ],
           "type": "object"
         },
-        "source": "src/delegate-extension.ts:343"
+        "source": "src/delegate-extension.ts:445"
       },
       {
         "availability": "always",
@@ -1285,7 +1291,7 @@
           ],
           "type": "object"
         },
-        "source": "src/delegate-extension.ts:530"
+        "source": "src/delegate-extension.ts:659"
       },
       {
         "availability": "always",
@@ -1502,7 +1508,7 @@
           ],
           "type": "object"
         },
-        "source": "src/fusion-extension.ts:1197"
+        "source": "src/fusion-extension.ts:1289"
       },
       {
         "availability": "feature:fusion",
@@ -1532,7 +1538,7 @@
           ],
           "type": "object"
         },
-        "source": "src/fusion-extension.ts:1179"
+        "source": "src/fusion-extension.ts:1271"
       },
       {
         "availability": "feature:fusion",
@@ -1623,7 +1629,7 @@
           ],
           "type": "object"
         },
-        "source": "src/fusion-extension.ts:1216"
+        "source": "src/fusion-extension.ts:1308"
       },
       {
         "availability": "feature:fusion",
@@ -1755,7 +1761,7 @@
           ],
           "type": "object"
         },
-        "source": "src/fusion-extension.ts:1236"
+        "source": "src/fusion-extension.ts:1328"
       }
     ],
     "workflow": [
@@ -1848,6 +1854,9 @@
     "src/core/delegate/budget.ts": [
       "subsystems/delegation"
     ],
+    "src/core/delegate/facade-contract.ts": [
+      "subsystems/delegation"
+    ],
     "src/core/delegate/hook-contract-evidence.json": [
       "subsystems/delegation"
     ],
@@ -1899,6 +1908,9 @@
     "src/core/fusion/evaluation.ts": [
       "subsystems/fusion"
     ],
+    "src/core/fusion/facade-contract.ts": [
+      "subsystems/fusion"
+    ],
     "src/core/fusion/orchestrator.ts": [
       "subsystems/fusion"
     ],
@@ -1925,6 +1937,9 @@
     ],
     "src/core/fusion/workflows.ts": [
       "subsystems/fusion"
+    ],
+    "src/core/lazy-module.ts": [
+      "subsystems/delegation"
     ],
     "src/core/pi-launch.ts": [
       "subsystems/child-launch-durability-and-safety"

@@ -30,6 +30,7 @@ Every production file under `src/**` and `extensions/**` has exactly one primary
 | `src/core/context/visible-conversation-v2.ts` | [concepts/context-projection-and-budgeting](./concepts/context-projection-and-budgeting.md) |
 | `src/core/delegate/artifacts.ts` | [subsystems/delegation](./subsystems/delegation.md) |
 | `src/core/delegate/budget.ts` | [subsystems/delegation](./subsystems/delegation.md) |
+| `src/core/delegate/facade-contract.ts` | [subsystems/delegation](./subsystems/delegation.md) |
 | `src/core/delegate/hook-contract-evidence.json` | [subsystems/delegation](./subsystems/delegation.md) |
 | `src/core/delegate/hook-contract.ts` | [subsystems/delegation](./subsystems/delegation.md) |
 | `src/core/delegate/launch.ts` | [subsystems/delegation](./subsystems/delegation.md) |
@@ -47,6 +48,7 @@ Every production file under `src/**` and `extensions/**` has exactly one primary
 | `src/core/fusion/config.ts` | [subsystems/fusion](./subsystems/fusion.md) |
 | `src/core/fusion/context.ts` | [subsystems/fusion](./subsystems/fusion.md) |
 | `src/core/fusion/evaluation.ts` | [subsystems/fusion](./subsystems/fusion.md) |
+| `src/core/fusion/facade-contract.ts` | [subsystems/fusion](./subsystems/fusion.md) |
 | `src/core/fusion/orchestrator.ts` | [subsystems/fusion](./subsystems/fusion.md) |
 | `src/core/fusion/output-contract.ts` | [subsystems/fusion](./subsystems/fusion.md) |
 | `src/core/fusion/pi-child.ts` | [subsystems/fusion](./subsystems/fusion.md) |
@@ -56,6 +58,7 @@ Every production file under `src/**` and `extensions/**` has exactly one primary
 | `src/core/fusion/types.ts` | [subsystems/fusion](./subsystems/fusion.md) |
 | `src/core/fusion/web-fetch.ts` | [subsystems/fusion](./subsystems/fusion.md) |
 | `src/core/fusion/workflows.ts` | [subsystems/fusion](./subsystems/fusion.md) |
+| `src/core/lazy-module.ts` | [subsystems/delegation](./subsystems/delegation.md) |
 | `src/core/pi-launch.ts` | [subsystems/child-launch-durability-and-safety](./subsystems/child-launch-durability-and-safety.md) |
 | `src/core/registry.ts` | [subsystems/background-task-runtime](./subsystems/background-task-runtime.md) |
 | `src/core/reload-shell-owner.ts` | [subsystems/background-task-runtime](./subsystems/background-task-runtime.md) |
