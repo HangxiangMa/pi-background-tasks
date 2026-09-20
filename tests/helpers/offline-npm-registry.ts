@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
@@ -172,12 +172,44 @@ function parsePackJson(stdout: string, packageLabel: string): NpmPackJson {
 async function packInstalledClosure(
   options: InstalledDependencyRegistryOptions,
 ): Promise<readonly PackedDependency[]> {
+  if (!isAbsolute(options.npmCli)) throw new Error('npm CLI path must be absolute');
+  if (!isAbsolute(options.packageRoot)) throw new Error('package root must be absolute');
+  if (!isAbsolute(options.scratchDir)) throw new Error('registry scratch directory must be absolute');
+  if (options.npmEnv['GIT_ALLOW_PROTOCOL'] !== 'file') {
+    throw new Error('dependency packing requires GIT_ALLOW_PROTOCOL=file');
+  }
+  for (const key of [
+    'NPM_CONFIG_USERCONFIG',
+    'npm_config_userconfig',
+    'NPM_CONFIG_GLOBALCONFIG',
+    'npm_config_globalconfig',
+  ]) {
+    const path = options.npmEnv[key];
+    if (typeof path !== 'string' || !isAbsolute(path)) {
+      throw new Error(`dependency packing requires an absolute ${key}`);
+    }
+  }
+
   const tarballDirectory = join(options.scratchDir, 'tarballs');
+  const packCwd = join(options.scratchDir, 'pack-project');
   mkdirSync(tarballDirectory, { recursive: true });
+  mkdirSync(packCwd, { recursive: true });
+  writeFileSync(
+    join(packCwd, 'package.json'),
+    `${JSON.stringify(
+      { name: 'installed-closure-pack-project', private: true, version: '1.0.0' },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(join(packCwd, '.npmrc'), '');
   const manifests = installedClosure(options.packageRoot, options.dependencySpecs);
   const packed: PackedDependency[] = [];
 
   for (const [key, manifest] of [...manifests].sort(([left], [right]) => left.localeCompare(right))) {
+    if (!isAbsolute(manifest.directory)) {
+      throw new Error(`installed production dependency path must be absolute: ${key}`);
+    }
     const result = spawnSync(
       process.execPath,
       [
@@ -190,7 +222,7 @@ async function packInstalledClosure(
         manifest.directory,
       ],
       {
-        cwd: options.packageRoot,
+        cwd: packCwd,
         encoding: 'utf8',
         env: options.npmEnv,
       },

@@ -110,6 +110,51 @@ void describe('type-safety standard', () => {
     );
   });
 
+  void it('finds directly nested assertions through type-transparent wrappers only', () => {
+    const wrappedSource = [
+      'const one = ((value as unknown) satisfies unknown) as Target;',
+      'const two = ((((value as unknown) satisfies unknown) satisfies unknown)) as Target;',
+      'const three = <Target>(((<unknown>value) satisfies unknown));',
+    ].join('\n');
+    const wrappedViolations = findTypeSafetyViolations('wrapped.ts', wrappedSource, {
+      escapeHatches: true,
+      nonNullAssertions: false,
+    });
+    assert.deepEqual(
+      wrappedViolations.map((violation) => violation.rule),
+      ['double assertion', 'double assertion', 'double assertion'],
+    );
+
+    const aliasSeparated = [
+      'const intermediate = value as unknown;',
+      'const split = intermediate as Target;',
+    ].join('\n');
+    assert.deepEqual(
+      findTypeSafetyViolations('alias-separated.ts', aliasSeparated, {
+        escapeHatches: true,
+        nonNullAssertions: false,
+      }),
+      [],
+      'alias-separated assertions are outside this direct-syntax rule',
+    );
+
+    const validatedBoundary = [
+      'declare function parseInput(): unknown;',
+      'declare function assertTarget(value: unknown): asserts value is Target;',
+      'const boundary = parseInput() as unknown;',
+      'assertTarget(boundary);',
+      'const target = boundary as Target;',
+    ].join('\n');
+    assert.deepEqual(
+      findTypeSafetyViolations('validated-boundary.ts', validatedBoundary, {
+        escapeHatches: true,
+        nonNullAssertions: false,
+      }),
+      [],
+      'the syntax guard must not pretend to prove alias data flow across a validated unknown boundary',
+    );
+  });
+
   void it('has no explicit top-type escape, compiler suppressions, or double assertions in package TypeScript', async () => {
     const violations = await scan(await filesFor(allTypeScriptRoots), {
       escapeHatches: true,

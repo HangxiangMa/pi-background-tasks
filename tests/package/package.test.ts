@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -342,7 +342,19 @@ function makeIsolatedEnvRoot(prefix: string): string {
   mkdirSync(join(rootDir, 'home'), { recursive: true });
   mkdirSync(join(rootDir, 'cache'), { recursive: true });
   mkdirSync(join(rootDir, 'config'), { recursive: true });
+  mkdirSync(join(rootDir, 'tmp'), { recursive: true });
+  writeFileSync(join(rootDir, 'config', 'user.npmrc'), '');
+  writeFileSync(join(rootDir, 'config', 'global.npmrc'), '');
   return rootDir;
+}
+
+function makeIsolatedNpmProject(directory: string, name: string): void {
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(
+    join(directory, 'package.json'),
+    `${JSON.stringify({ name, private: true, version: '1.0.0' }, null, 2)}\n`,
+  );
+  writeFileSync(join(directory, '.npmrc'), '');
 }
 
 function removeIsolatedEnvRoot(rootDir: string): void {
@@ -350,16 +362,27 @@ function removeIsolatedEnvRoot(rootDir: string): void {
 }
 
 function isolatedNpmEnv(rootDir: string): NodeJS.ProcessEnv {
+  const cache = join(rootDir, 'cache');
+  const userConfig = join(rootDir, 'config', 'user.npmrc');
+  const globalConfig = join(rootDir, 'config', 'global.npmrc');
+  const registry = 'http://127.0.0.1.invalid/';
   return {
     PATH: process.env['PATH'] ?? '',
     HOME: join(rootDir, 'home'),
     USERPROFILE: join(rootDir, 'home'),
     XDG_CONFIG_HOME: join(rootDir, 'config'),
-    NPM_CONFIG_CACHE: join(rootDir, 'cache'),
-    NPM_CONFIG_USERCONFIG: join(rootDir, 'npmrc'),
-    NPM_CONFIG_REGISTRY: 'http://127.0.0.1.invalid/',
-    npm_config_cache: join(rootDir, 'cache'),
-    npm_config_userconfig: join(rootDir, 'npmrc'),
+    TMPDIR: join(rootDir, 'tmp'),
+    TMP: join(rootDir, 'tmp'),
+    TEMP: join(rootDir, 'tmp'),
+    NPM_CONFIG_CACHE: cache,
+    npm_config_cache: cache,
+    NPM_CONFIG_USERCONFIG: userConfig,
+    npm_config_userconfig: userConfig,
+    NPM_CONFIG_GLOBALCONFIG: globalConfig,
+    npm_config_globalconfig: globalConfig,
+    NPM_CONFIG_REGISTRY: registry,
+    npm_config_registry: registry,
+    GIT_ALLOW_PROTOCOL: 'file',
     PI_OFFLINE: '1',
     PI_SKIP_VERSION_CHECK: '1',
     PI_TELEMETRY: '0',
@@ -1341,6 +1364,141 @@ void describe('package', () => {
     );
   });
 
+  void it('file URL guard gives absolute first arguments precedence over bases', () => {
+    const fileCases = [
+      "const absoluteFile = new URL('file:///C:/work/file.ts');",
+      "const fromObject = new URL(absoluteFile, 'https://example.com/base').pathname;",
+      "const fromMeta = new URL(import.meta.url, 'https://example.com/base').pathname;",
+      "const host = 'server';",
+      'const fromTemplate = new URL(`file://${host}/share/file.ts`).pathname;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('absolute-file-first.ts', fileCases).map(
+        (violation) => violation.line,
+      ),
+      [2, 3, 5],
+    );
+
+    const httpsCases = [
+      "const absoluteHttps = new URL('https://example.com/request/path');",
+      'const fromObject = new URL(absoluteHttps, import.meta.url).pathname;',
+      "const host = 'example.com';",
+      'const fromTemplate = new URL(`https://${host}/v1`, import.meta.url).pathname;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('absolute-https-first.ts', httpsCases),
+      [],
+    );
+  });
+
+  void it('file URL guard uses feasible values at each pathname read', () => {
+    const readBeforeWrite = [
+      "let target = 'file:///C:/work/file.ts';",
+      'const nativePath = new URL(target).pathname;',
+      "target = 'https://example.com/request/path';",
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('read-before-write.ts', readBeforeWrite).map(
+        (violation) => violation.line,
+      ),
+      [2],
+    );
+
+    const mayFileBranch = [
+      'let target: string;',
+      "if (condition) target = 'https://example.com/request/path';",
+      "else target = 'file:///C:/work/file.ts';",
+      'const maybeNativePath = new URL(target).pathname;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('may-file-branch.ts', mayFileBranch).map(
+        (violation) => violation.line,
+      ),
+      [4],
+    );
+
+    const switchMayFile = [
+      "let target = 'https://example.com/request/path';",
+      'switch (mode) {',
+      "  case 'native':",
+      "    target = 'file:///C:/work/file.ts';",
+      '    break;',
+      '  default:',
+      "    target = 'https://example.com/other';",
+      '}',
+      'const maybeNativePath = new URL(target).pathname;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('switch-may-file.ts', switchMayFile).map(
+        (violation) => violation.line,
+      ),
+      [9],
+    );
+
+    const overwrittenBeforeRead = [
+      "let parsed = new URL('./module.ts', import.meta.url);",
+      "parsed = new URL('https://example.com/request/path');",
+      'const requestPath = parsed.pathname;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('overwritten-before-read.ts', overwrittenBeforeRead),
+      [],
+    );
+
+    const writeAfterRead = [
+      "let target = 'https://example.com/request/path';",
+      'const requestPath = new URL(target).pathname;',
+      "target = 'file:///C:/work/file.ts';",
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('write-after-read.ts', writeAfterRead),
+      [],
+    );
+
+    const unreachableFileWrite = [
+      "let target = 'https://example.com/request/path';",
+      "if (false) target = 'file:///C:/work/file.ts';",
+      'const requestPath = new URL(target).pathname;',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('unreachable-file-write.ts', unreachableFileWrite),
+      [],
+    );
+  });
+
+  void it('file URL guard covers destructuring assignments and computed pathname aliases', () => {
+    const hazards = [
+      'let assignedPath: string;',
+      "({ pathname: assignedPath } = new URL('file:///C:/work/file.ts'));",
+      "const key = 'pathname' as const;",
+      "const computedPath = new URL('file://server/share/file.ts')[key];",
+      'let computedAssignment: string;',
+      "({ [key]: computedAssignment } = new URL('file:///D:/work/file.ts'));",
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('pathname-aliases.ts', hazards).map(
+        (violation) => violation.line,
+      ),
+      [2, 4, 6],
+    );
+
+    const controls = [
+      'let requestPath: string;',
+      "({ pathname: requestPath } = new URL('https://example.com/request/path'));",
+      "const key = 'pathname' as const;",
+      "const computedPath = new URL('https://example.com/request/path')[key];",
+      'function local(URL: new (value: string) => { pathname: string }): string {',
+      '  let pathname: string;',
+      "  ({ pathname } = new URL('file:///C:/not-a-real-url-object'));",
+      "  return new URL('file:///C:/still-not-a-real-url-object')[key];",
+      '}',
+    ].join('\n');
+    assert.deepEqual(
+      findFileUrlPathnameViolations('pathname-alias-controls.ts', controls),
+      [],
+    );
+  });
+
   void it('converts file URLs to native paths instead of using URL.pathname', async () => {
     // A file URL pathname such as `/D:/a/repo/` is not a Windows native path.
     // Follow only compiler-proven file URL provenance so HTTPS path validation
@@ -1413,10 +1571,15 @@ void describe('package', () => {
 
   void it('packs exactly the runtime/docs payload and excludes tests/artifacts', () => {
     const envRoot = makeIsolatedEnvRoot('pi-bg-pack-env-');
-    const r = runNpm(['pack', '--dry-run', '--json'], {
-      cwd: fileURLToPath(root),
-      env: isolatedNpmEnv(envRoot),
-    });
+    const packCwd = join(envRoot, 'pack-project');
+    makeIsolatedNpmProject(packCwd, 'payload-pack-project');
+    const r = runNpm(
+      ['pack', '--dry-run', '--ignore-scripts', '--json', fileURLToPath(root)],
+      {
+        cwd: packCwd,
+        env: isolatedNpmEnv(envRoot),
+      },
+    );
     removeIsolatedEnvRoot(envRoot);
     assert.equal(r.status, 0, r.stderr);
     const firstEntry = parsePackEntries(r.stdout)[0];
@@ -1476,9 +1639,94 @@ void describe('package', () => {
     assert.ok(!files.some((f) => f.endsWith('.tgz')), 'nested tarballs must not ship');
   });
 
+  void it('isolates npm user, global, and project configuration without a hostile request', async () => {
+    const envRoot = makeIsolatedEnvRoot('pi-bg-npm-config-env-');
+    const probeProject = join(envRoot, 'probe-project');
+    const hostileProject = join(envRoot, 'hostile-project');
+    const safeUserConfig = join(envRoot, 'config', 'user.npmrc');
+    const safeGlobalConfig = join(envRoot, 'config', 'global.npmrc');
+    const hostileGlobalConfig = join(envRoot, 'hostile-global.npmrc');
+    const hostileRegistry = 'http://127.0.0.1:9/never-contact/';
+    const ownedRegistry = 'http://127.0.0.1:43210/';
+    try {
+      for (const [directory, name] of [
+        [probeProject, 'isolated-config-probe'],
+        [hostileProject, 'hostile-project-probe'],
+      ] as const) {
+        mkdirSync(directory, { recursive: true });
+        await writeFile(
+          join(directory, 'package.json'),
+          `${JSON.stringify({ name, private: true, version: '1.0.0' }, null, 2)}\n`,
+        );
+      }
+      await writeFile(join(probeProject, '.npmrc'), '');
+      await writeFile(
+        join(hostileProject, '.npmrc'),
+        `@mixmark-io:registry=${hostileRegistry}\n`,
+      );
+      await writeFile(safeUserConfig, '');
+      await writeFile(safeGlobalConfig, '');
+      await writeFile(
+        hostileGlobalConfig,
+        `@mixmark-io:registry=${hostileRegistry}\n`,
+      );
+
+      const vulnerableEnv = localRegistryNpmEnv(envRoot, ownedRegistry);
+      vulnerableEnv['NPM_CONFIG_GLOBALCONFIG'] = hostileGlobalConfig;
+      vulnerableEnv['npm_config_globalconfig'] = hostileGlobalConfig;
+      const vulnerableGlobal = runNpm(['config', 'get', '@mixmark-io:registry'], {
+        cwd: probeProject,
+        env: vulnerableEnv,
+      });
+      assert.equal(vulnerableGlobal.status, 0, vulnerableGlobal.stderr);
+      assert.equal(vulnerableGlobal.stdout.trim(), hostileRegistry);
+
+      const isolatedEnv = localRegistryNpmEnv(envRoot, ownedRegistry);
+      assert.equal(isolatedEnv['NPM_CONFIG_USERCONFIG'], safeUserConfig);
+      assert.equal(isolatedEnv['npm_config_userconfig'], safeUserConfig);
+      assert.equal(isolatedEnv['NPM_CONFIG_GLOBALCONFIG'], safeGlobalConfig);
+      assert.equal(isolatedEnv['npm_config_globalconfig'], safeGlobalConfig);
+      assert.equal(isolatedEnv['GIT_ALLOW_PROTOCOL'], 'file');
+      assert.equal(isolatedEnv['TMPDIR'], join(envRoot, 'tmp'));
+
+      const effectiveGlobal = runNpm(['config', 'get', 'globalconfig'], {
+        cwd: probeProject,
+        env: isolatedEnv,
+      });
+      assert.equal(effectiveGlobal.status, 0, effectiveGlobal.stderr);
+      assert.equal(effectiveGlobal.stdout.trim(), safeGlobalConfig);
+      const effectiveUser = runNpm(['config', 'get', 'userconfig'], {
+        cwd: probeProject,
+        env: isolatedEnv,
+      });
+      assert.equal(effectiveUser.status, 0, effectiveUser.stderr);
+      assert.equal(effectiveUser.stdout.trim(), safeUserConfig);
+      const effectiveRegistry = runNpm(['config', 'get', 'registry'], {
+        cwd: probeProject,
+        env: isolatedEnv,
+      });
+      assert.equal(effectiveRegistry.status, 0, effectiveRegistry.stderr);
+      assert.equal(effectiveRegistry.stdout.trim(), ownedRegistry);
+      const effectiveScope = runNpm(['config', 'get', '@mixmark-io:registry'], {
+        cwd: probeProject,
+        env: isolatedEnv,
+      });
+      assert.equal(effectiveScope.status, 0, effectiveScope.stderr);
+      assert.notEqual(effectiveScope.stdout.trim(), hostileRegistry);
+
+      const vulnerableProject = runNpm(['config', 'get', '@mixmark-io:registry'], {
+        cwd: hostileProject,
+        env: isolatedEnv,
+      });
+      assert.equal(vulnerableProject.status, 0, vulnerableProject.stderr);
+      assert.equal(vulnerableProject.stdout.trim(), hostileRegistry);
+    } finally {
+      removeIsolatedEnvRoot(envRoot);
+    }
+  });
+
   void it('local tarball installs with the expected package files', async () => {
     const temp = await mkdtemp(join(tmpdir(), 'pi-bg-pack-'));
-    let tarball: URL | undefined;
     let registry: Awaited<ReturnType<typeof startInstalledDependencyRegistry>> | undefined;
     const packEnvRoot = makeIsolatedEnvRoot('pi-bg-pack-env-');
     const missingEnvRoot = makeIsolatedEnvRoot('pi-bg-missing-env-');
@@ -1486,24 +1734,36 @@ void describe('package', () => {
     try {
       const packageJson = await pkg();
       assert.deepEqual(packageJson.dependencies, { turndown: '7.2.4' });
-      const pack = runNpm(['pack', '--json'], {
-        cwd: fileURLToPath(root),
-        env: isolatedNpmEnv(packEnvRoot),
-      });
+      const packCwd = join(temp, 'package-pack-project');
+      const packageTarballs = join(temp, 'package-tarballs');
+      makeIsolatedNpmProject(packCwd, 'package-pack-project');
+      mkdirSync(packageTarballs, { recursive: true });
+      const pack = runNpm(
+        [
+          'pack',
+          '--ignore-scripts',
+          '--json',
+          '--pack-destination',
+          packageTarballs,
+          fileURLToPath(root),
+        ],
+        {
+          cwd: packCwd,
+          env: isolatedNpmEnv(packEnvRoot),
+        },
+      );
       assert.equal(pack.status, 0, pack.stderr);
       const firstEntry = parsePackEntries(pack.stdout)[0];
       assert.ok(firstEntry, 'npm pack must return one entry');
-      tarball = new URL(firstEntry.filename, root);
-      // fileURLToPath, never pathname: on Windows pathname yields a leading-slash
-      // form such as /D:/... which is not a usable native path.
-      const tarballPath = fileURLToPath(tarball);
+      const tarballPath = join(packageTarballs, firstEntry.filename);
+      assert.ok(existsSync(tarballPath), 'npm pack must write into the isolated destination');
 
       const missingConsumer = join(temp, 'missing-consumer');
       const seedConsumer = join(temp, 'dependency-seed');
       const installedConsumer = join(temp, 'installed-consumer');
-      for (const directory of [missingConsumer, seedConsumer, installedConsumer]) {
-        mkdirSync(directory, { recursive: true });
-      }
+      makeIsolatedNpmProject(missingConsumer, 'missing-input-control');
+      makeIsolatedNpmProject(seedConsumer, 'offline-cache-seed');
+      makeIsolatedNpmProject(installedConsumer, 'offline-packed-consumer');
       const emptyConsumerManifest = (name: string): string =>
         `${JSON.stringify({ name, private: true, version: '1.0.0' }, null, 2)}\n`;
       await writeFile(
@@ -1709,7 +1969,6 @@ void describe('package', () => {
       removeIsolatedEnvRoot(packEnvRoot);
       removeIsolatedEnvRoot(missingEnvRoot);
       removeIsolatedEnvRoot(installEnvRoot);
-      if (tarball) await rm(tarball, { force: true });
     }
   });
 });
