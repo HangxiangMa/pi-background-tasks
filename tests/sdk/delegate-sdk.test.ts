@@ -146,7 +146,10 @@ fs.renameSync(tmp, path.join(dir, 'result.json'));
 process.exit(0);
 `;
 
-async function harness(scenario = 'commit'): Promise<Harness> {
+async function harness(
+  scenario = 'commit',
+  options: { failAfterMutation?: boolean } = {},
+): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), 'pi-bg-delegate-sdk-'));
   roots.push(root);
   const cwd = join(root, 'project');
@@ -185,6 +188,10 @@ async function harness(scenario = 'commit'): Promise<Harness> {
   const previous = {
     path: process.env['PATH'],
     scenario: process.env['PI_BG_DELEGATE_FAKE_SCENARIO'],
+    offline: process.env['PI_OFFLINE'],
+    skipVersionCheck: process.env['PI_SKIP_VERSION_CHECK'],
+    telemetry: process.env['PI_TELEMETRY'],
+    ci: process.env['CI'],
     argv1: process.argv[1],
   };
   Object.assign(process.env, isolatedTestEnv, {
@@ -200,12 +207,17 @@ async function harness(scenario = 'commit'): Promise<Harness> {
     restored = true;
     restoreEnvValue('PATH', previous.path);
     restoreEnvValue('PI_BG_DELEGATE_FAKE_SCENARIO', previous.scenario);
+    restoreEnvValue('PI_OFFLINE', previous.offline);
+    restoreEnvValue('PI_SKIP_VERSION_CHECK', previous.skipVersionCheck);
+    restoreEnvValue('PI_TELEMETRY', previous.telemetry);
+    restoreEnvValue('CI', previous.ci);
     if (previous.argv1 === undefined) process.argv.splice(1, 1);
     else process.argv[1] = previous.argv1;
   };
   process.argv[1] = fakePi;
 
   try {
+    if (options.failAfterMutation) throw new Error('fixture setup failure after global mutation');
     const settingsManager = SettingsManager.inMemory({});
     const loader = new DefaultResourceLoader({
       cwd,
@@ -250,8 +262,11 @@ async function dispose(h: Harness): Promise<void> {
   try {
     await h.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
   } finally {
-    h.session.dispose();
-    h.restore();
+    try {
+      h.session.dispose();
+    } finally {
+      h.restore();
+    }
   }
 }
 
@@ -377,6 +392,77 @@ afterEach(async () => {
 });
 
 void describe('bg_delegate and bg_result public surface', { concurrency: false }, () => {
+  void it('restores every mutated env key and argv after normal and failed setup', async () => {
+    const original = {
+      PATH: process.env['PATH'],
+      PI_BG_DELEGATE_FAKE_SCENARIO: process.env['PI_BG_DELEGATE_FAKE_SCENARIO'],
+      PI_OFFLINE: process.env['PI_OFFLINE'],
+      PI_SKIP_VERSION_CHECK: process.env['PI_SKIP_VERSION_CHECK'],
+      PI_TELEMETRY: process.env['PI_TELEMETRY'],
+      CI: process.env['CI'],
+      argv1: process.argv[1],
+    };
+    const sentinels = {
+      PATH: '/fixture/original/path',
+      PI_BG_DELEGATE_FAKE_SCENARIO: 'fixture-original-scenario',
+      PI_OFFLINE: 'fixture-original-offline',
+      PI_SKIP_VERSION_CHECK: 'fixture-original-version-check',
+      PI_TELEMETRY: 'fixture-original-telemetry',
+      CI: 'fixture-original-ci',
+      argv1: '/fixture/original-host.js',
+    } as const;
+    const observe = () => ({
+      PATH: process.env['PATH'],
+      PI_BG_DELEGATE_FAKE_SCENARIO: process.env['PI_BG_DELEGATE_FAKE_SCENARIO'],
+      PI_OFFLINE: process.env['PI_OFFLINE'],
+      PI_SKIP_VERSION_CHECK: process.env['PI_SKIP_VERSION_CHECK'],
+      PI_TELEMETRY: process.env['PI_TELEMETRY'],
+      CI: process.env['CI'],
+      argv1: process.argv[1],
+    });
+    const installSentinels = () => {
+      Object.assign(process.env, {
+        PATH: sentinels.PATH,
+        PI_BG_DELEGATE_FAKE_SCENARIO: sentinels.PI_BG_DELEGATE_FAKE_SCENARIO,
+        PI_OFFLINE: sentinels.PI_OFFLINE,
+        PI_SKIP_VERSION_CHECK: sentinels.PI_SKIP_VERSION_CHECK,
+        PI_TELEMETRY: sentinels.PI_TELEMETRY,
+        CI: sentinels.CI,
+      });
+      process.argv[1] = sentinels.argv1;
+    };
+
+    try {
+      installSentinels();
+      const h = await harness();
+      await dispose(h);
+      const afterNormalDispose = observe();
+
+      installSentinels();
+      await assert.rejects(
+        () => harness('commit', { failAfterMutation: true }),
+        /fixture setup failure after global mutation/,
+      );
+      const afterSetupFailure = observe();
+
+      assert.deepEqual(afterNormalDispose, sentinels);
+      assert.deepEqual(afterSetupFailure, sentinels);
+    } finally {
+      for (const key of [
+        'PATH',
+        'PI_BG_DELEGATE_FAKE_SCENARIO',
+        'PI_OFFLINE',
+        'PI_SKIP_VERSION_CHECK',
+        'PI_TELEMETRY',
+        'CI',
+      ] as const) {
+        restoreEnvValue(key, original[key]);
+      }
+      if (original.argv1 === undefined) process.argv.splice(1, 1);
+      else process.argv[1] = original.argv1;
+    }
+  });
+
   void it('registers both tools at load', async () => {
     const h = await harness();
     try {

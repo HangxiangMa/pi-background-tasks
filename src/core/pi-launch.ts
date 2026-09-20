@@ -93,12 +93,14 @@ class HostIsNotPiError extends Error {
 class LaunchPathOperationError extends Error {
   readonly operation: string;
   readonly path: string;
+  readonly pathCause: unknown;
 
   constructor(operation: string, path: string, cause: unknown) {
     super(`${operation} failed for ${path}: ${errorMessage(cause)}`, { cause });
     this.name = 'LaunchPathOperationError';
     this.operation = operation;
     this.path = path;
+    this.pathCause = cause;
   }
 }
 
@@ -232,7 +234,11 @@ function findPiManifestFromHostScript(hostScript: string | undefined, io: Launch
     found = findNearestNamedManifest(hostScript, io);
   } catch (error) {
     if (error instanceof HostIsNotPiError) throw error;
-    if (error instanceof LaunchPathOperationError && error.operation === 'source realpath') {
+    if (
+      error instanceof LaunchPathOperationError &&
+      error.operation === 'source realpath' &&
+      isMissingPathError(error.pathCause)
+    ) {
       throw new HostIsNotPiError(error.message);
     }
     throw error;
@@ -313,26 +319,19 @@ function isGenericJavaScriptRuntime(execPath: string, platform: NodeJS.Platform)
   return /^(?:node|nodejs|bun)(?:\.exe)?$/i.test(executableBasename(execPath, platform));
 }
 
-function isBunVirtualHostScript(hostScript: string | undefined): boolean {
-  if (!hostScript) return false;
-  return /^[/\\]\$bunfs[/\\]root[/\\]/i.test(hostScript);
-}
-
 function resolveCompiledHostLaunch(
   deps: PiLaunchDependencies,
   io: LaunchIo,
   platform: NodeJS.Platform,
 ): PiLaunchSpec | undefined {
   const execPath = deps.execPath ?? process.execPath;
-  const hostScript = deps.hostScript ?? process.argv[1];
   const executableName = executableBasename(execPath, platform);
   const isNamedPiExecutable =
     platform === 'win32' ? /^pi\.(?:exe|com)$/i.test(executableName) : executableName === 'pi';
-  if (
-    isGenericJavaScriptRuntime(execPath, platform) ||
-    (!isBunVirtualHostScript(hostScript) && !isNamedPiExecutable)
-  )
-    return undefined;
+  // A Bun virtual script path describes packaging mechanics shared by every
+  // compiled SDK application; it is not Pi CLI authority. Retain the direct
+  // route only for the established Pi executable name.
+  if (isGenericJavaScriptRuntime(execPath, platform) || !isNamedPiExecutable) return undefined;
 
   const executableReal = pathOperation('compiled host realpath', execPath, () => io.realpath(execPath));
   const executableStat = pathOperation('compiled host stat', executableReal, () =>
@@ -447,10 +446,9 @@ function resolveExecutableOnPosixPath(
       continue;
     }
     return {
-      // Preserve the established spawn contract after validating the concrete
-      // candidate. Production resolution reads the same process PATH that spawn
-      // will use, while tests can inject PATH for deterministic admission checks.
-      launch: { executable: 'pi', argvPrefix: [], kind: 'path' },
+      // Bind the launch plan to the exact canonical executable admitted above.
+      // A later cwd or environment/PATH change must not trigger a second lookup.
+      launch: { executable: candidateReal, argvPrefix: [], kind: 'path' },
       diagnostics,
     };
   }
@@ -469,17 +467,11 @@ export function resolvePiLaunch(deps: PiLaunchDependencies = {}): PiLaunchSpec {
   }
 
   const hostScript = deps.hostScript ?? process.argv[1];
+  let pathDiagnostic: string | undefined;
   if (platform !== 'win32') {
     const pathResult = resolveExecutableOnPosixPath(deps, io);
     if (pathResult.launch) return pathResult.launch;
-    try {
-      const host = findPiManifestFromHostScript(hostScript, io);
-      return resolvePackageLaunch(host.manifestPath, deps, io, platform, host.sourceReal);
-    } catch (error) {
-      failResolution(
-        `no executable pi on PATH (${pathResult.diagnostics.join('; ') || 'no candidates'}); running host package resolution failed: ${errorMessage(error)}`,
-      );
-    }
+    pathDiagnostic = `no executable pi on PATH (${pathResult.diagnostics.join('; ') || 'no candidates'})`;
   }
 
   let hostDiagnostic = 'host script was not inspected';
@@ -489,6 +481,8 @@ export function resolvePiLaunch(deps: PiLaunchDependencies = {}): PiLaunchSpec {
     // hide its invalid bin/identity behind another module installation.
     return resolvePackageLaunch(host.manifestPath, deps, io, platform, host.sourceReal);
   } catch (error) {
+    // Only genuine absence or a positively foreign package identity permits the
+    // exact installed-module route. I/O and integrity failures remain fatal.
     if (!(error instanceof HostIsNotPiError)) failResolution(errorMessage(error));
     hostDiagnostic = errorMessage(error);
   }
@@ -497,7 +491,8 @@ export function resolvePiLaunch(deps: PiLaunchDependencies = {}): PiLaunchSpec {
   try {
     manifestPath = resolvePiManifestFromModules(deps, io);
   } catch (error) {
-    failResolution(`${errorMessage(error)}; running host lookup: ${hostDiagnostic}`);
+    const prefix = pathDiagnostic === undefined ? '' : `${pathDiagnostic}; `;
+    failResolution(`${prefix}${errorMessage(error)}; running host lookup: ${hostDiagnostic}`);
   }
   try {
     return resolvePackageLaunch(manifestPath, deps, io, platform);

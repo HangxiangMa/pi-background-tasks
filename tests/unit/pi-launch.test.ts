@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { delimiter, dirname, join } from 'node:path';
@@ -109,7 +110,7 @@ function noModuleResolution(): (specifier: string) => string {
 }
 
 void describe('Pi launch resolution', () => {
-  void it('keeps the bare POSIX spawn form only after validating a concrete PATH candidate', async () => {
+  void it('returns the canonical executable admitted from POSIX PATH', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-launch-path-'));
     try {
       const executable = join(root, 'pi');
@@ -124,7 +125,11 @@ void describe('Pi launch resolution', () => {
           throw new Error('should not run');
         },
       });
-      assert.deepEqual(spec, { executable: 'pi', argvPrefix: [], kind: 'path' });
+      assert.deepEqual(spec, {
+        executable: realpathSync(executable),
+        argvPrefix: [],
+        kind: 'path',
+      });
       assert.equal(resolved, false);
     } finally {
       await removeFixture(root);
@@ -156,7 +161,7 @@ void describe('Pi launch resolution', () => {
           }
         },
       });
-      assert.deepEqual(spec, { executable: 'pi', argvPrefix: [], kind: 'path' });
+      assert.deepEqual(spec, { executable: thirdReal, argvPrefix: [], kind: 'path' });
       assert.deepEqual(accessAttempts, [firstReal, thirdReal]);
     } finally {
       await removeFixture(root);
@@ -180,9 +185,58 @@ void describe('Pi launch resolution', () => {
           accessed = path;
         },
       });
-      assert.deepEqual(spec, { executable: 'pi', argvPrefix: [], kind: 'path' });
+      assert.deepEqual(spec, {
+        executable: realpathSync(target),
+        argvPrefix: [],
+        kind: 'path',
+      });
       assert.equal(accessed, realpathSync(target));
     } finally {
+      await removeFixture(root);
+    }
+  });
+
+  void it('cannot reselect PATH after admission when child cwd or environment changes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-launch-path-binding-'));
+    const originalCwd = process.cwd();
+    try {
+      const admittedCwd = join(root, 'admitted');
+      const childCwd = join(root, 'child');
+      const changedBin = join(root, 'changed-bin');
+      const admitted = join(admittedCwd, 'bin', 'pi');
+      const childCandidate = join(childCwd, 'bin', 'pi');
+      const changedCandidate = join(changedBin, 'pi');
+      const script = (identity: string) =>
+        `#!/bin/sh\nprintf '${identity}:%s:%s' "$1" "$2"\n`;
+      await writeNestedFile(admitted, script('ADMITTED'), 0o755);
+      await writeNestedFile(childCandidate, script('CHILD_CWD'), 0o755);
+      await writeNestedFile(changedCandidate, script('CHANGED_PATH'), 0o755);
+
+      process.chdir(admittedCwd);
+      const launch = resolvePiLaunch({ platform: 'darwin', path: 'bin', hostScript: '' });
+      const args = ['argument with spaces', '$(printf not-executed)'];
+      const relativeSpawn = spawnSync(launch.executable, piLaunchArgv(launch, args), {
+        cwd: childCwd,
+        env: { ...process.env, PATH: 'bin' },
+        encoding: 'utf8',
+        shell: false,
+      });
+      const changedEnvSpawn = spawnSync(launch.executable, piLaunchArgv(launch, args), {
+        cwd: childCwd,
+        env: { ...process.env, PATH: changedBin },
+        encoding: 'utf8',
+        shell: false,
+      });
+
+      const expectedExecutable = realpathSync(admitted);
+      const expectedOutput = 'ADMITTED:argument with spaces:$(printf not-executed)';
+      assert.equal(launch.executable, expectedExecutable);
+      assert.equal(relativeSpawn.status, 0, relativeSpawn.error?.message ?? relativeSpawn.stderr);
+      assert.equal(relativeSpawn.stdout, expectedOutput);
+      assert.equal(changedEnvSpawn.status, 0, changedEnvSpawn.error?.message ?? changedEnvSpawn.stderr);
+      assert.equal(changedEnvSpawn.stdout, expectedOutput);
+    } finally {
+      process.chdir(originalCwd);
       await removeFixture(root);
     }
   });
@@ -269,6 +323,7 @@ void describe('Pi launch resolution', () => {
             platform: 'linux',
             path: join(fixture.root, 'empty-bin'),
             hostScript: cliPath,
+            resolvePackageJson: noModuleResolution(),
           }),
         /foreign-host|nearest named manifest/,
       );
@@ -315,6 +370,73 @@ void describe('Pi launch resolution', () => {
     }
   });
 
+  void it('uses an exact installed Pi module from a foreign POSIX SDK host', async () => {
+    const foreign = await createPackageFixture(
+      { name: 'foreign-sdk-application', bin: 'dist/app.js' },
+      ['dist/app.js'],
+    );
+    const moduleInstall = await createPiPackage();
+    try {
+      assert.ok(foreign.cliPath);
+      assert.ok(moduleInstall.cliPath);
+      let moduleLookups = 0;
+      const spec = resolvePiLaunch({
+        platform: 'linux',
+        path: join(foreign.root, 'empty-bin'),
+        hostScript: foreign.cliPath,
+        execPath: process.execPath,
+        resolvePackageJson: (specifier) => {
+          assert.equal(specifier, PI_PACKAGE_MANIFEST);
+          moduleLookups += 1;
+          return moduleInstall.manifestPath;
+        },
+      });
+      assert.equal(moduleLookups, 1);
+      assert.deepEqual(spec, {
+        executable: process.execPath,
+        argvPrefix: [realpathSync(moduleInstall.cliPath)],
+        kind: 'package-node-cli',
+      });
+    } finally {
+      await removeFixture(foreign.root);
+      await removeFixture(moduleInstall.root);
+    }
+  });
+
+  void it('rejects a foreign package returned by the POSIX SDK module route', async () => {
+    const foreignHost = await createPackageFixture(
+      { name: 'foreign-sdk-application', bin: 'dist/app.js' },
+      ['dist/app.js'],
+    );
+    const lookalike = await createPackageFixture(
+      { name: 'lookalike-pi', bin: { pi: 'dist/cli.js' } },
+      ['dist/cli.js'],
+    );
+    try {
+      const foreignHostCli = foreignHost.cliPath;
+      assert.ok(foreignHostCli);
+      let moduleLookups = 0;
+      assert.throws(
+        () =>
+          resolvePiLaunch({
+            platform: 'darwin',
+            path: join(foreignHost.root, 'empty-bin'),
+            hostScript: foreignHostCli,
+            execPath: process.execPath,
+            resolvePackageJson: () => {
+              moduleLookups += 1;
+              return lookalike.manifestPath;
+            },
+          }),
+        /lookalike-pi|package name/i,
+      );
+      assert.equal(moduleLookups, 1);
+    } finally {
+      await removeFixture(foreignHost.root);
+      await removeFixture(lookalike.root);
+    }
+  });
+
   void it('uses the named running host package before a different Windows module installation', async () => {
     const host = await createPiPackage('dist/host cli.js', 'pi-bg-host spaces-');
     const moduleInstall = await createPiPackage('dist/module.js');
@@ -356,6 +478,43 @@ void describe('Pi launch resolution', () => {
       assert.equal(spec.argvPrefix[0], realpathSync(moduleInstall.cliPath));
     } finally {
       await removeFixture(foreign.root);
+      await removeFixture(moduleInstall.root);
+    }
+  });
+
+  void it('does not substitute a module when Windows host source realpath has an I/O failure', async () => {
+    const host = await createPiPackage();
+    const moduleInstall = await createPiPackage();
+    try {
+      const hostCli = host.cliPath;
+      assert.ok(hostCli);
+      for (const code of ['EACCES', 'EIO']) {
+        let moduleLookups = 0;
+        assert.throws(
+          () =>
+            resolvePiLaunch({
+              platform: 'win32',
+              hostScript: hostCli,
+              execPath: process.execPath,
+              resolvePackageJson: () => {
+                moduleLookups += 1;
+                return moduleInstall.manifestPath;
+              },
+              realpath: (path) => {
+                if (path === hostCli) {
+                  const error = new Error(`fixture ${code} for running host`);
+                  Object.assign(error, { code });
+                  throw error;
+                }
+                return realpathSync(path);
+              },
+            }),
+          new RegExp(`source realpath.*fixture ${code}`, 'i'),
+        );
+        assert.equal(moduleLookups, 0, `${code} must forbid module substitution`);
+      }
+    } finally {
+      await removeFixture(host.root);
       await removeFixture(moduleInstall.root);
     }
   });
@@ -491,10 +650,11 @@ void describe('Pi launch resolution', () => {
     }
   });
 
-  void it('uses a distinct direct route for a mocked Bun compiled host', async () => {
+  void it('uses a direct compiled route only for an executable explicitly named Pi', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-launch-compiled-'));
+    const moduleInstall = await createPiPackage();
     try {
-      const compiled = join(root, 'pi-compiled');
+      const compiled = join(root, 'pi');
       await writeNestedFile(compiled, 'compiled fixture\n', 0o755);
       const spec = resolvePiLaunch({
         platform: 'linux',
@@ -507,6 +667,25 @@ void describe('Pi launch resolution', () => {
         argvPrefix: [],
         kind: 'compiled-host',
       });
+
+      const arbitrarySdkApp = join(root, 'custom-sdk-application');
+      await writeNestedFile(arbitrarySdkApp, 'compiled SDK fixture\n', 0o755);
+      let moduleLookups = 0;
+      assert.throws(
+        () =>
+          resolvePiLaunch({
+            platform: 'linux',
+            execPath: arbitrarySdkApp,
+            hostScript: '/$bunfs/root/custom-sdk-app.js',
+            path: join(root, 'empty-bin'),
+            resolvePackageJson: () => {
+              moduleLookups += 1;
+              return moduleInstall.manifestPath;
+            },
+          }),
+        /generic JavaScript runtime|cannot launch.*JavaScript/i,
+      );
+      assert.equal(moduleLookups, 1, 'an arbitrary compiled SDK app must not bypass package lookup');
 
       const compiledWindows = join(root, 'pi.exe');
       await writeNestedFile(compiledWindows, 'compiled Windows fixture\n');
@@ -530,11 +709,13 @@ void describe('Pi launch resolution', () => {
             execPath: process.execPath,
             hostScript: '/$bunfs/root/cli.js',
             path: join(root, 'empty-bin'),
+            resolvePackageJson: noModuleResolution(),
           }),
         /pi_executable_resolution_failed/,
       );
     } finally {
       await removeFixture(root);
+      await removeFixture(moduleInstall.root);
     }
   });
 
