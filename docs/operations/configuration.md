@@ -61,10 +61,13 @@ Telemetry wrapping is best-effort and task-owned. Missing telemetry is reported 
 
 ## Global Anthropic attribution and caching
 
-Normal package installation loads the package-owned Anthropic attribution/sanitization extension before the background-task extension. Non-Anthropic sessions are unchanged. Anthropic sessions require Pi's subscription OAuth route; the provider refuses metered Anthropic credentials and reads `userID` plus `oauthAccount.accountUuid` from `~/.claude.json` without writing it.
+Normal package installation loads the package-owned Anthropic attribution/sanitization extension before the background-task extension. Non-Anthropic routes are not rewritten; a non-target provider using `anthropic-messages` is forwarded to the host SDK adapter with its provider, endpoint, authentication, options, and response semantics intact. Anthropic sessions require Pi's subscription OAuth route and refuse metered Anthropic credentials.
+
+The account loader reads `userID` plus `oauthAccount.accountUuid` without writing the selected file. Precedence is an explicit absolute argument to the exported loader (programmatic/test use), then `PI_ANTHROPIC_ACCOUNT_CONFIG_PATH`, then `~/.claude.json`. The operator variable must name a non-empty absolute file path; relative/empty paths, unreadable or invalid JSON, and missing/blank required fields fail loudly. No alternate Claude directory variable is inferred. Package-owned Fusion, delegate, and attested children inherit this variable through their normal environment copies; account contents are neither copied to environment variables nor logged.
 
 | Variable/command | Effect |
 |---|---|
+| `PI_ANTHROPIC_ACCOUNT_CONFIG_PATH=<absolute-file>` | Read Anthropic attribution account fields from this file instead of `~/.claude.json`. |
 | `PI_CACHE_RETENTION=long` | Default to one-hour Anthropic cache breakpoints where the model supports them. This is the package default when unset. |
 | `PI_CACHE_RETENTION=short` | Default to ordinary ephemeral cache breakpoints without a one-hour TTL. |
 | `PI_CACHE_RETENTION=none` | Do not add default cache breakpoints. Explicit call-level policy remains authoritative. |
