@@ -1,10 +1,19 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
+import { basename, delimiter, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseJsonText } from '../../src/core/common.js';
 import {
@@ -1201,25 +1210,56 @@ void describe('BackgroundTaskRegistry', () => {
 
   void it('produces a direct-spawn attested Pi sidecar with raw events, stderr, hashes, and exact argv', async () => {
     const h = await createHarness({ modelRegistry: oauthRegistry() });
+    const originalPath = process.env['PATH'];
+    let task: BgTask | undefined;
     try {
       await initCleanGit(h.cwd);
-      const task = await h.registry.startAttestedPiTask(h.ctx, {
-        name: 'Unit Attested',
-        provider: 'openai-codex',
-        model: 'gpt-5.5',
-        prompt: 'write report.md',
-        reportPath: 'report.md',
-        extraPiArgs: ['--no-extensions'],
-      });
+      let admittedPi: string | undefined;
+      let canonicalPiTarget: string | undefined;
+      if (process.platform !== 'win32') {
+        const fixtureBin = join(h.root, 'attested-pi-bin');
+        const fixtureTarget = join(h.root, 'attested-pi-target');
+        admittedPi = join(fixtureBin, 'pi');
+        await mkdir(fixtureBin, { recursive: true });
+        await writeFile(fixtureTarget, '#!/bin/sh\nexit 0\n', 'utf8');
+        await chmod(fixtureTarget, 0o755);
+        await symlink(fixtureTarget, admittedPi, 'file');
+        canonicalPiTarget = realpathSync(admittedPi);
+        process.env['PATH'] =
+          originalPath === undefined ? fixtureBin : `${fixtureBin}${delimiter}${originalPath}`;
+      }
+
+      // The fixture leads PATH while the original entries keep real Git preflight
+      // reachable. Restore the process-global value even when setup rejects.
+      try {
+        task = await h.registry.startAttestedPiTask(h.ctx, {
+          name: 'Unit Attested',
+          provider: 'openai-codex',
+          model: 'gpt-5.5',
+          prompt: 'write report.md',
+          reportPath: 'report.md',
+          extraPiArgs: ['--no-extensions'],
+        });
+      } finally {
+        if (process.platform !== 'win32') {
+          if (originalPath === undefined) delete process.env['PATH'];
+          else process.env['PATH'] = originalPath;
+        }
+      }
       await writeFile(join(h.cwd, 'report.md'), 'unit report\n', 'utf8');
-      assert.match(task.id, /^b[0-9a-f]{32}$/);
       const spawn = lastSpawn(h);
-      // This harness inherits the host platform, so the launch shape is
-      // asserted per platform. On POSIX the resolved executable is the `pi`
-      // entry on PATH. On Windows npm installs `pi` as a `pi.cmd` shim that a
-      // shell-less spawn cannot resolve, so the Pi package bin is launched
-      // through the current Node executable instead. Both are correct
-      // production behaviour for their platform.
+
+      // Settle the fake child before launch assertions so a failed assertion
+      // cannot strand task cleanup or suppress the test runner's TAP summary.
+      spawn.child.writeStdout(piJsonEvents());
+      spawn.child.writeStderr('diagnostic\n');
+      spawn.child.close(0, null);
+      await waitFor(() => task?.status === 'completed', 'attested sidecar completion');
+
+      assert.match(task.id, /^b[0-9a-f]{32}$/);
+      // Actual launch identity and attested logical argv are separate contracts.
+      // POSIX must spawn the independently canonicalized fixture target; Windows
+      // retains its Node-plus-cli.js package launch shape.
       const piArgs = process.platform === 'win32' ? spawn.args.slice(1) : [...spawn.args];
       if (process.platform === 'win32') {
         assert.equal(spawn.shell, process.execPath);
@@ -1228,8 +1268,12 @@ void describe('BackgroundTaskRegistry', () => {
           'Windows launches the resolved Pi bin as the first argument',
         );
       } else {
-        assert.equal(spawn.shell, 'pi');
+        assert.ok(admittedPi);
+        assert.ok(canonicalPiTarget);
+        assert.equal(spawn.shell, canonicalPiTarget);
+        assert.notEqual(spawn.shell, admittedPi, 'POSIX launch must pin the canonical target');
       }
+      assert.equal(spawn.options.shell, false);
       assert.equal(spawn.options.env?.['OPENAI_API_KEY'], undefined);
       assert.equal(spawn.options.env?.['OPENAI_BASE_URL'], undefined);
       assert.equal(spawn.options.env?.['ANTHROPIC_API_KEY'], undefined);
@@ -1244,10 +1288,6 @@ void describe('BackgroundTaskRegistry', () => {
         '--no-extensions',
         'write report.md',
       ]);
-      spawn.child.writeStdout(piJsonEvents());
-      spawn.child.writeStderr('diagnostic\n');
-      spawn.child.close(0, null);
-      await waitFor(() => task.status === 'completed', 'attested sidecar completion');
       assert.ok(task.attestationAbsPath, 'attestation path should be recorded on task');
       assert.equal(
         existsSync(task.attestationAbsPath ?? ''),
@@ -1297,7 +1337,15 @@ void describe('BackgroundTaskRegistry', () => {
       );
       assert.equal(metadata['bytesWritten'], readFileSync(task.outputAbsPath).length);
     } finally {
-      await cleanup(h.root);
+      try {
+        const child = h.children.at(-1)?.child;
+        if (task?.status === 'running' && child !== undefined) {
+          child.close(1, null);
+          await waitFor(() => task?.status !== 'running', 'attested fixture settlement');
+        }
+      } finally {
+        await cleanup(h.root);
+      }
     }
   });
 
