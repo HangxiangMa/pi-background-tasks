@@ -48,10 +48,11 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:39d2de630b8bfff4b2724c3dbbf960e5d08d62845049d1aec8022956b55fad30",
+      "authored_body_sha256": "sha256:ae279f1ddef2005fd1d2b6152188ebefe70fd556c04073e7a2bd409636989650",
       "covers_sources": [
         "src/core/common.ts",
         "src/core/registry.ts",
+        "src/core/shell-policy.ts",
         "src/core/windows-taskkill.ts"
       ],
       "doc_id": "subsystems/background-task-runtime",
@@ -126,7 +127,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:e9552f882dc7813d6b58f756da290a91515c8c2039a710f8f478d156abea5a20",
+      "authored_body_sha256": "sha256:58532f711adfc346503d32e0adf465027154bcc929fb2a727302c121c83dd415",
       "covers_sources": [
         "extensions/background-tasks.ts",
         "src/core/update-check.ts",
@@ -411,6 +412,7 @@
       "covers_sources": [
         "src/core/common.ts",
         "src/core/registry.ts",
+        "src/core/shell-policy.ts",
         "src/core/windows-taskkill.ts"
       ],
       "covers_surfaces": [],
@@ -873,28 +875,28 @@
         "id": "command:bg",
         "kind": "command",
         "name": "bg",
-        "source": "src/extension.ts:554"
+        "source": "src/extension.ts:561"
       },
       {
         "description": "Clear finished background task footer notices",
         "id": "command:bg-clear",
         "kind": "command",
         "name": "bg-clear",
-        "source": "src/extension.ts:596"
+        "source": "src/extension.ts:603"
       },
       {
         "description": "Open the background task manager UI",
         "id": "command:bg-tasks",
         "kind": "command",
         "name": "bg-tasks",
-        "source": "src/extension.ts:588"
+        "source": "src/extension.ts:595"
       },
       {
         "description": "Show how to update pi-background-tasks to the latest published version",
         "id": "command:bg-update",
         "kind": "command",
         "name": "bg-update",
-        "source": "src/extension.ts:604"
+        "source": "src/extension.ts:611"
       },
       {
         "description": "Show or set Claude cache retention for this session (short, long, default)",
@@ -922,28 +924,28 @@
         "id": "command:jobs",
         "kind": "command",
         "name": "jobs",
-        "source": "src/extension.ts:642"
+        "source": "src/extension.ts:649"
       },
       {
         "description": "Stop a running background task: /kill <id>",
         "id": "command:kill",
         "kind": "command",
         "name": "kill",
-        "source": "src/extension.ts:686"
+        "source": "src/extension.ts:693"
       },
       {
         "description": "Show bounded output from a background task: /logs <id> [maxBytes]",
         "id": "command:logs",
         "kind": "command",
         "name": "logs",
-        "source": "src/extension.ts:655"
+        "source": "src/extension.ts:662"
       },
       {
         "description": "Open the Claude-like background task manager UI",
         "id": "command:tasks",
         "kind": "command",
         "name": "tasks",
-        "source": "src/extension.ts:580"
+        "source": "src/extension.ts:587"
       }
     ],
     "eventbus": [
@@ -971,7 +973,7 @@
         "id": "renderer:background-task-notification",
         "kind": "renderer",
         "name": "background-task-notification",
-        "source": "src/extension.ts:450"
+        "source": "src/extension.ts:457"
       },
       {
         "id": "renderer:fusion-result",
@@ -986,14 +988,14 @@
         "id": "shortcut:ctrl+alt+c",
         "kind": "shortcut",
         "name": "ctrl+alt+c",
-        "source": "src/extension.ts:634"
+        "source": "src/extension.ts:641"
       },
       {
         "description": "Open focused background task footer dock",
         "id": "shortcut:shift+down",
         "kind": "shortcut",
         "name": "shift+down",
-        "source": "src/extension.ts:627"
+        "source": "src/extension.ts:634"
       }
     ],
     "tool": [
@@ -1106,7 +1108,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:945"
+        "source": "src/extension.ts:952"
       },
       {
         "description": "Read bounded output from a background task for deliberate inspection; this is not a waiting primitive. Output is capped at 50.0KB for model safety and points to the full output file when truncated.",
@@ -1140,7 +1142,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:900"
+        "source": "src/extension.ts:907"
       },
       {
         "description": "Retrieve a hash-verified result from a bg_delegate or background Fusion task. Never blocks: a running task returns a typed not-ready result. Oversized answers are never truncated.",
@@ -1227,7 +1229,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:719"
+        "source": "src/extension.ts:726"
       },
       {
         "description": "Opt-in evidence-oriented direct Pi spawn. Launches exactly one `pi --mode json` child, records raw Pi events/stderr, hashes prompt/report/output, observes OAuth through ModelRegistry, and emits a strict attestation sidecar only after successful completion.",
@@ -1288,7 +1290,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:804"
+        "source": "src/extension.ts:811"
       },
       {
         "description": "Inspect one background task or list all running/recent background tasks. This is a point-in-time inspection tool, not a waiting primitive.",
@@ -1312,7 +1314,7 @@
           "required": [],
           "type": "object"
         },
-        "source": "src/extension.ts:869"
+        "source": "src/extension.ts:876"
       },
       {
         "description": "Start a five-model Fusion investigation as a tracked background task and return immediately after durable preflight. Retrieve the verified result with bg_result after notification. Candidate children run in clean bounded read-only contexts.",
@@ -1783,6 +1785,9 @@
       "subsystems/child-launch-durability-and-safety"
     ],
     "src/core/registry.ts": [
+      "subsystems/background-task-runtime"
+    ],
+    "src/core/shell-policy.ts": [
       "subsystems/background-task-runtime"
     ],
     "src/core/update-check.ts": [

@@ -15,10 +15,10 @@ This authored section defines the boundary: documentation facts are extracted fr
 - Canonical package version: `2.5.0`
 - Governed markdown docs: 42
 - Public surfaces extracted: 31
-- Governed production sources: 50
+- Governed production sources: 51
 - Tool contracts extracted: 11
 - Schema IDs extracted: 46
-- Environment variable references extracted: 50
+- Environment variable references extracted: 52
 - Behavioral attestation receipts not passing: 9
 - Receipt store: `docs/attestations.json`
 
