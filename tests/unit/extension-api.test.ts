@@ -704,6 +704,10 @@ void describe('background EventBus protocol', () => {
 
       h.registry.setShuttingDown(true);
       h.close();
+      await waitForCondition(
+        () => (h.children[0]?.killCalls.length ?? 0) > 0,
+        'admission-owned child cancellation while metadata remains blocked',
+      );
       const admissionDrain = h.registry.waitForTaskAdmissions();
       const drainedBeforeMetadataSettled = await Promise.race([
         admissionDrain.then(() => true),

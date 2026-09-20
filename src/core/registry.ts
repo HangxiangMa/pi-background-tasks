@@ -1098,6 +1098,17 @@ export class BackgroundTaskRegistry {
     };
   }
 
+  private bindOwnedTaskToAdmission(task: BgTask, admission: TaskAdmission): () => void {
+    const cancelOwnedTask = (): void => {
+      this.stopOwnedTaskAfterAdmissionCancellation(task, this.taskAdmissionError(admission));
+    };
+    admission.controller.signal.addEventListener('abort', cancelOwnedTask, { once: true });
+    if (admission.controller.signal.aborted) cancelOwnedTask();
+    return () => {
+      admission.controller.signal.removeEventListener('abort', cancelOwnedTask);
+    };
+  }
+
   private stopOwnedTaskAfterAdmissionCancellation(task: BgTask, error: Error): void {
     if (task.status !== 'running') return;
     task.killKind =
@@ -1243,6 +1254,7 @@ export class BackgroundTaskRegistry {
       }
     });
 
+    let unbindAdmissionCancellation = (): void => undefined;
     try {
       this.assertTaskAdmissionOpen('a background task', admission);
       const child = this.spawn(invocation.shell, invocation.args, {
@@ -1256,6 +1268,7 @@ export class BackgroundTaskRegistry {
 
       task.child = child;
       task.pid = child.pid;
+      unbindAdmissionCancellation = this.bindOwnedTaskToAdmission(task, admission);
 
       child.stdout?.on('data', (data) => {
         this.appendChildOutput(task, data, 'stdout');
@@ -1340,6 +1353,8 @@ export class BackgroundTaskRegistry {
       this.writeNotice(task, `\n[background task spawn exception: ${message}]\n`);
       await this.finalizeTask(task, 'failed', null, undefined, message);
       throw new Error(`Failed to start background task: ${message}`);
+    } finally {
+      unbindAdmissionCancellation();
     }
   }
 
@@ -1457,6 +1472,7 @@ export class BackgroundTaskRegistry {
         }
       }
     });
+    const unbindAdmissionCancellation = this.bindOwnedTaskToAdmission(task, admission);
 
     let completionAttached = false;
     const attachCompletion = (): void => {
@@ -1519,6 +1535,8 @@ export class BackgroundTaskRegistry {
       throw new Error(
         `Failed to register managed background task: ${BackgroundTaskRegistry.errorMessage(error)}`,
       );
+    } finally {
+      unbindAdmissionCancellation();
     }
 
     return task;
@@ -1619,6 +1637,7 @@ export class BackgroundTaskRegistry {
       task.error = `Output file write failed: ${error.message}`;
     });
 
+    let unbindAdmissionCancellation = (): void => undefined;
     try {
       this.assertTaskAdmissionOpen('a delegate task', admission);
       const child = this.spawn(launch.executable, piLaunchArgv(launch, [...request.argv]), {
@@ -1634,6 +1653,7 @@ export class BackgroundTaskRegistry {
       });
       task.child = child;
       task.pid = child.pid;
+      unbindAdmissionCancellation = this.bindOwnedTaskToAdmission(task, admission);
       writeDelegateStdin(child, request.stdinBytes, (error) => {
         this.writeNotice(task, `\n[delegate stdin write failed: ${error.message}]\n`);
         if (task.status === 'running') {
@@ -1720,6 +1740,8 @@ export class BackgroundTaskRegistry {
       this.writeNotice(task, `\n[delegate spawn exception: ${message}]\n`);
       await this.finalizeTask(task, 'failed', null, undefined, message);
       throw new Error(`Failed to start delegate task: ${message}`);
+    } finally {
+      unbindAdmissionCancellation();
     }
   }
 
@@ -1860,6 +1882,7 @@ export class BackgroundTaskRegistry {
 
     this.assertTaskAdmissionOpen('an attested Pi task', admission);
     this.tasks.set(id, task);
+    let unbindAdmissionCancellation = (): void => undefined;
     try {
       this.assertTaskAdmissionOpen('an attested Pi task', admission);
       const captured = spawnAndCapturePi(
@@ -1878,6 +1901,7 @@ export class BackgroundTaskRegistry {
       );
       task.child = captured.child;
       task.pid = captured.child.pid;
+      unbindAdmissionCancellation = this.bindOwnedTaskToAdmission(task, admission);
 
       captured.child.on('error', (error) => {
         void this.finalizeAttestedPiTask(
@@ -1995,6 +2019,8 @@ export class BackgroundTaskRegistry {
         );
       }
       throw error;
+    } finally {
+      unbindAdmissionCancellation();
     }
   }
 
