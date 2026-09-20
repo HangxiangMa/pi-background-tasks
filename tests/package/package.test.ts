@@ -1,6 +1,17 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -395,6 +406,31 @@ function localRegistryNpmEnv(rootDir: string, registry: string): NodeJS.ProcessE
   env['NPM_CONFIG_REGISTRY'] = registry;
   env['npm_config_registry'] = registry;
   return env;
+}
+
+function hashReadOnlyTree(directory: string): string {
+  const hash = createHash('sha256');
+  const visit = (path: string, relativePath: string): void => {
+    const stat = lstatSync(path);
+    const mode = stat.mode & 0o7777;
+    if (stat.isSymbolicLink()) {
+      hash.update(`link\0${relativePath}\0${String(mode)}\0${readlinkSync(path)}\0`);
+      return;
+    }
+    if (stat.isFile()) {
+      hash.update(`file\0${relativePath}\0${String(mode)}\0${String(stat.size)}\0`);
+      hash.update(readFileSync(path));
+      hash.update('\0');
+      return;
+    }
+    assert.ok(stat.isDirectory(), `fixture source contains unsupported entry ${path}`);
+    hash.update(`directory\0${relativePath}\0${String(mode)}\0`);
+    for (const name of readdirSync(path).sort()) {
+      visit(join(path, name), relativePath.length === 0 ? name : `${relativePath}/${name}`);
+    }
+  };
+  visit(directory, '');
+  return hash.digest('hex');
 }
 
 function parsePackEntries(stdout: string): NpmPackEntry[] {
@@ -2220,6 +2256,201 @@ void describe('package', () => {
     }
   });
 
+  void it('denies dependency packing lifecycle scripts across supported npm CLIs', async () => {
+    const temp = await mkdtemp(join(tmpdir(), 'pi-bg-pack-script-denial-'));
+    const envRoot = makeIsolatedEnvRoot('pi-bg-pack-script-env-');
+    const packageRoot = join(temp, 'fixture-root');
+    const sentinelDirectory = join(
+      packageRoot,
+      'node_modules',
+      'npm-pack-lifecycle-sentinel',
+    );
+    const packProject = join(temp, 'pack-project');
+    const markerDirectory = join(temp, 'markers');
+    const sentinelScripts = {
+      prepack: 'node lifecycle.cjs prepack',
+      prepare: 'node lifecycle.cjs prepare',
+      postpack: 'node lifecycle.cjs postpack',
+    };
+    let registry: Awaited<ReturnType<typeof startInstalledDependencyRegistry>> | undefined;
+
+    const resetMarkers = (): void => {
+      rmSync(markerDirectory, { recursive: true, force: true });
+      mkdirSync(markerDirectory, { recursive: true });
+    };
+    const markerEvents = (): string[] => {
+      const markerPath = join(markerDirectory, 'attempts.log');
+      if (!existsSync(markerPath)) return [];
+      return readFileSync(markerPath, 'utf8').trim().split('\n').filter(Boolean);
+    };
+    const sentinelEnv = (failEvent: string): NodeJS.ProcessEnv => ({
+      ...isolatedNpmEnv(envRoot),
+      NPM_PACK_SENTINEL_MARKERS: markerDirectory,
+      NPM_PACK_SENTINEL_FAIL_EVENT: failEvent,
+    });
+
+    try {
+      makeIsolatedNpmProject(packageRoot, 'lifecycle-sentinel-root');
+      makeIsolatedNpmProject(packProject, 'lifecycle-sentinel-pack-project');
+      mkdirSync(sentinelDirectory, { recursive: true });
+      const sentinelManifest = `${JSON.stringify(
+        {
+          name: 'npm-pack-lifecycle-sentinel',
+          version: '1.0.0',
+          scripts: sentinelScripts,
+          files: ['lifecycle.cjs', 'payload.txt'],
+        },
+        null,
+        2,
+      )}\n`;
+      writeFileSync(join(sentinelDirectory, 'package.json'), sentinelManifest);
+      writeFileSync(join(sentinelDirectory, 'payload.txt'), 'real sentinel payload\n');
+      writeFileSync(
+        join(sentinelDirectory, 'lifecycle.cjs'),
+        [
+          "const { appendFileSync, mkdirSync } = require('node:fs');",
+          "const { join } = require('node:path');",
+          'const event = process.argv[2];',
+          'const markers = process.env.NPM_PACK_SENTINEL_MARKERS;',
+          "if (!markers) throw new Error('NPM_PACK_SENTINEL_MARKERS is required');",
+          'mkdirSync(markers, { recursive: true });',
+          "appendFileSync(join(markers, 'attempts.log'), `${event}\\n`, 'utf8');",
+          'if (process.env.NPM_PACK_SENTINEL_FAIL_EVENT === event) {',
+          "  throw new Error(`sentinel lifecycle executed: ${event}`);",
+          '}',
+          '',
+        ].join('\n'),
+      );
+
+      const npmVersion = runNpm(['--version'], {
+        cwd: packProject,
+        env: sentinelEnv(''),
+      });
+      assert.equal(npmVersion.status, 0, npmVersion.stderr);
+      const npmMajor = Number.parseInt(npmVersion.stdout, 10);
+      assert.ok(npmMajor >= 10, `expected npm >=10, received ${npmVersion.stdout.trim()}`);
+
+      resetMarkers();
+      const attemptedTarballs = join(temp, 'attempted-tarballs');
+      mkdirSync(attemptedTarballs, { recursive: true });
+      const lifecycleAttempt = runNpm(
+        [
+          'pack',
+          '--json',
+          '--pack-destination',
+          attemptedTarballs,
+          sentinelDirectory,
+        ],
+        { cwd: packProject, env: sentinelEnv('postpack') },
+      );
+      assert.notEqual(lifecycleAttempt.status, 0, 'the lifecycle control must fail loudly');
+      assert.match(
+        `${lifecycleAttempt.stderr}\n${lifecycleAttempt.stdout}`,
+        /sentinel lifecycle executed: postpack/u,
+      );
+      assert.deepEqual(markerEvents(), ['prepack', 'prepare', 'postpack']);
+
+      resetMarkers();
+      const ignoredTarballs = join(temp, 'ignored-tarballs');
+      mkdirSync(ignoredTarballs, { recursive: true });
+      const ignoredAttempt = runNpm(
+        [
+          'pack',
+          '--ignore-scripts',
+          '--json',
+          '--pack-destination',
+          ignoredTarballs,
+          sentinelDirectory,
+        ],
+        { cwd: packProject, env: sentinelEnv('prepare') },
+      );
+      if (npmMajor === 10) {
+        assert.notEqual(ignoredAttempt.status, 0, 'npm 10 must expose its prepare-script defect');
+        assert.match(
+          `${ignoredAttempt.stderr}\n${ignoredAttempt.stdout}`,
+          /sentinel lifecycle executed: prepare/u,
+        );
+        assert.deepEqual(markerEvents(), ['prepare']);
+      } else {
+        assert.equal(ignoredAttempt.status, 0, ignoredAttempt.stderr);
+        assert.deepEqual(markerEvents(), []);
+      }
+
+      resetMarkers();
+      await assert.rejects(
+        startInstalledDependencyRegistry({
+          dependencySpecs: { 'missing-lifecycle-sentinel': '1.0.0' },
+          npmCli,
+          npmEnv: sentinelEnv('prepare'),
+          packageRoot,
+          scratchDir: join(temp, 'invalid-registry'),
+        }),
+        /installed production dependency missing-lifecycle-sentinel is missing/u,
+      );
+      assert.deepEqual(markerEvents(), []);
+
+      const sourceHashBefore = hashReadOnlyTree(sentinelDirectory);
+      registry = await startInstalledDependencyRegistry({
+        dependencySpecs: { 'npm-pack-lifecycle-sentinel': '1.0.0' },
+        npmCli,
+        npmEnv: sentinelEnv('prepare'),
+        packageRoot,
+        scratchDir: join(temp, 'safe-registry'),
+      });
+      assert.deepEqual(registry.packageVersions, ['npm-pack-lifecycle-sentinel@1.0.0']);
+      assert.deepEqual(markerEvents(), [], 'safe dependency packaging must execute no lifecycle');
+      assert.equal(hashReadOnlyTree(sentinelDirectory), sourceHashBefore);
+
+      const consumer = join(temp, 'consumer');
+      makeIsolatedNpmProject(consumer, 'lifecycle-sentinel-consumer');
+      writeFileSync(
+        join(consumer, 'package.json'),
+        `${JSON.stringify(
+          {
+            name: 'lifecycle-sentinel-consumer',
+            private: true,
+            version: '1.0.0',
+            dependencies: { 'npm-pack-lifecycle-sentinel': '1.0.0' },
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      const install = await runNpmAsync(
+        [
+          'install',
+          '--ignore-scripts',
+          '--no-audit',
+          '--no-fund',
+          '--package-lock=false',
+        ],
+        {
+          cwd: consumer,
+          env: {
+            ...localRegistryNpmEnv(envRoot, registry.origin),
+            NPM_PACK_SENTINEL_MARKERS: markerDirectory,
+            NPM_PACK_SENTINEL_FAIL_EVENT: 'prepare',
+          },
+        },
+      );
+      assert.equal(install.status, 0, install.stderr);
+      assert.equal(
+        await readFile(
+          join(consumer, 'node_modules', 'npm-pack-lifecycle-sentinel', 'package.json'),
+          'utf8',
+        ),
+        sentinelManifest,
+        'safe packaging must preserve the real script-bearing manifest bytes',
+      );
+      assert.deepEqual(markerEvents(), []);
+      assert.equal(hashReadOnlyTree(sentinelDirectory), sourceHashBefore);
+    } finally {
+      if (registry !== undefined) await registry.close();
+      await rm(temp, { recursive: true, force: true });
+      removeIsolatedEnvRoot(envRoot);
+    }
+  });
+
   void it('local tarball installs with the expected package files', async () => {
     const temp = await mkdtemp(join(tmpdir(), 'pi-bg-pack-'));
     let registry: Awaited<ReturnType<typeof startInstalledDependencyRegistry>> | undefined;
@@ -2229,6 +2460,15 @@ void describe('package', () => {
     try {
       const packageJson = await pkg();
       assert.deepEqual(packageJson.dependencies, { turndown: '7.2.4' });
+      const realDependencyDirectories = [
+        fileURLToPath(new URL('node_modules/turndown/', root)),
+        fileURLToPath(new URL('node_modules/@mixmark-io/domino/', root)),
+      ];
+      const realDependencyHashesBefore = realDependencyDirectories.map(hashReadOnlyTree);
+      const sourceTurndownManifest = await readFile(
+        new URL('node_modules/turndown/package.json', root),
+        'utf8',
+      );
       const packCwd = join(temp, 'package-pack-project');
       const packageTarballs = join(temp, 'package-tarballs');
       makeIsolatedNpmProject(packCwd, 'package-pack-project');
@@ -2301,6 +2541,11 @@ void describe('package', () => {
         '@mixmark-io/domino@2.2.0',
         'turndown@7.2.4',
       ]);
+      assert.deepEqual(
+        realDependencyDirectories.map(hashReadOnlyTree),
+        realDependencyHashesBefore,
+        'dependency archive preparation must leave shared source bytes and modes unchanged',
+      );
       await writeFile(
         join(seedConsumer, 'package.json'),
         `${JSON.stringify(
@@ -2382,12 +2627,16 @@ void describe('package', () => {
         'packed consumers must not install the retired URL-based sanitizer dependency',
       );
 
-      const turndownManifest = parseJsonValue(
-        await readFile(
-          join(installedConsumer, 'node_modules', 'turndown', 'package.json'),
-          'utf8',
-        ),
+      const installedTurndownManifest = await readFile(
+        join(installedConsumer, 'node_modules', 'turndown', 'package.json'),
+        'utf8',
       );
+      assert.equal(
+        installedTurndownManifest,
+        sourceTurndownManifest,
+        'offline preparation must preserve the real Turndown manifest bytes',
+      );
+      const turndownManifest = parseJsonValue(installedTurndownManifest);
       const dominoManifest = parseJsonValue(
         await readFile(
           join(installedConsumer, 'node_modules', '@mixmark-io', 'domino', 'package.json'),
@@ -2401,6 +2650,9 @@ void describe('package', () => {
       const turndownDependencies = field(turndownManifest, 'dependencies');
       assert.ok(isObject(turndownDependencies));
       assert.equal(field(turndownDependencies, '@mixmark-io/domino'), '^2.2.0');
+      const turndownScripts = field(turndownManifest, 'scripts');
+      assert.ok(isObject(turndownScripts));
+      assert.equal(field(turndownScripts, 'prepare'), 'npm run build');
 
       const load = spawnSync(
         process.execPath,
@@ -2420,6 +2672,12 @@ void describe('package', () => {
       assert.equal(load.status, 0, load.stderr);
       assert.match(load.stdout, /Offline/u);
       assert.match(load.stdout, /closure loaded/u);
+
+      assert.deepEqual(
+        realDependencyDirectories.map(hashReadOnlyTree),
+        realDependencyHashesBefore,
+        'offline installation must leave shared dependency source bytes and modes unchanged',
+      );
 
       for (const f of [
         'package.json',

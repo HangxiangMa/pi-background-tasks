@@ -1,6 +1,16 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
@@ -20,11 +30,40 @@ interface PackedDependency {
   readonly shasum: string;
 }
 
-interface NpmPackJson {
-  readonly filename: string;
-  readonly integrity: string;
-  readonly shasum: string;
+interface PackageTreeSnapshot {
+  readonly bytes: number;
+  readonly sha256: string;
 }
+
+const MAX_FIXTURE_CLOSURE_BYTES = 100 * 1024 * 1024;
+
+const archiveBridgeSource = [
+  "'use strict';",
+  "const { readdirSync } = require('node:fs');",
+  "const { createRequire } = require('node:module');",
+  '',
+  'const [npmCli, sourceDirectory, archivePath] = process.argv.slice(2);',
+  "if (!npmCli || !sourceDirectory || !archivePath) throw new Error('archive bridge arguments missing');",
+  "const tar = createRequire(npmCli)('tar');",
+  "if (!tar || typeof tar.c !== 'function') throw new Error('npm-bundled tar.c API is unavailable');",
+  "const entries = readdirSync(sourceDirectory).filter((name) => name !== 'node_modules').sort();",
+  "if (!entries.includes('package.json')) throw new Error('installed package.json is missing');",
+  'const excludesNodeModules = (path) =>',
+  "  !path.replaceAll('\\\\', '/').split('/').includes('node_modules');",
+  'void tar.c({',
+  '  cwd: sourceDirectory,',
+  '  file: archivePath,',
+  '  filter: excludesNodeModules,',
+  '  gzip: { level: 9 },',
+  "  mtime: new Date('1985-10-26T08:15:00.000Z'),",
+  "  prefix: 'package/',",
+  '  portable: true,',
+  '}, entries).catch((error) => {',
+  '  console.error(error);',
+  '  process.exitCode = 1;',
+  '});',
+  '',
+].join('\n');
 
 export interface RegistryRequest {
   readonly method: string;
@@ -150,23 +189,67 @@ function installedClosure(
   return manifests;
 }
 
-function parsePackJson(stdout: string, packageLabel: string): NpmPackJson {
-  const trimmed = stdout.trim();
-  const start = trimmed.startsWith('[') ? 0 : stdout.lastIndexOf('\n[') + 1;
-  if (start < 0 || (!trimmed.startsWith('[') && start === 0)) {
-    throw new Error(`npm pack returned malformed JSON for ${packageLabel}`);
+function snapshotPackageTree(directory: string): PackageTreeSnapshot {
+  const hash = createHash('sha256');
+  let bytes = 0;
+
+  const visit = (path: string, relativePath: string): void => {
+    const stat = lstatSync(path);
+    const mode = stat.mode & 0o7777;
+    if (stat.isSymbolicLink()) {
+      const target = readlinkSync(path);
+      hash.update(`link\0${relativePath}\0${String(mode)}\0${target}\0`);
+      bytes += Buffer.byteLength(target);
+      return;
+    }
+    if (stat.isFile()) {
+      const contents = readFileSync(path);
+      hash.update(`file\0${relativePath}\0${String(mode)}\0${String(contents.byteLength)}\0`);
+      hash.update(contents);
+      hash.update('\0');
+      bytes += contents.byteLength;
+      return;
+    }
+    if (!stat.isDirectory()) {
+      throw new Error(`installed package contains unsupported entry ${path}`);
+    }
+    hash.update(`directory\0${relativePath}\0${String(mode)}\0`);
+    for (const name of readdirSync(path).sort()) {
+      if (name === 'node_modules') continue;
+      visit(join(path, name), relativePath.length === 0 ? name : `${relativePath}/${name}`);
+    }
+  };
+
+  visit(directory, '');
+  return { bytes, sha256: hash.digest('hex') };
+}
+
+function archiveInstalledPackage(
+  npmCli: string,
+  npmEnv: NodeJS.ProcessEnv,
+  bridgePath: string,
+  archivePath: string,
+  manifest: PackageManifest,
+): void {
+  const result = spawnSync(
+    process.execPath,
+    [bridgePath, npmCli, manifest.directory, archivePath],
+    {
+      cwd: dirname(bridgePath),
+      encoding: 'utf8',
+      env: npmEnv,
+    },
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `failed to archive installed production dependency ${manifest.name}@${manifest.version}: ${result.stderr || result.stdout}`,
+    );
   }
-  const value: unknown = JSON.parse(start === 0 ? trimmed : stdout.slice(start).trim());
-  if (!Array.isArray(value) || value.length !== 1 || !isObject(value[0])) {
-    throw new Error(`npm pack returned an unexpected entry count for ${packageLabel}`);
+  if (!existsSync(archivePath)) {
+    throw new Error(
+      `archive creation omitted installed production dependency ${manifest.name}@${manifest.version}`,
+    );
   }
-  const filename = value[0]['filename'];
-  const integrity = value[0]['integrity'];
-  const shasum = value[0]['shasum'];
-  if (typeof filename !== 'string' || typeof integrity !== 'string' || typeof shasum !== 'string') {
-    throw new Error(`npm pack omitted archive hashes for ${packageLabel}`);
-  }
-  return { filename, integrity, shasum };
 }
 
 async function packInstalledClosure(
@@ -191,53 +274,49 @@ async function packInstalledClosure(
   }
 
   const tarballDirectory = join(options.scratchDir, 'tarballs');
-  const packCwd = join(options.scratchDir, 'pack-project');
+  const bridgePath = join(options.scratchDir, 'archive-installed-package.cjs');
   mkdirSync(tarballDirectory, { recursive: true });
-  mkdirSync(packCwd, { recursive: true });
-  writeFileSync(
-    join(packCwd, 'package.json'),
-    `${JSON.stringify(
-      { name: 'installed-closure-pack-project', private: true, version: '1.0.0' },
-      null,
-      2,
-    )}\n`,
-  );
-  writeFileSync(join(packCwd, '.npmrc'), '');
+  writeFileSync(bridgePath, archiveBridgeSource);
   const manifests = installedClosure(options.packageRoot, options.dependencySpecs);
   const packed: PackedDependency[] = [];
+  let closureSourceBytes = 0;
+  let closureArchiveBytes = 0;
 
+  let archiveIndex = 0;
   for (const [key, manifest] of [...manifests].sort(([left], [right]) => left.localeCompare(right))) {
     if (!isAbsolute(manifest.directory)) {
       throw new Error(`installed production dependency path must be absolute: ${key}`);
     }
-    const result = spawnSync(
-      process.execPath,
-      [
-        options.npmCli,
-        'pack',
-        '--ignore-scripts',
-        '--json',
-        '--pack-destination',
-        tarballDirectory,
-        manifest.directory,
-      ],
-      {
-        cwd: packCwd,
-        encoding: 'utf8',
-        env: options.npmEnv,
-      },
-    );
-    if (result.status !== 0) {
-      throw new Error(
-        `failed to pack installed production dependency ${key}: ${result.stderr || result.stdout}`,
-      );
+    const before = snapshotPackageTree(manifest.directory);
+    closureSourceBytes += before.bytes;
+    if (closureSourceBytes >= MAX_FIXTURE_CLOSURE_BYTES) {
+      throw new Error('installed production dependency closure must be smaller than 100 MiB');
     }
-    const entry = parsePackJson(result.stdout, key);
-    packed.push({
-      archive: await readFile(join(tarballDirectory, entry.filename)),
-      integrity: entry.integrity,
+
+    const archivePath = join(tarballDirectory, `${String(archiveIndex)}.tgz`);
+    archiveIndex += 1;
+    archiveInstalledPackage(
+      options.npmCli,
+      options.npmEnv,
+      bridgePath,
+      archivePath,
       manifest,
-      shasum: entry.shasum,
+    );
+    const after = snapshotPackageTree(manifest.directory);
+    if (after.sha256 !== before.sha256 || after.bytes !== before.bytes) {
+      throw new Error(`dependency packaging modified installed source ${key}`);
+    }
+
+    closureArchiveBytes += statSync(archivePath).size;
+    if (closureArchiveBytes >= MAX_FIXTURE_CLOSURE_BYTES) {
+      throw new Error('installed production dependency archives must be smaller than 100 MiB');
+    }
+    const archive = await readFile(archivePath);
+    packed.push({
+      archive,
+      integrity: `sha512-${createHash('sha512').update(archive).digest('base64')}`,
+      manifest,
+      shasum: createHash('sha1').update(archive).digest('hex'),
     });
   }
   return packed;
