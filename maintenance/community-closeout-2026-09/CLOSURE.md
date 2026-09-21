@@ -2,7 +2,7 @@
 
 Date: 2026-09-21
 
-Package: `pi-background-tasks@2.5.0`
+Package: `pi-background-tasks@2.6.0`
 Integrated main: `ff1ddbc07c85a9edfd5d91d3241e322d6b8a9d67` (tree `40f789193734e57a65f3336a467a903dee7db124`)
 
 This is a **local closure candidate**, not a GitHub closure, release, push, tag, or publication.
@@ -73,4 +73,4 @@ These limitations remain visible blockers and are not converted into passes.
 
 Both auxiliary branch tips are retained as main ancestors through tree-preserving merge commits. Their package-only worktrees and merged branches were removed normally, the 225 MiB task scratch root was deleted after receipt preservation, shared dependencies remain intact, and no matching process remains.
 
-No closeout changes were pushed or published. No GitHub issue/PR was closed or modified. The parent repository was not committed.
+After this local closure, the operator authorized pushing package `main` with the `2.6.0` version bump. No npm publish or tag is included; no GitHub issue/PR is closed or modified, and the parent repository is not committed.

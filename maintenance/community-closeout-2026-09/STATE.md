@@ -7,9 +7,9 @@ Last updated: 2026-09-21.
 **LOCAL CLOSURE CANDIDATE COMPLETE — package work, qualification, evidence, and cleanup finished.**
 
 - Runtime integration/ancestry anchor: `ff1ddbc07c85a9edfd5d91d3241e322d6b8a9d67` (tree `40f789193734e57a65f3336a467a903dee7db124`); final HEAD adds only this closure dossier.
-- Package version: `2.5.0`.
+- Package version: `2.6.0` (operator-authorized post-closeout bump).
 - Parent repository remains untouched.
-- No closeout push, publish, tag, GitHub mutation, or remote closure occurred.
+- The operator subsequently authorized pushing package `main` with the 2.6.0 bump. No npm publish, tag, GitHub issue/PR mutation, remote closure, or parent-repository commit is authorized.
 - No agents are running. After operator correction, final integration, P1b implementation, test repair, and qualification were performed directly by the parent agent.
 - All 11 issues and 6 PRs now have either integrated package work or a precise upstream/environment blocker. “Closure-ready” remains local evidence vocabulary, not remote closure.
 
