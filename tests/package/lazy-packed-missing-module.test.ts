@@ -13,6 +13,7 @@ import {
   SessionManager,
   SettingsManager,
   type AgentSession,
+  type ExtensionUIContext,
 } from '@earendil-works/pi-coding-agent';
 
 const execFileAsync = promisify(execFile);
@@ -99,6 +100,16 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 async function close(session: AgentSession): Promise<void> {
   await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
   session.dispose();
+}
+
+function assertSemanticLazyFailure(error: unknown, expected: RegExp, label: string): void {
+  assert.ok(error instanceof Error, `${label} should fail with an Error after lazy import`);
+  assert.doesNotMatch(
+    error.message,
+    /Cannot find package|ERR_MODULE_NOT_FOUND/u,
+    `${label} must resolve Pi host modules through the package entrypoint`,
+  );
+  assert.match(error.message, expected, `${label} should reach its post-import validation`);
 }
 
 afterEach(async () => {
@@ -199,6 +210,76 @@ void describe('packed lazy-module closure', { concurrency: false }, () => {
           .getRegisteredCommands()
           .some((command) => command.invocationName === 'claude-cache'),
       );
+
+      const context = startupSession.extensionRunner.createContext();
+      const delegate = startupSession.getToolDefinition('bg_delegate');
+      const attested = startupSession.getToolDefinition('bg_run_pi_attested');
+      const fusion = startupSession.getToolDefinition('fusion_reason');
+      assert.ok(delegate);
+      assert.ok(attested);
+      assert.ok(fusion);
+      assertSemanticLazyFailure(
+        await rejection(
+          delegate.execute(
+            'packed-delegate-lazy-probe',
+            { name: 'Lazy probe', prompt: 'Do not launch.' },
+            undefined,
+            undefined,
+            context,
+          ),
+        ),
+        /route .*reports no usable context-window capacity/u,
+        'bg_delegate',
+      );
+      assertSemanticLazyFailure(
+        await rejection(
+          attested.execute(
+            'packed-attested-lazy-probe',
+            {
+              name: 'Lazy probe',
+              provider: 'missing-provider',
+              model: 'missing-model',
+              prompt: 'Do not launch.',
+              reportPath: 'report.md',
+            },
+            undefined,
+            undefined,
+            context,
+          ),
+        ),
+        /Pi model not found in ModelRegistry/u,
+        'bg_run_pi_attested',
+      );
+      assertSemanticLazyFailure(
+        await rejection(
+          fusion.execute(
+            'packed-fusion-lazy-probe',
+            { prompt: 'Do not launch.' },
+            undefined,
+            undefined,
+            context,
+          ),
+        ),
+        /current model is not available to child Pi/u,
+        'fusion_reason',
+      );
+
+      const baseUi = startupSession.extensionRunner.getUIContext();
+      const custom = (async () => ({ type: 'cancelled' })) as ExtensionUIContext['custom'];
+      startupSession.extensionRunner.setUIContext(
+        { ...baseUi, custom, notify: () => undefined },
+        'tui',
+      );
+      const commandContext = startupSession.extensionRunner.createCommandContext();
+      Object.defineProperty(commandContext, 'mode', { value: 'tui', configurable: true });
+      for (const commandName of ['tasks', 'fusion-models']) {
+        const command = startupSession.extensionRunner
+          .getRegisteredCommands()
+          .find((candidate) => candidate.invocationName === commandName);
+        assert.ok(command, `missing packed command ${commandName}`);
+        await command.handler('', commandContext);
+      }
+
       await close(startupSession);
       startupSession = undefined;
       assert.deepEqual(startupErrors, []);

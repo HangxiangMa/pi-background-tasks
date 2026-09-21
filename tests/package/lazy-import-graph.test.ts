@@ -64,16 +64,32 @@ async function runtimeStaticGraph(entry: string): Promise<Set<string>> {
   return new Set([...visited].map(relativeSource));
 }
 
-async function dynamicImports(path: string): Promise<Set<string>> {
+async function sourceTree(path: string): Promise<ts.SourceFile> {
   const absolutePath = sourcePath(path);
-  const source = await readFile(absolutePath, 'utf8');
-  const tree = ts.createSourceFile(
+  return ts.createSourceFile(
     absolutePath,
-    source,
+    await readFile(absolutePath, 'utf8'),
     ts.ScriptTarget.Latest,
     true,
     ts.ScriptKind.TS,
   );
+}
+
+async function runtimeBareImports(path: string): Promise<Set<string>> {
+  const tree = await sourceTree(path);
+  const out = new Set<string>();
+  for (const statement of tree.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const specifier = runtimeImportSpecifier(statement);
+    if (specifier !== undefined && !specifier.startsWith('.') && !specifier.startsWith('node:')) {
+      out.add(specifier);
+    }
+  }
+  return out;
+}
+
+async function dynamicImports(path: string): Promise<Set<string>> {
+  const tree = await sourceTree(path);
   const out = new Set<string>();
   const visit = (node: ts.Node): void => {
     const argument = ts.isCallExpression(node) ? node.arguments[0] : undefined;
@@ -161,6 +177,25 @@ void describe('lazy facade runtime import graph', () => {
       manifest.files?.includes('src/'),
       'package payload must include all deferred src targets',
     );
+  });
+
+  void it('keeps host-sensitive dynamic-import issuers on Pi alias-aware module paths', async () => {
+    const expectedHostImports = new Map<string, string>([
+      ['extensions/anthropic-attribution.ts', '@earendil-works/pi-ai/compat'],
+      ['src/extension.ts', '@earendil-works/pi-coding-agent'],
+      ['src/delegate-extension.ts', '@earendil-works/pi-tui'],
+      ['src/fusion-extension.ts', '@earendil-works/pi-coding-agent'],
+      ['src/core/registry.ts', '@earendil-works/pi-coding-agent'],
+    ]);
+    for (const [issuer, expectedHostImport] of expectedHostImports) {
+      const deferred = await dynamicImports(issuer);
+      assert.ok(deferred.size > 0, `${issuer} must retain its documented lazy boundary`);
+      const hostImports = await runtimeBareImports(issuer);
+      assert.ok(
+        hostImports.has(expectedHostImport),
+        `${issuer} must enter Pi's alias-aware loader through ${expectedHostImport}`,
+      );
+    }
   });
 
   void it('keeps extracted facade constants byte/value equivalent to engine consumers', async () => {
