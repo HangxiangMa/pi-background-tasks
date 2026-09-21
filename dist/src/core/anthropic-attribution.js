@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { anthropicMessagesApi } from '@earendil-works/pi-ai/compat';
 export const CLAUDE_CODE_SESSION_HEADER = 'X-Claude-Code-Session-Id';
 const CLAUDE_CODE_VERSION = '2.1.251';
 const CLAUDE_CODE_ENTRYPOINT = 'sdk-cli';
@@ -1770,17 +1769,24 @@ function createOutput(model) {
         timestamp: Date.now(),
     };
 }
-function forwardToBuiltInAnthropic(model, context, options) {
-    // Pi aliases these SDK imports to its own version while loading extensions.
-    // The host therefore owns both its legacy Context or normalized TranscriptContext
-    // input and the complete stream/event/result shape. These intersections only mark
-    // that host-owned boundary; no request, callback, event, or result is reconstructed.
-    const delegated = anthropicMessagesApi().streamSimple(model, context, options);
+function forwardToBuiltInAnthropic(model, context, options, dependencies) {
+    // The compiled gateway resolves this host-owned adapter through Pi's alias-aware
+    // extension loader and injects it across the lazy native-import boundary. Keeping
+    // the deferred core free of runtime Pi package imports prevents Node from trying to
+    // resolve a private @earendil-works/pi-ai installation beside a managed package.
+    const hostAnthropicMessagesApi = dependencies.hostAnthropicMessagesApi;
+    if (hostAnthropicMessagesApi === undefined) {
+        throw new Error("pi_anthropic_attribution_host_adapter_missing: the extension gateway did not inject Pi's anthropic-messages adapter");
+    }
+    // The host owns both its legacy Context or normalized TranscriptContext input and
+    // the complete stream/event/result shape. These intersections only mark that
+    // host-owned boundary; no request, callback, event, or result is reconstructed.
+    const delegated = hostAnthropicMessagesApi().streamSimple(model, context, options);
     return delegated;
 }
 export function streamAnthropicViaBetaMessages(model, context, options, dependencies = {}) {
     if (model.provider !== 'anthropic') {
-        return forwardToBuiltInAnthropic(model, context, options);
+        return forwardToBuiltInAnthropic(model, context, options, dependencies);
     }
     const stream = createAssistantMessageEventStream();
     const output = createOutput(model);

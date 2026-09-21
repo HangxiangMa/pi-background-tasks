@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { anthropicMessagesApi } from '@earendil-works/pi-ai/compat';
 import type {
   AssistantMessageEventStream as HostAssistantMessageEventStream,
   Context as HostContext,
@@ -466,8 +465,12 @@ export interface PiSimpleStreamOptions {
   ) => Promise<void> | void;
 }
 
+export type HostAnthropicMessagesApiFactory =
+  typeof import('@earendil-works/pi-ai/compat').anthropicMessagesApi;
+
 export interface AnthropicTransportDependencies {
   readonly loadAccount?: () => ClaudeAttributionAccount;
+  readonly hostAnthropicMessagesApi?: HostAnthropicMessagesApiFactory;
 }
 
 export interface AssistantMessageLike {
@@ -2683,12 +2686,23 @@ function forwardToBuiltInAnthropic(
   model: PiModelLike,
   context: PiStreamContext,
   options: PiSimpleStreamOptions | undefined,
+  dependencies: AnthropicTransportDependencies,
 ): AssistantMessageEventStreamLike {
-  // Pi aliases these SDK imports to its own version while loading extensions.
-  // The host therefore owns both its legacy Context or normalized TranscriptContext
-  // input and the complete stream/event/result shape. These intersections only mark
-  // that host-owned boundary; no request, callback, event, or result is reconstructed.
-  const delegated = anthropicMessagesApi().streamSimple(
+  // The compiled gateway resolves this host-owned adapter through Pi's alias-aware
+  // extension loader and injects it across the lazy native-import boundary. Keeping
+  // the deferred core free of runtime Pi package imports prevents Node from trying to
+  // resolve a private @earendil-works/pi-ai installation beside a managed package.
+  const hostAnthropicMessagesApi = dependencies.hostAnthropicMessagesApi;
+  if (hostAnthropicMessagesApi === undefined) {
+    throw new Error(
+      "pi_anthropic_attribution_host_adapter_missing: the extension gateway did not inject Pi's anthropic-messages adapter",
+    );
+  }
+
+  // The host owns both its legacy Context or normalized TranscriptContext input and
+  // the complete stream/event/result shape. These intersections only mark that
+  // host-owned boundary; no request, callback, event, or result is reconstructed.
+  const delegated = hostAnthropicMessagesApi().streamSimple(
     model as HostForwardingModel,
     context as HostForwardingContext,
     options as HostForwardingOptions | undefined,
@@ -2703,7 +2717,7 @@ export function streamAnthropicViaBetaMessages(
   dependencies: AnthropicTransportDependencies = {},
 ): AssistantMessageEventStreamLike {
   if (model.provider !== 'anthropic') {
-    return forwardToBuiltInAnthropic(model, context, options);
+    return forwardToBuiltInAnthropic(model, context, options, dependencies);
   }
 
   const stream = createAssistantMessageEventStream();

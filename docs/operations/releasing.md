@@ -57,7 +57,7 @@ Use `npm pack --dry-run --json` output as the payload source of truth. Verify at
 - authoritative `extensions/` and runtime `src/` sources remain included for public source/API compatibility;
 - `docs/`, `README.md`, `TESTING.md`, `TEST_PLAN.md`, `PUBLISHING.md`, `BACKGROUND-TASKS-INSTRUCTIONS.md`, `THIRD_PARTY_NOTICES.md`, root `logo.png`, and `LICENSE` are included per current `package.json.files`;
 - tests, scripts, node_modules, local `.pi/` artifacts, generated evidence not meant for runtime, and nested tarballs are excluded;
-- TypeBox remains a Pi-provided peer and no private/nested runtime TypeBox copy is bundled;
+- TypeBox and `@earendil-works/pi-ai` remain Pi-provided peers and no private/nested runtime copies are bundled;
 - production dependencies use registry versions only; no exotic URL/git/file subdependency is shipped;
 - docs/assets/gateway/logo inclusion matches `package.json.files` exactly.
 

@@ -1,4 +1,5 @@
 import type { Provider } from '@earendil-works/pi-ai';
+import { anthropicMessagesApi } from '@earendil-works/pi-ai/compat';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import type { PiContextLike, PiExtensionHost } from '../src/core/anthropic-attribution.js';
 import { parseBackgroundTasksConfig } from '../src/core/config.js';
@@ -104,7 +105,9 @@ function restoreProviderInstallation(installation: ProviderInstallation): void {
   } else {
     // The exact package token and absence of a later native owner were proven above.
     // Public unregister is therefore owner-conditional here: it removes only this
-    // still-current package layer and restores the captured built-in source absence.
+    // still-current package layer and restores dynamic-registration absence. The host
+    // may legitimately refresh its built-in provider while our overlay is installed,
+    // so that host-owned effective object is not required to retain stale identity.
     registry.unregisterProvider(ANTHROPIC_PROVIDER);
   }
 
@@ -121,25 +124,13 @@ function restoreProviderInstallation(installation: ProviderInstallation): void {
         (before.native !== undefined
           ? restoredNative === before.native
           : restoredNative === undefined);
-  const streamIdentityRestored =
-    before.legacy !== undefined
-      ? restoredConfig?.streamSimple === before.legacy.streamSimple
-      : restoredEffective?.streamSimple === before.effective.streamSimple;
-  const effectiveIdentityRestored =
-    before.legacy !== undefined || restoredEffective === before.effective;
   const registeredIdRestored =
     before.legacy !== undefined || before.native !== undefined
       ? restoredIds.includes(ANTHROPIC_PROVIDER)
       : !restoredIds.includes(ANTHROPIC_PROVIDER);
-  if (
-    !registrationRestored ||
-    restoredEffective === undefined ||
-    !streamIdentityRestored ||
-    !effectiveIdentityRestored ||
-    !registeredIdRestored
-  ) {
+  if (!registrationRestored || restoredEffective === undefined || !registeredIdRestored) {
     throw new Error(
-      'pi_anthropic_attribution_restore_failed: the preexisting host provider was not restored by identity',
+      'pi_anthropic_attribution_restore_failed: the preexisting public provider registration state was not restored',
     );
   }
 }
@@ -154,7 +145,7 @@ export default async function ambientAnthropicAttribution(pi: PiExtensionHost): 
     pi.on('session_start', (_event, context) => {
       const registry = (context as AmbientAttributionContext).modelRegistry;
       const before = captureProviderSnapshot(registry);
-      spawnAnthropicAttribution(pi);
+      spawnAnthropicAttribution(pi, { hostAnthropicMessagesApi: anthropicMessagesApi });
       installation = confirmProviderInstallation(registry, before) ?? installation;
     });
     pi.on('session_shutdown', () => {

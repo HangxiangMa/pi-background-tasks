@@ -566,6 +566,59 @@ void describe('C1a feature selection and dock configuration', { concurrency: fal
     }
   });
 
+  void it('accepts a host-refreshed built-in while restoring exact dynamic absence', async () => {
+    configure('process,attribution', 'off');
+    const extensionErrors: Array<{ event: string; error: string }> = [];
+    let originalBuiltin: ReturnType<ModelRuntime['getProvider']>;
+    let refreshedBuiltin: ReturnType<ModelRuntime['getProvider']>;
+    const { session, modelRuntime } = await makeSession([], {
+      setupModelRuntime: (runtime) => {
+        const originalGetProvider = runtime.getProvider.bind(runtime);
+        const originalUnregisterProvider = runtime.unregisterProvider.bind(runtime);
+        originalBuiltin = originalGetProvider('anthropic');
+        assert.ok(originalBuiltin, 'fixture requires the built-in Anthropic provider');
+
+        const getProvider: ModelRuntime['getProvider'] = (providerId) => {
+          if (
+            providerId === 'anthropic' &&
+            refreshedBuiltin !== undefined &&
+            runtime.getRegisteredProviderConfig(providerId) === undefined &&
+            runtime.getRegisteredNativeProvider(providerId) === undefined
+          ) {
+            return refreshedBuiltin;
+          }
+          return originalGetProvider(providerId);
+        };
+        runtime.getProvider = getProvider;
+        runtime.unregisterProvider = (providerId) => {
+          originalUnregisterProvider(providerId);
+          if (providerId !== 'anthropic') return;
+          const currentBuiltin = originalGetProvider(providerId);
+          assert.ok(currentBuiltin, 'host refresh fixture requires the restored built-in');
+          refreshedBuiltin = Object.freeze({
+            ...currentBuiltin,
+            name: `${currentBuiltin.name} refreshed`,
+          });
+        };
+      },
+      onExtensionError: (error) => extensionErrors.push(error),
+    });
+    try {
+      assert.ok(modelRuntime.getRegisteredProviderConfig('anthropic'));
+      configure('process', 'off');
+      await session.reload();
+      assert.equal(modelRuntime.getRegisteredProviderConfig('anthropic'), undefined);
+      assert.equal(modelRuntime.getRegisteredNativeProvider('anthropic'), undefined);
+      assert.equal(modelRuntime.getRegisteredProviderIds().includes('anthropic'), false);
+      assert.ok(refreshedBuiltin);
+      assert.notEqual(refreshedBuiltin, originalBuiltin);
+      assert.equal(modelRuntime.getProvider('anthropic'), refreshedBuiltin);
+      assert.deepEqual(extensionErrors, []);
+    } finally {
+      await closeSession(session);
+    }
+  });
+
   void it('restores a preexisting native provider object by exact public identity', async () => {
     configure('process,attribution', 'off');
     let nativeProvider: ReturnType<ModelRuntime['getProvider']>;

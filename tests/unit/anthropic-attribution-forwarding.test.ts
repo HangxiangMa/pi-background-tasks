@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { describe, it, type TestContext } from 'node:test';
+import { anthropicMessagesApi } from '@earendil-works/pi-ai/compat';
 import {
   streamAnthropicViaBetaMessages,
   type AssistantMessageLike,
@@ -27,6 +28,8 @@ const minimaxContext: PiStreamContext = {
     { role: 'user', content: 'Forward without Anthropic attribution.', timestamp: 1 },
   ],
 };
+
+const hostDependencies = Object.freeze({ hostAnthropicMessagesApi: anthropicMessagesApi });
 
 function sseResponse(events: readonly JsonObject[], status = 200): Response {
   return new Response(
@@ -105,13 +108,34 @@ function richSuccessEvents(): JsonObject[] {
 }
 
 void describe('non-target anthropic-messages forwarding (#19)', () => {
-  void it('uses the direct exported host adapter without a serialization bridge', async () => {
-    const source = await readFile('src/core/anthropic-attribution.ts', 'utf8');
-    assert.match(source, /from '@earendil-works\/pi-ai\/compat'/u);
-    assert.match(source, /anthropicMessagesApi\(\)\.streamSimple/u);
-    assert.equal(/localForwarded(?:ContentBlock|Message|Event)/u.test(source), false);
-    assert.equal(/new Function/u.test(source), false);
-    assert.equal(/@earendil-works\/pi-ai\/anthropic/u.test(source), false);
+  void it('injects the direct host adapter at both gateways without a serialization bridge', async () => {
+    const [core, ambientGateway, childGateway] = await Promise.all([
+      readFile('src/core/anthropic-attribution.ts', 'utf8'),
+      readFile('extensions/anthropic-attribution.ts', 'utf8'),
+      readFile('extensions/anthropic-attribution-child.ts', 'utf8'),
+    ]);
+    const runtimeAdapterImport =
+      /^import \{ anthropicMessagesApi \} from '@earendil-works\/pi-ai\/compat';$/mu;
+    assert.doesNotMatch(core, runtimeAdapterImport);
+    assert.match(core, /hostAnthropicMessagesApi\(\)\.streamSimple/u);
+    assert.match(ambientGateway, runtimeAdapterImport);
+    assert.match(childGateway, runtimeAdapterImport);
+    assert.match(ambientGateway, /hostAnthropicMessagesApi: anthropicMessagesApi/u);
+    assert.match(childGateway, /hostAnthropicMessagesApi: anthropicMessagesApi/u);
+    assert.equal(/localForwarded(?:ContentBlock|Message|Event)/u.test(core), false);
+    assert.equal(/new Function/u.test(core), false);
+    assert.equal(/@earendil-works\/pi-ai\/anthropic/u.test(core), false);
+  });
+
+  void it('fails loudly if a non-target route bypasses its extension gateway', () => {
+    assert.throws(
+      () =>
+        streamAnthropicViaBetaMessages(minimaxModel, minimaxContext, {
+          apiKey: 'minimax-test-key',
+          cacheRetention: 'none',
+        }),
+      /pi_anthropic_attribution_host_adapter_missing/u,
+    );
   });
 
   void it('uses the supported host adapter once without target-only rewriting', async (t: TestContext) => {
@@ -152,6 +176,7 @@ void describe('non-target anthropic-messages forwarding (#19)', () => {
           assert.strictEqual(forwardedModel, minimaxModel);
         },
       },
+      hostDependencies,
     ).result();
 
     assert.equal(result.stopReason, 'stop', result.errorMessage);
@@ -185,6 +210,7 @@ void describe('non-target anthropic-messages forwarding (#19)', () => {
         reasoning: 'high',
         cacheRetention: 'none',
       },
+      hostDependencies,
     ).result();
 
     assert.equal(result.stopReason, 'toolUse', result.errorMessage);
@@ -215,6 +241,7 @@ void describe('non-target anthropic-messages forwarding (#19)', () => {
         reasoning: 'high',
         cacheRetention: 'none',
       },
+      hostDependencies,
     );
 
     const partials: object[] = [];
@@ -253,15 +280,20 @@ void describe('non-target anthropic-messages forwarding (#19)', () => {
       status: 503,
       statusText: 'Service Unavailable',
     }));
-    const stream = streamAnthropicViaBetaMessages(minimaxModel, minimaxContext, {
-      apiKey: 'minimax-test-key',
-      cacheRetention: 'none',
-      onResponse(response, forwardedModel) {
-        responseCalls += 1;
-        assert.equal(response.status, 503);
-        assert.strictEqual(forwardedModel, minimaxModel);
+    const stream = streamAnthropicViaBetaMessages(
+      minimaxModel,
+      minimaxContext,
+      {
+        apiKey: 'minimax-test-key',
+        cacheRetention: 'none',
+        onResponse(response, forwardedModel) {
+          responseCalls += 1;
+          assert.equal(response.status, 503);
+          assert.strictEqual(forwardedModel, minimaxModel);
+        },
       },
-    });
+      hostDependencies,
+    );
 
     let terminalError: AssistantMessageLike | undefined;
     let terminalEvents = 0;

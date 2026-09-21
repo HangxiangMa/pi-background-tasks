@@ -25,7 +25,7 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:63e32141e9ae60dcc02b3b5e757c5ce39ab38adb1edb9b34ac459894607651fb",
+      "authored_body_sha256": "sha256:1668305b87b152b6fc98ba3f7bcf029269d4f042a4b39192232a3cc472fdc2ae",
       "covers_sources": [
         "extensions/anthropic-attribution-child.ts",
         "extensions/anthropic-attribution.ts",
@@ -909,7 +909,7 @@
     "image": "https://raw.githubusercontent.com/ismailsaleekh/pi-background-tasks/main/logo.png",
     "name": "pi-background-tasks",
     "type": "module",
-    "version": "2.6.0"
+    "version": "2.6.1"
   },
   "public_surface_ids": [
     "command:bg",
@@ -990,7 +990,7 @@
         "id": "command:claude-cache",
         "kind": "command",
         "name": "claude-cache",
-        "source": "src/core/anthropic-attribution.ts:3206"
+        "source": "src/core/anthropic-attribution.ts:3220"
       },
       {
         "availability": "feature:fusion",

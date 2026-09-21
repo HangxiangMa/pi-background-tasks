@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -106,7 +106,7 @@ afterEach(async () => {
 });
 
 void describe('packed lazy-module closure', { concurrency: false }, () => {
-  void it('starts with a removed deferred module and fails only when its producer is invoked', async () => {
+  void it('loads without private Pi peers, then bounds a damaged deferred producer', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-bg-lazy-packed-'));
     roots.push(root);
     const tarballs = join(root, 'tarballs');
@@ -115,17 +115,133 @@ void describe('packed lazy-module closure', { concurrency: false }, () => {
     await mkdir(unpacked, { recursive: true });
     await execFileAsync('tar', ['-xzf', tarball, '-C', unpacked], { cwd: root });
     const packedRoot = join(unpacked, 'package');
+    const productionModules = join(packedRoot, 'node_modules');
+    await mkdir(join(productionModules, '@mixmark-io'), { recursive: true });
+    await Promise.all([
+      cp(join(packageRoot, 'node_modules', 'turndown'), join(productionModules, 'turndown'), {
+        recursive: true,
+        dereference: true,
+      }),
+      cp(
+        join(packageRoot, 'node_modules', '@mixmark-io', 'domino'),
+        join(productionModules, '@mixmark-io', 'domino'),
+        { recursive: true, dereference: true },
+      ),
+    ]);
+    for (const hostPackage of [
+      '@earendil-works/pi-ai',
+      '@earendil-works/pi-coding-agent',
+      '@earendil-works/pi-tui',
+      'typebox',
+    ]) {
+      assert.equal(
+        existsSync(join(productionModules, ...hostPackage.split('/'))),
+        false,
+        `${hostPackage} must remain host-provided in the installed-package fixture`,
+      );
+    }
+
+    const startupCwd = join(root, 'startup-project');
+    const startupAgentDir = join(root, 'startup-agent');
+    await Promise.all([
+      mkdir(startupCwd, { recursive: true }),
+      mkdir(startupAgentDir, { recursive: true }),
+    ]);
+    const startupPrevious = {
+      features: process.env['PI_BG_FEATURES'],
+      shortcut: process.env['PI_BG_DOCK_SHORTCUT'],
+      agentDir: process.env['PI_CODING_AGENT_DIR'],
+    };
+    Reflect.deleteProperty(process.env, 'PI_BG_FEATURES');
+    process.env['PI_BG_DOCK_SHORTCUT'] = 'off';
+    process.env['PI_CODING_AGENT_DIR'] = startupAgentDir;
+    const startupSettings = SettingsManager.inMemory();
+    const startupLoader = new DefaultResourceLoader({
+      cwd: startupCwd,
+      agentDir: startupAgentDir,
+      settingsManager: startupSettings,
+      additionalExtensionPaths: [
+        join(packedRoot, 'dist/extensions/anthropic-attribution.js'),
+        join(packedRoot, 'dist/extensions/background-tasks.js'),
+      ],
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noContextFiles: true,
+      noThemes: true,
+    });
+    const startupErrors: Array<{ event: string; error: string }> = [];
+    let startupSession: AgentSession | undefined;
+    try {
+      await startupLoader.reload();
+      assert.deepEqual(startupLoader.getExtensions().errors, []);
+      const startupRuntime = await ModelRuntime.create({
+        authPath: join(startupAgentDir, 'auth.json'),
+        modelsPath: null,
+      });
+      const created = await createAgentSession({
+        cwd: startupCwd,
+        agentDir: startupAgentDir,
+        resourceLoader: startupLoader,
+        settingsManager: startupSettings,
+        modelRuntime: startupRuntime,
+        sessionManager: SessionManager.inMemory(startupCwd),
+        noTools: 'builtin',
+      });
+      startupSession = created.session;
+      await startupSession.bindExtensions({
+        mode: 'json',
+        onError: (error) => startupErrors.push(error),
+      });
+      assert.ok(startupSession.getToolDefinition('bg_run'));
+      assert.ok(
+        startupSession.extensionRunner
+          .getRegisteredCommands()
+          .some((command) => command.invocationName === 'claude-cache'),
+      );
+      await close(startupSession);
+      startupSession = undefined;
+      assert.deepEqual(startupErrors, []);
+
+      const childLoader = new DefaultResourceLoader({
+        cwd: startupCwd,
+        agentDir: startupAgentDir,
+        settingsManager: SettingsManager.inMemory(),
+        additionalExtensionPaths: [
+          join(packedRoot, 'dist/extensions/anthropic-attribution-child.js'),
+        ],
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noContextFiles: true,
+        noThemes: true,
+      });
+      await childLoader.reload();
+      assert.deepEqual(childLoader.getExtensions().errors, []);
+      assert.equal(childLoader.getExtensions().runtime.pendingProviderRegistrations.length, 1);
+      assert.equal(
+        childLoader.getExtensions().runtime.pendingProviderRegistrations[0]?.name,
+        'anthropic',
+      );
+    } finally {
+      if (startupSession !== undefined) await close(startupSession);
+      if (startupPrevious.features === undefined)
+        Reflect.deleteProperty(process.env, 'PI_BG_FEATURES');
+      else process.env['PI_BG_FEATURES'] = startupPrevious.features;
+      if (startupPrevious.shortcut === undefined)
+        Reflect.deleteProperty(process.env, 'PI_BG_DOCK_SHORTCUT');
+      else process.env['PI_BG_DOCK_SHORTCUT'] = startupPrevious.shortcut;
+      if (startupPrevious.agentDir === undefined)
+        Reflect.deleteProperty(process.env, 'PI_CODING_AGENT_DIR');
+      else process.env['PI_CODING_AGENT_DIR'] = startupPrevious.agentDir;
+    }
+
     const deferredModule = join(packedRoot, 'dist/src/core/delegate/runner.js');
     assert.ok(existsSync(deferredModule), 'the real tarball must close over the deferred module');
     await rm(deferredModule);
-    await symlink(
-      realpathSync(join(packageRoot, 'node_modules')),
-      join(packedRoot, 'node_modules'),
-      process.platform === 'win32' ? 'junction' : 'dir',
-    );
 
-    const cwd = join(root, 'project');
-    const agentDir = join(root, 'agent');
+    const cwd = join(root, 'sdk-project');
+    const agentDir = join(root, 'sdk-agent');
     await Promise.all([mkdir(cwd, { recursive: true }), mkdir(agentDir, { recursive: true })]);
     const previous = {
       features: process.env['PI_BG_FEATURES'],

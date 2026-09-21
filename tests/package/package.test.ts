@@ -536,6 +536,7 @@ void describe('package', () => {
     assert.match(p.scripts['prepack'] ?? '', /build:runtime/);
     assert.match(p.scripts['prepack'] ?? '', /docs:verify/);
     assert.match(p.scripts['prepack'] ?? '', /check-package-payload/);
+    assert.equal(p.peerDependencies['@earendil-works/pi-ai'], '*');
     assert.ok(p.peerDependencies['@earendil-works/pi-coding-agent']);
     assert.ok(p.peerDependencies['@earendil-works/pi-tui']);
     assert.ok(p.peerDependencies['typebox']);
@@ -998,6 +999,12 @@ void describe('package', () => {
 
   void it('ships global package-owned Anthropic attribution with no exotic dependency', async () => {
     const p = await pkg();
+    assert.equal(p.peerDependencies['@earendil-works/pi-ai'], '*');
+    assert.equal(
+      p.dependencies?.['@earendil-works/pi-ai'],
+      undefined,
+      'Pi AI must resolve through the host loader rather than a private runtime copy',
+    );
     assert.equal(p.dependencies?.['@ravshansbox/pi-anthropic-sps'], undefined);
     for (const [name, specifier] of Object.entries(p.dependencies ?? {})) {
       assert.doesNotMatch(
@@ -1013,6 +1020,24 @@ void describe('package', () => {
     assert.match(attribution, /CLAUDE_CODE_200K_SUBSCRIPTION_CONTEXT_WINDOW/);
     assert.match(attribution, /environment variables \(docs\/environment-variables\.md\)/);
     assert.match(attribution, /ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL/);
+
+    const [compiledCore, compiledAmbientGateway, compiledChildGateway] = await Promise.all([
+      text('dist/src/core/anthropic-attribution.js'),
+      text('dist/extensions/anthropic-attribution.js'),
+      text('dist/extensions/anthropic-attribution-child.js'),
+    ]);
+    const runtimePiAiImport =
+      /from ['"]@earendil-works\/pi-ai(?:\/compat)?['"]/u;
+    assert.doesNotMatch(
+      compiledCore,
+      runtimePiAiImport,
+      'the lazy native-import target must not resolve a private Pi AI package',
+    );
+    assert.match(compiledAmbientGateway, runtimePiAiImport);
+    assert.match(compiledChildGateway, runtimePiAiImport);
+    assert.match(compiledAmbientGateway, /hostAnthropicMessagesApi: anthropicMessagesApi/u);
+    assert.match(compiledChildGateway, /hostAnthropicMessagesApi: anthropicMessagesApi/u);
+
     const child = await text('src/core/fusion/pi-child.ts');
     assert.match(child, /FUSION_SANITIZED_PROVIDER\s*=\s*'anthropic'/);
     assert.doesNotMatch(child, /pi-anthropic-sps/);
