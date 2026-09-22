@@ -128,6 +128,97 @@ const CLAUDE_CODE_MODEL_POLICIES = Object.freeze({
     'claude-sonnet-4-6': claudeCode200KSubscriptionPolicy('claude-sonnet-4-6', CLAUDE_CODE_ADAPTIVE_200K_BETA, 'adaptive-effort'),
     'claude-sonnet-5': claudeCode200KSubscriptionPolicy('claude-sonnet-5', CLAUDE_CODE_ADAPTIVE_200K_BETA, 'adaptive-effort'),
 });
+function transcriptError(message) {
+    return new Error(`pi_anthropic_attribution_transcript_unsupported: ${message}`);
+}
+function isPiTool(value) {
+    return (isPlainObject(value) &&
+        typeof value['name'] === 'string' &&
+        value['name'].length > 0 &&
+        (value['description'] === undefined || typeof value['description'] === 'string') &&
+        (value['parameters'] === undefined || isPlainObject(value['parameters'])));
+}
+/** Resolve optional 0.86 APIs at the host gateway, never from the lazy core. */
+export function resolveHostTranscriptHelpers(host) {
+    const prompt = Reflect.get(host, 'getCurrentSystemPrompt');
+    const tools = Reflect.get(host, 'getCurrentTools');
+    // Older hosts legitimately have neither helper and still supply legacy Context.
+    if (prompt === undefined && tools === undefined)
+        return undefined;
+    if (typeof prompt !== 'function' || typeof tools !== 'function') {
+        throw transcriptError('Pi must supply both getCurrentSystemPrompt and getCurrentTools');
+    }
+    return {
+        getCurrentSystemPrompt(messages) {
+            const result = Reflect.apply(prompt, host, [messages]);
+            if (typeof result !== 'string')
+                throw transcriptError('Pi returned an invalid system prompt');
+            return result;
+        },
+        getCurrentTools(messages) {
+            const result = Reflect.apply(tools, host, [messages]);
+            if (!Array.isArray(result) || !result.every(isPiTool)) {
+                throw transcriptError('Pi returned invalid tool declarations');
+            }
+            return result;
+        },
+    };
+}
+function validateSystemMessage(message) {
+    if (typeof message.timestamp !== 'number' || !Number.isFinite(message.timestamp)) {
+        throw transcriptError('system message timestamp must be finite');
+    }
+    if (typeof message.content !== 'string' &&
+        (!Array.isArray(message.content) ||
+            !message.content.every((block) => isPlainObject(block) && block['type'] === 'text' && typeof block['text'] === 'string'))) {
+        throw transcriptError('system message content must be text');
+    }
+    if (message.sections !== undefined &&
+        (!isPlainObject(message.sections) ||
+            !Object.values(message.sections).every((value) => value === null || typeof value === 'string'))) {
+        throw transcriptError('system message sections must be strings or null');
+    }
+    if (message.toolsAdded !== undefined &&
+        (!Array.isArray(message.toolsAdded) || !message.toolsAdded.every(isPiTool))) {
+        throw transcriptError('system message toolsAdded must contain tool declarations');
+    }
+    if (message.toolsRemoved !== undefined &&
+        (!Array.isArray(message.toolsRemoved) ||
+            !message.toolsRemoved.every((tool) => isPlainObject(tool) && typeof tool['name'] === 'string' && tool['name'].length > 0))) {
+        throw transcriptError('system message toolsRemoved must contain tool names');
+    }
+}
+function resolveAnthropicTranscript(context, helpers) {
+    if (!context.messages.some((message) => message.role === 'system'))
+        return context;
+    if (helpers === undefined) {
+        throw transcriptError('system messages require gateway-injected Pi transcript helpers');
+    }
+    for (const message of context.messages) {
+        if (message.role === 'system')
+            validateSystemMessage(message);
+    }
+    // Match Pi's normalizeContext contract for legacy callers carrying both a base
+    // prompt/tool set and later transcript deltas. Empty explicit values stay empty.
+    const replay = context.systemPrompt !== undefined || context.tools !== undefined
+        ? [
+            {
+                role: 'system',
+                content: context.systemPrompt ?? '',
+                ...(context.tools === undefined ? {} : { toolsAdded: context.tools }),
+                timestamp: 0,
+            },
+            ...context.messages,
+        ]
+        : context.messages;
+    return {
+        systemPrompt: helpers.getCurrentSystemPrompt(replay),
+        tools: helpers.getCurrentTools(replay),
+        // Normalize before compaction detection, signature-epoch selection, and wire
+        // conversion so every lineage proof sees the same conversation-only sequence.
+        messages: context.messages.filter((message) => message.role !== 'system'),
+    };
+}
 class LocalAssistantMessageEventStream {
     queue = [];
     waiting = [];
@@ -1133,6 +1224,9 @@ function convertMessages(model, messages, conversationStaticSha256, cacheRetenti
             }
             continue;
         }
+        if (message.role !== 'toolResult') {
+            throw new Error(`Anthropic attribution encountered unsupported message role ${JSON.stringify(Reflect.get(message, 'role'))}`);
+        }
         const toolResults = [];
         let lookahead = index;
         while (lookahead < messages.length && messages[lookahead]?.role === 'toolResult') {
@@ -1211,8 +1305,8 @@ function conversationStaticHash(system, tools) {
         tools: tools.map(blockWithoutCacheControl),
     });
 }
-export function buildAnthropicRequestParams(model, context, options) {
-    return buildAnthropicRequest(model, context, options).params;
+export function buildAnthropicRequestParams(model, context, options, dependencies = {}) {
+    return buildAnthropicRequest(model, resolveAnthropicTranscript(context, dependencies.hostTranscriptHelpers), options).params;
 }
 function buildAnthropicRequest(model, context, options) {
     const policy = resolveClaudeCodeModelPolicy(model);
@@ -1804,13 +1898,14 @@ export function streamAnthropicViaBetaMessages(model, context, options, dependen
             const account = requireAttributionAccount(dependencies.loadAccount?.() ?? loadClaudeAttributionAccount(undefined, options?.env));
             const url = resolveAnthropicBetaMessagesUrl(model);
             const policy = resolveClaudeCodeModelPolicy(model);
-            const request = buildAnthropicRequest(model, context, options);
+            const requestContext = resolveAnthropicTranscript(context, dependencies.hostTranscriptHelpers);
+            const request = buildAnthropicRequest(model, requestContext, options);
             let params = request.params;
             const billingSystemText = buildClaudeCodeBillingSystemText(firstUserMessageTextFromPayload(params));
             const provisionalLineage = prepareAnthropicLineageDetails({
                 model,
                 policy,
-                context,
+                context: requestContext,
                 payload: params,
                 signatureEpoch: request.signatureEpoch,
             });
@@ -1855,7 +1950,7 @@ export function streamAnthropicViaBetaMessages(model, context, options, dependen
                 sessionId,
                 model,
                 policy,
-                context,
+                context: requestContext,
                 payload: params,
                 signatureEpoch: request.signatureEpoch,
             });

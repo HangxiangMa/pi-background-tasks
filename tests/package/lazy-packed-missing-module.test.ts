@@ -3,7 +3,8 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, it } from 'node:test';
 import {
@@ -151,6 +152,33 @@ void describe('packed lazy-module closure', { concurrency: false }, () => {
         `${hostPackage} must remain host-provided in the installed-package fixture`,
       );
     }
+
+    const hostPackage = process.env['PI_BG_TEST_HOST_PACKAGE'] ??
+      dirname(dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))));
+    const transcriptRoot = join(root, 'transcript-host');
+    await mkdir(transcriptRoot, { recursive: true });
+    const transcript = await execFileAsync(process.execPath, [
+      '--import', import.meta.resolve('tsx'),
+      join(packageRoot, 'tests/fixtures/packed-transcript-runtime.mjs'),
+      packedRoot, hostPackage, transcriptRoot,
+    ], {
+      cwd: packageRoot,
+      // An external deadline can terminate even a synchronous converter loop.
+      timeout: 60_000,
+      killSignal: 'SIGKILL',
+      maxBuffer: 1024 * 1024,
+      env: {
+        PATH: process.env['PATH'] ?? '',
+        ...(process.env['SystemRoot'] === undefined ? {} : { SystemRoot: process.env['SystemRoot'] }),
+        ...(process.env['ComSpec'] === undefined ? {} : { ComSpec: process.env['ComSpec'] }),
+        HOME: join(root, 'home'), USERPROFILE: join(root, 'home'),
+        TMPDIR: join(root, 'tmp'), TMP: join(root, 'tmp'), TEMP: join(root, 'tmp'),
+        PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0', CI: '1',
+        GIT_ALLOW_PROTOCOL: 'file',
+      },
+    });
+    assert.match(transcript.stdout, /packed transcript runtime PASS/u);
+    console.log(transcript.stdout.trim());
 
     const startupCwd = join(root, 'startup-project');
     const startupAgentDir = join(root, 'startup-agent');

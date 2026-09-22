@@ -100,6 +100,19 @@ Current smoke builds the runtime and then runs `tsx scripts/smoke.ts`. It create
 
 It performs no inference and spawns no child, so it is safe to run offline and costs nothing. It exits non-zero if any stage would exceed the budget.
 
+### Pi 0.86 transcript regressions
+
+`tests/unit/anthropic-role-progress.test.ts` owns a hard subprocess/SIGKILL deadline for unknown-role conversion, so a synchronous infinite loop cannot hang the test runner. `anthropic-transcript.test.ts` covers legacy-byte preservation, injected host replay, hybrid bases, missing/malformed helpers, malformed system state, tool-result grouping, and pre-network refusal. `anthropic-attribution-lineage.test.ts` covers a compaction summary behind a system checkpoint, signature non-inheritance, and subsequent valid chaining. `parent-transcript.test.ts` pins one effective-prompt capture, prompt-state filtering, sibling-leaf exclusion, and unchanged frozen-transform rejection behavior.
+
+The production-only packed test runs `tests/fixtures/packed-transcript-runtime.mjs` in a separately bounded process. It tests both real gateways, Anthropic prompt/section/tool replay and compaction, plus successful `bg_delegate` and `fusion_reason` launch → fake child → hash-verified `bg_result`. Only inference/child results are faked; the host loader, projection, registry, and artifacts are real. No Pi SDK/TypeBox is installed beside the tarball. It uses the locked development host by default; explicitly select an installed Pi 0.86 host without changing dependencies:
+
+```bash
+PI_BG_TEST_HOST_PACKAGE=/absolute/path/to/@earendil-works/pi-coding-agent \
+  node --import tsx --test tests/package/lazy-packed-missing-module.test.ts
+```
+
+Build `dist/` first and use the isolated environment below. The supplied package identity is checked; a missing/invalid host is an error, not an automatic fallback. This focused host witness is not full support-matrix certification and makes no network/model calls.
+
 ### Fusion byte-immutability gates
 
 Two unit gates protect Fusion's persisted artifact bytes, which are a frozen format:

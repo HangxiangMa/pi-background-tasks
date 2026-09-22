@@ -133,6 +133,14 @@ SDK/RPC/scripted-provider/package/compatibility coverage asserts exactly four to
 | Shared architecture/API/runtime/operations docs | `docs/api`, `docs/concepts`, `docs/subsystems`, `docs/reference`, `docs/operations` | docs focused |  |  |  |  |  |  | The active docs engine validates frontmatter, package-local links/reference links, INDEX reachability, exact behavioral source ownership, generated runtime contracts, deterministic generated regions, and manifest freshness. Semantic receipt state is reported by default and enforced only by the optional strict attestation command. Unsupported extraction and legacy placeholders fail closed. |
 | Package maintenance version/tag wording | `PUBLISHING.md`, `docs/operations/releasing.md` | docs focused |  |  |  |  |  |  | Release commands derive `VERSION` from `package.json`; observed git tags stop at `v0.6.0`, so git install/tag certification is separate from npm publishing and no nonexistent v1 tag is advertised. |
 
+## Pi 0.86 transcript regression acceptance
+
+- Target Anthropic requests replay effective prompt text, named section changes/removals, and current tool additions/removals/redefinitions through host-injected helpers in both packed ambient and child gateways.
+- Legacy Context bytes remain unchanged; hybrid legacy bases precede transcript deltas. Missing helpers or malformed system/helper state fail before middleware or fetch. Unknown message roles cannot loop or disappear (external subprocess deadline).
+- System checkpoints are removed before compaction/signature checks; compaction starts a non-inheriting epoch and subsequent valid turns chain without resurrecting old signatures.
+- Delegate and Fusion reason capture one effective prompt, exclude known system state and the active/sibling tool leaf from visible conversation, and retain the unchanged v2 ledger/golden contracts.
+- Production-only packed public launch → fake child → verified result succeeds against the locked host and an explicitly supplied installed Pi 0.86 host (`PI_BG_TEST_HOST_PACKAGE`), with no private Pi SDK/TypeBox or inference/network calls. This is a focused witness, not an expanded peer-range claim.
+
 ## Residual hardening coverage
 
 Lane A residual hardening is now covered by automated tests. No remaining hardening-only gaps are intentionally left open in this plan. Future feature work should add new rows instead of weakening these gates.

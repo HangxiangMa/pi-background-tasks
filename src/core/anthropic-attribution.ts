@@ -403,7 +403,17 @@ interface PiAssistantDiagnosticLike {
   readonly details?: JsonObject;
 }
 
+export interface PiSystemMessage {
+  readonly role: 'system';
+  readonly content: string | readonly { readonly type: 'text'; readonly text: string }[];
+  readonly sections?: Readonly<Record<string, string | null>>;
+  readonly toolsAdded?: readonly PiToolLike[];
+  readonly toolsRemoved?: readonly { readonly name: string }[];
+  readonly timestamp: number;
+}
+
 type PiMessage =
+  | PiSystemMessage
   | {
       readonly role: 'user';
       readonly content: string | readonly PiContentBlock[];
@@ -468,9 +478,129 @@ export interface PiSimpleStreamOptions {
 export type HostAnthropicMessagesApiFactory =
   typeof import('@earendil-works/pi-ai/compat').anthropicMessagesApi;
 
+export interface AnthropicTranscriptHelpers {
+  getCurrentSystemPrompt(messages: readonly { readonly role: string }[]): string;
+  getCurrentTools(messages: readonly { readonly role: string }[]): readonly PiToolLike[];
+}
+
 export interface AnthropicTransportDependencies {
   readonly loadAccount?: () => ClaudeAttributionAccount;
   readonly hostAnthropicMessagesApi?: HostAnthropicMessagesApiFactory;
+  readonly hostTranscriptHelpers?: AnthropicTranscriptHelpers | undefined;
+}
+
+function transcriptError(message: string): Error {
+  return new Error(`pi_anthropic_attribution_transcript_unsupported: ${message}`);
+}
+
+function isPiTool(value: unknown): value is PiToolLike {
+  return (
+    isPlainObject(value) &&
+    typeof value['name'] === 'string' &&
+    value['name'].length > 0 &&
+    (value['description'] === undefined || typeof value['description'] === 'string') &&
+    (value['parameters'] === undefined || isPlainObject(value['parameters']))
+  );
+}
+
+/** Resolve optional 0.86 APIs at the host gateway, never from the lazy core. */
+export function resolveHostTranscriptHelpers(host: object): AnthropicTranscriptHelpers | undefined {
+  const prompt: unknown = Reflect.get(host, 'getCurrentSystemPrompt');
+  const tools: unknown = Reflect.get(host, 'getCurrentTools');
+  // Older hosts legitimately have neither helper and still supply legacy Context.
+  if (prompt === undefined && tools === undefined) return undefined;
+  if (typeof prompt !== 'function' || typeof tools !== 'function') {
+    throw transcriptError('Pi must supply both getCurrentSystemPrompt and getCurrentTools');
+  }
+  return {
+    getCurrentSystemPrompt(messages) {
+      const result: unknown = Reflect.apply(prompt, host, [messages]);
+      if (typeof result !== 'string') throw transcriptError('Pi returned an invalid system prompt');
+      return result;
+    },
+    getCurrentTools(messages) {
+      const result: unknown = Reflect.apply(tools, host, [messages]);
+      if (!Array.isArray(result) || !result.every(isPiTool)) {
+        throw transcriptError('Pi returned invalid tool declarations');
+      }
+      return result;
+    },
+  };
+}
+
+function validateSystemMessage(message: PiSystemMessage): void {
+  if (typeof message.timestamp !== 'number' || !Number.isFinite(message.timestamp)) {
+    throw transcriptError('system message timestamp must be finite');
+  }
+  if (
+    typeof message.content !== 'string' &&
+    (!Array.isArray(message.content) ||
+      !message.content.every(
+        (block: unknown) =>
+          isPlainObject(block) && block['type'] === 'text' && typeof block['text'] === 'string',
+      ))
+  ) {
+    throw transcriptError('system message content must be text');
+  }
+  if (
+    message.sections !== undefined &&
+    (!isPlainObject(message.sections) ||
+      !Object.values(message.sections).every(
+        (value) => value === null || typeof value === 'string',
+      ))
+  ) {
+    throw transcriptError('system message sections must be strings or null');
+  }
+  if (
+    message.toolsAdded !== undefined &&
+    (!Array.isArray(message.toolsAdded) || !message.toolsAdded.every(isPiTool))
+  ) {
+    throw transcriptError('system message toolsAdded must contain tool declarations');
+  }
+  if (
+    message.toolsRemoved !== undefined &&
+    (!Array.isArray(message.toolsRemoved) ||
+      !message.toolsRemoved.every(
+        (tool: unknown) =>
+          isPlainObject(tool) && typeof tool['name'] === 'string' && tool['name'].length > 0,
+      ))
+  ) {
+    throw transcriptError('system message toolsRemoved must contain tool names');
+  }
+}
+
+function resolveAnthropicTranscript(
+  context: PiStreamContext,
+  helpers: AnthropicTranscriptHelpers | undefined,
+): PiStreamContext {
+  if (!context.messages.some((message) => message.role === 'system')) return context;
+  if (helpers === undefined) {
+    throw transcriptError('system messages require gateway-injected Pi transcript helpers');
+  }
+  for (const message of context.messages) {
+    if (message.role === 'system') validateSystemMessage(message);
+  }
+  // Match Pi's normalizeContext contract for legacy callers carrying both a base
+  // prompt/tool set and later transcript deltas. Empty explicit values stay empty.
+  const replay: readonly PiMessage[] =
+    context.systemPrompt !== undefined || context.tools !== undefined
+      ? [
+          {
+            role: 'system',
+            content: context.systemPrompt ?? '',
+            ...(context.tools === undefined ? {} : { toolsAdded: context.tools }),
+            timestamp: 0,
+          },
+          ...context.messages,
+        ]
+      : context.messages;
+  return {
+    systemPrompt: helpers.getCurrentSystemPrompt(replay),
+    tools: helpers.getCurrentTools(replay),
+    // Normalize before compaction detection, signature-epoch selection, and wire
+    // conversion so every lineage proof sees the same conversation-only sequence.
+    messages: context.messages.filter((message) => message.role !== 'system'),
+  };
 }
 
 export interface AssistantMessageLike {
@@ -1864,6 +1994,12 @@ function convertMessages(
       continue;
     }
 
+    if (message.role !== 'toolResult') {
+      throw new Error(
+        `Anthropic attribution encountered unsupported message role ${JSON.stringify(Reflect.get(message, 'role'))}`,
+      );
+    }
+
     const toolResults: JsonObject[] = [];
     let lookahead = index;
     while (lookahead < messages.length && messages[lookahead]?.role === 'toolResult') {
@@ -1965,8 +2101,11 @@ export function buildAnthropicRequestParams(
   model: PiModelLike,
   context: PiStreamContext,
   options?: PiSimpleStreamOptions,
+  dependencies: AnthropicTransportDependencies = {},
 ): JsonObject {
-  return buildAnthropicRequest(model, context, options).params;
+  return buildAnthropicRequest(
+    model, resolveAnthropicTranscript(context, dependencies.hostTranscriptHelpers), options,
+  ).params;
 }
 
 function buildAnthropicRequest(
@@ -2743,7 +2882,8 @@ export function streamAnthropicViaBetaMessages(
       );
       const url = resolveAnthropicBetaMessagesUrl(model);
       const policy = resolveClaudeCodeModelPolicy(model);
-      const request = buildAnthropicRequest(model, context, options);
+      const requestContext = resolveAnthropicTranscript(context, dependencies.hostTranscriptHelpers);
+      const request = buildAnthropicRequest(model, requestContext, options);
       let params = request.params;
       const billingSystemText = buildClaudeCodeBillingSystemText(
         firstUserMessageTextFromPayload(params),
@@ -2751,7 +2891,7 @@ export function streamAnthropicViaBetaMessages(
       const provisionalLineage = prepareAnthropicLineageDetails({
         model,
         policy,
-        context,
+        context: requestContext,
         payload: params,
         signatureEpoch: request.signatureEpoch,
       });
@@ -2799,7 +2939,7 @@ export function streamAnthropicViaBetaMessages(
         sessionId,
         model,
         policy,
-        context,
+        context: requestContext,
         payload: params,
         signatureEpoch: request.signatureEpoch,
       });

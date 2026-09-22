@@ -114,7 +114,7 @@ export function buildDelegateSeed(ctx, options) {
         capability: options.capability,
         extension_mode: options.extensionMode,
         route: options.route,
-        parent_system_prompt: ctx.getSystemPrompt(),
+        parent_system_prompt: snapshot.systemPrompt,
         parent_leaf_id: snapshot.leafId,
         directive,
         conversation_projection: sealed.projection,
