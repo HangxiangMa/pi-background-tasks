@@ -4,21 +4,24 @@ audience: user
 mode: mixed
 review_policy: contract
 stability: stable
-covers_surfaces: [command:bg-tasks]
+covers_surfaces: [command:bg-tasks, command:tasks]
 covers_sources: []
 ---
-# `/bg-tasks`
+# `/tasks` and `/bg-tasks`
 
 <!-- pi-docs:begin name="command-contract-tasks-bg-tasks" generator="scripts/docs/generate.mjs" -->
-| Command | Description | Provenance |
-| --- | --- | --- |
-| `/bg-tasks` | Open the background task manager UI | `src/extension.ts:554` |
+| Command | Availability | Default | Description | Provenance |
+| --- | --- | --- | --- | --- |
+| `/tasks` | `always` | yes | Open the Claude-like background task manager UI | `src/extension.ts:777` |
+| `/bg-tasks` | `always` | yes | Open the background task manager UI | `src/extension.ts:785` |
 <!-- pi-docs:end name="command-contract-tasks-bg-tasks" -->
 
-Open the interactive manager for durable background shell tasks. The `/tasks` command belongs to `pi-tasks` and manages the model task list; it is intentionally not registered here.
+Open the interactive background task manager. `/tasks` and `/bg-tasks` are aliases.
 
 ## Synopsis
 
+
+`/tasks [exact-task-id]`
 
 `/bg-tasks [exact-task-id]`
 
@@ -34,14 +37,14 @@ Use the task manager when you want the host UI: select tasks, inspect a live out
 
 ## Lifecycle
 
-The manager is an overlay dock. Opening it sets the footer hint to `focused` and temporarily hides the `/bg-clear` hint; closing returns the footer to the normal `Shift↓` hint. Opening a finished task's detail view marks that task seen. Merely opening the list or closing the dock does **not** clear other finished badges; use [`/bg-clear`](bg-clear.md) to clear them together.
+The manager is an overlay dock. Opening it sets the footer hint to `focused` and temporarily hides the `/bg-clear` hint; closing returns the footer to the configured `Shift↓`, `CtrlAltB`, or `/tasks` hint. `PI_BG_DOCK_SHORTCUT=off` disables only the key registration—both commands on this page continue to work. Opening a finished task's detail view marks that task seen. Merely opening the list or closing the dock does **not** clear other finished badges; use [`/bg-clear`](bg-clear.md) to clear them together.
 
 List view sorts tasks as running, failed, killed, then completed; within a status, newest terminal/start time appears first. Status labels shown in the UI are `running`, `error` for `failed`, `stopped` for `killed`, and `done` for `completed`.
 
 ## Examples
 
 ```text
-/bg-tasks
+/tasks
 /bg-tasks b1234
 ```
 
