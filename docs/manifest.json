@@ -909,7 +909,7 @@
     "image": "https://raw.githubusercontent.com/ismailsaleekh/pi-background-tasks/main/logo.png",
     "name": "pi-background-tasks",
     "type": "module",
-    "version": "2.6.3"
+    "version": "2.6.4"
   },
   "public_surface_ids": [
     "command:bg",
@@ -990,7 +990,7 @@
         "id": "command:claude-cache",
         "kind": "command",
         "name": "claude-cache",
-        "source": "src/core/anthropic-attribution.ts:3360"
+        "source": "src/core/anthropic-attribution.ts:3365"
       },
       {
         "availability": "feature:fusion",

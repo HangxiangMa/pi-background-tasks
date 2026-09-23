@@ -121,6 +121,7 @@ const CLAUDE_CODE_MODEL_POLICIES = Object.freeze({
     'claude-opus-4-7': claudeCode200KSubscriptionPolicy('claude-opus-4-7', CLAUDE_CODE_ADAPTIVE_200K_BETA, 'adaptive-effort'),
     'claude-opus-4-8': claudeCode200KSubscriptionPolicy('claude-opus-4-8', CLAUDE_CODE_ADAPTIVE_200K_BETA, 'adaptive-effort'),
     'claude-opus-5': claudeCode200KSubscriptionPolicy('claude-opus-5', CLAUDE_CODE_ADAPTIVE_200K_BETA, 'adaptive-effort'),
+    'claude-opus-5-5': claudeCode200KSubscriptionPolicy('claude-opus-5-5', CLAUDE_CODE_ADAPTIVE_200K_BETA, 'adaptive-effort'),
     'claude-sonnet-4-0': claudeCode200KSubscriptionPolicy('claude-sonnet-4-0', CLAUDE_CODE_BETA, 'fixed-budget'),
     'claude-sonnet-4-20250514': claudeCode200KSubscriptionPolicy('claude-sonnet-4-20250514', CLAUDE_CODE_BETA, 'fixed-budget'),
     'claude-sonnet-4-5': claudeCode200KSubscriptionPolicy('claude-sonnet-4-5', CLAUDE_CODE_BETA, 'fixed-budget'),
