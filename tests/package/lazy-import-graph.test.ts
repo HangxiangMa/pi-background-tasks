@@ -180,6 +180,11 @@ void describe('lazy facade runtime import graph', () => {
   });
 
   void it('keeps host-sensitive dynamic-import issuers on Pi alias-aware module paths', async () => {
+    assert.deepEqual(
+      [...await runtimeBareImports('src/core/anthropic-attribution.ts')],
+      [],
+      'the native lazy attribution core must receive host adapters/helpers by injection',
+    );
     const expectedHostImports = new Map<string, string>([
       ['extensions/anthropic-attribution.ts', '@earendil-works/pi-ai/compat'],
       ['src/extension.ts', '@earendil-works/pi-coding-agent'],

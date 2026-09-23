@@ -1,3 +1,4 @@
+import * as hostPiAi from '@earendil-works/pi-ai';
 import { anthropicMessagesApi } from '@earendil-works/pi-ai/compat';
 import { parseBackgroundTasksConfig } from '../src/core/config.js';
 const ANTHROPIC_PROVIDER = 'anthropic';
@@ -83,12 +84,16 @@ function restoreProviderInstallation(installation) {
 export default async function ambientAnthropicAttribution(pi) {
     const config = parseBackgroundTasksConfig();
     if (config.features.attribution) {
-        const { default: spawnAnthropicAttribution } = await import('../src/core/anthropic-attribution.js');
+        const { default: spawnAnthropicAttribution, resolveHostTranscriptHelpers } = await import('../src/core/anthropic-attribution.js');
+        const hostTranscriptHelpers = resolveHostTranscriptHelpers(hostPiAi);
         let installation;
         pi.on('session_start', (_event, context) => {
             const registry = context.modelRegistry;
             const before = captureProviderSnapshot(registry);
-            spawnAnthropicAttribution(pi, { hostAnthropicMessagesApi: anthropicMessagesApi });
+            spawnAnthropicAttribution(pi, {
+                hostAnthropicMessagesApi: anthropicMessagesApi,
+                hostTranscriptHelpers,
+            });
             installation = confirmProviderInstallation(registry, before) ?? installation;
         });
         pi.on('session_shutdown', () => {

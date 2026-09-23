@@ -3,6 +3,7 @@ import { describe, it, type TestContext } from 'node:test';
 import {
   streamAnthropicViaBetaMessages,
   type AssistantMessageLike,
+  type AnthropicTransportDependencies,
   type PiSimpleStreamOptions,
   type PiStreamContext,
 } from '../../src/core/anthropic-attribution.js';
@@ -73,7 +74,7 @@ function response(id: string, includeMessageStop = true): Response {
   );
 }
 
-function harness(t: TestContext) {
+function harness(t: TestContext, dependencies: AnthropicTransportDependencies = {}) {
   const payloads: JsonObject[] = [];
   t.mock.method(globalThis, 'fetch', async (_input: unknown, init: RequestInit) => {
     assert.equal(typeof init.body, 'string');
@@ -98,6 +99,7 @@ function harness(t: TestContext) {
           deviceId: 'd'.repeat(64),
           accountUuid: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
         }),
+        ...dependencies,
       },
     ).result();
   return { payloads, send };
@@ -447,6 +449,37 @@ void describe('Anthropic attribution lineage recovery (#14)', () => {
     const next = await send(continuation(retryContext, recovered));
     assert.equal(next.stopReason, 'stop', next.errorMessage);
     assert.equal(previousId(payloads[3]), recovered.responseId);
+  });
+
+  void it('detects compaction behind Pi 0.86 system state and never revives old signed blocks', async (t) => {
+    const { send, payloads } = harness(t, {
+      hostTranscriptHelpers: {
+        getCurrentSystemPrompt: () => initialContext.systemPrompt ?? '',
+        getCurrentTools: () => initialContext.tools ?? [],
+      },
+    });
+    const system = { role: 'system', content: 'Help with the task.', timestamp: 0 } as const;
+    const initial: PiStreamContext = { messages: [system, ...initialContext.messages] };
+    const first = await send(initial);
+    const compacted: PiStreamContext = {
+      messages: [system, {
+        role: 'user', content: 'The conversation history before this point was compacted into the following summary: summary',
+      }, { ...first, provider: model.provider, api: model.api, model: model.id }, { role: 'user', content: 'Continue' }],
+    };
+    const second = await send(compacted);
+    assert.equal(second.stopReason, 'stop', second.errorMessage);
+    assert.equal(previousId(payloads[1]), null);
+    assert.deepEqual(signedBlocks(payloads[1]), []);
+    assert.equal(lineage(second)['signature_epoch_inherits_prior'], false);
+    assert.match(String(lineage(second)['compaction_boundary_sha256']), /^[a-f0-9]{64}$/u);
+    const third = await send(continuation(compacted, second));
+    assert.equal(third.stopReason, 'stop', third.errorMessage);
+    assert.equal(previousId(payloads[2]), second.responseId);
+    assert.equal(lineage(third)['signature_epoch_sha256'], lineage(second)['signature_epoch_sha256']);
+    assert.equal(lineage(third)['compaction_boundary_sha256'], lineage(second)['compaction_boundary_sha256']);
+    const wire = JSON.stringify(payloads[2]);
+    assert.equal(wire.includes(`sig-${first.responseId}`), false);
+    assert.equal(wire.includes(`sig-${second.responseId}`), true);
   });
 
   void it('opens another epoch for history drift under a retained compaction marker', async (t) => {
