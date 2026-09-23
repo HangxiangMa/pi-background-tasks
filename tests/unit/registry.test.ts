@@ -1604,7 +1604,10 @@ setInterval(() => {}, 1000);
       'shell-function wrapper cannot intercept path-qualified pi commands',
     );
 
-    const h = await createHarness({ platform: 'linux' });
+    const h = await createHarness({
+      platform: 'linux',
+      env: { ...process.env, SHELL: '/bin/bash' },
+    });
     try {
       const scriptLikePi = await h.registry.startTask(h.ctx, 'pi -p hello', {
         name: 'Plain Pi Script',
@@ -3113,7 +3116,10 @@ setInterval(() => {}, 1000);
   });
 
   void it('renders wrapped Pi-agent activity transcripts and keeps telemetry out of the output file', async () => {
-    const h = await createHarness({ platform: 'linux' });
+    const h = await createHarness({
+      platform: 'linux',
+      env: { ...process.env, SHELL: '/bin/bash' },
+    });
     try {
       const task = await h.registry.startTask(h.ctx, 'pi -p hello', {
         name: 'Wrapped Agent',
