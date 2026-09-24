@@ -8,11 +8,8 @@ const STATUS_INTERVAL_MS = 1000;
 // gives thousands of lines of scrollback when the user pauses the live tail.
 const DETAIL_TAIL_BYTES = 128 * 1024;
 const LIST_VISIBLE_ROWS = 14;
-const DETAIL_VISIBLE_OUTPUT_LINES = 12;
-const LIGHT_BLUE_BG = '\x1b[48;2;183;223;255m';
-const LIGHT_BLUE_FG = '\x1b[38;2;11;70;110m';
-const LIGHT_BLUE_BORDER = '\x1b[38;2;83;160;215m';
-const ANSI_RESET = '\x1b[0m';
+// Keep detail content compact enough for bottom overlays while retaining scrollback.
+const DETAIL_VISIBLE_OUTPUT_LINES = 6;
 function formatTime(timestamp) {
     return new Date(timestamp).toLocaleTimeString();
 }
@@ -38,11 +35,11 @@ function toOutputLines(content) {
 function padAnsi(value, width) {
     return value + ' '.repeat(Math.max(0, width - visibleWidth(value)));
 }
-function lightBlue(value) {
-    return `${LIGHT_BLUE_BG}${LIGHT_BLUE_FG}${value}${ANSI_RESET}`;
+function lightBlue(theme, value) {
+    return theme.bg('selectedBg', theme.fg('text', value));
 }
-function blueBorder(value) {
-    return `${LIGHT_BLUE_BORDER}${value}${ANSI_RESET}`;
+function blueBorder(theme, value) {
+    return theme.fg('borderAccent', value);
 }
 function statusLabel(status) {
     if (status === 'completed')
@@ -227,7 +224,9 @@ export class BackgroundTasksManager {
         this.handleListInput(data);
     }
     render(width) {
-        const boxWidth = Math.max(2, Math.min(width, 118));
+        // Overlay supplies its actual viewport width. Do not clamp to a smaller
+        // constant: that leaves an unpainted strip inside the overlay on wide terminals.
+        const boxWidth = Math.max(2, width);
         return this.mode === 'detail' ? this.renderDetail(boxWidth) : this.renderList(boxWidth);
     }
     close() {
@@ -512,13 +511,13 @@ export class BackgroundTasksManager {
     }
     frame(title, subtitle, body, footer, width) {
         const inner = Math.max(1, width - 2);
-        const top = blueBorder(`╭${'─'.repeat(inner)}╮`);
-        const bottom = blueBorder(`╰${'─'.repeat(inner)}╯`);
-        const row = (content = '') => `${blueBorder('│')}${padAnsi(truncateToWidth(content, inner), inner)}${blueBorder('│')}`;
-        const header = lightBlue(padAnsi(` ${title}`, inner));
+        const top = blueBorder(this.theme, `╭${'─'.repeat(inner)}╮`);
+        const bottom = blueBorder(this.theme, `╰${'─'.repeat(inner)}╯`);
+        const row = (content = '') => `${blueBorder(this.theme, '│')}${padAnsi(truncateToWidth(content, inner), inner)}${blueBorder(this.theme, '│')}`;
+        const header = lightBlue(this.theme, padAnsi(` ${title}`, inner));
         const subtitleLine = subtitle
-            ? lightBlue(padAnsi(` ${subtitle}`, inner))
-            : lightBlue(' '.repeat(inner));
+            ? lightBlue(this.theme, padAnsi(` ${subtitle}`, inner))
+            : lightBlue(this.theme, ' '.repeat(inner));
         const lines = [top, row(header), row(subtitleLine), row()];
         for (const line of body)
             lines.push(row(line));
@@ -598,7 +597,7 @@ export class BackgroundTasksManager {
                 const exit = task.status !== 'running' ? this.theme.fg('dim', formatExitCodeText(task.exitCode)) : '';
                 let row = ` ${pointer} ${unreadMark} ${name} ${this.theme.fg('dim', task.id)} ${this.theme.fg('dim', '·')} ${status}${exit} ${this.theme.fg('dim', `${runtime} ${size}`)}${contextText}${modelText}${tokenText}${toolText}${activityText}`;
                 if (selected)
-                    row = lightBlue(padAnsi(truncateToWidth(row, width - 4), width - 4));
+                    row = lightBlue(this.theme, padAnsi(truncateToWidth(row, width - 4), width - 4));
                 body.push(row);
             }
             if (tasks.length > LIST_VISIBLE_ROWS) {
@@ -651,9 +650,9 @@ export class BackgroundTasksManager {
     }
     renderOutputBox(width) {
         const inner = Math.max(1, width - 2);
-        const top = ` ${blueBorder(`╭${'─'.repeat(inner)}╮`)}`;
-        const bottom = ` ${blueBorder(`╰${'─'.repeat(inner)}╯`)}`;
-        const row = (content = '') => ` ${blueBorder('│')}${padAnsi(truncateToWidth(content, inner), inner)}${blueBorder('│')}`;
+        const top = ` ${blueBorder(this.theme, `╭${'─'.repeat(inner)}╮`)}`;
+        const bottom = ` ${blueBorder(this.theme, `╰${'─'.repeat(inner)}╯`)}`;
+        const row = (content = '') => ` ${blueBorder(this.theme, '│')}${padAnsi(truncateToWidth(content, inner), inner)}${blueBorder(this.theme, '│')}`;
         const lines = [top];
         if (this.tailError) {
             lines.push(row(this.theme.fg('error', this.tailError)));

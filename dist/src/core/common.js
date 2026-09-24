@@ -629,6 +629,8 @@ export function snapshot(task) {
         exitCode: task.exitCode,
         signal: task.signal,
         pid: task.pid,
+        ownerPid: task.ownerPid,
+        ownerStartIdentity: task.ownerStartIdentity,
         bytesWritten: task.bytesWritten,
         isAgent: task.isAgent,
         surviveReload: task.surviveReload === true,

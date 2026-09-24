@@ -3,9 +3,9 @@ import { appendFileSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 export const CLAUDE_CODE_SESSION_HEADER = 'X-Claude-Code-Session-Id';
-const CLAUDE_CODE_VERSION = '2.1.251';
+const CLAUDE_CODE_VERSION = '2.1.280';
 const CLAUDE_CODE_ENTRYPOINT = 'sdk-cli';
-const CLAUDE_CODE_USER_AGENT = 'claude-cli/2.1.251 (external, sdk-cli)';
+const CLAUDE_CODE_USER_AGENT = 'claude-cli/2.1.280 (external, sdk-cli)';
 export const ANTHROPIC_1M_CONTEXT_BETA = 'context-1m-2025-08-07';
 export const CLAUDE_CODE_200K_SUBSCRIPTION_CONTEXT_WINDOW = 200_000;
 const CLAUDE_CODE_LEGACY_BETA_VALUES = [
@@ -121,6 +121,7 @@ const CLAUDE_CODE_MODEL_POLICIES = Object.freeze({
     'claude-opus-4-7': claudeCode200KSubscriptionPolicy('claude-opus-4-7', CLAUDE_CODE_ADAPTIVE_200K_BETA, 'adaptive-effort'),
     'claude-opus-4-8': claudeCode200KSubscriptionPolicy('claude-opus-4-8', CLAUDE_CODE_ADAPTIVE_200K_BETA, 'adaptive-effort'),
     'claude-opus-5': claudeCode200KSubscriptionPolicy('claude-opus-5', CLAUDE_CODE_ADAPTIVE_200K_BETA, 'adaptive-effort'),
+    'claude-opus-5-5': claudeCode200KSubscriptionPolicy('claude-opus-5-5', CLAUDE_CODE_ADAPTIVE_200K_BETA, 'adaptive-effort'),
     'claude-sonnet-4-0': claudeCode200KSubscriptionPolicy('claude-sonnet-4-0', CLAUDE_CODE_BETA, 'fixed-budget'),
     'claude-sonnet-4-20250514': claudeCode200KSubscriptionPolicy('claude-sonnet-4-20250514', CLAUDE_CODE_BETA, 'fixed-budget'),
     'claude-sonnet-4-5': claudeCode200KSubscriptionPolicy('claude-sonnet-4-5', CLAUDE_CODE_BETA, 'fixed-budget'),
