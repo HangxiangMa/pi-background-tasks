@@ -218,6 +218,7 @@ void describe('packed lazy-module closure', { concurrency: false }, () => {
         },
       },
     );
+    assert.match(transcript.stdout, /packed shell guidance PASS/u);
     assert.match(transcript.stdout, /packed transcript runtime PASS/u);
     console.log(transcript.stdout.trim());
 

@@ -149,6 +149,13 @@ SDK/RPC/scripted-provider/package/compatibility coverage asserts exactly four to
 - Packed ambient and child gateways plus the host `ModelRegistry.streamSimple` route successfully handle anonymous/retried requests without package-local Pi SDK copies.
 - A simulated host shim with no `anthropicMessagesApi` can link/activate the packed ambient gateway with attribution disabled and does not load the transport. Enabled ambient and mandatory child activation refuse missing/malformed capabilities before registrations; malformed factory results fail on forwarding. Native OMP qualification remains separate.
 
+## Shell prompt-shape acceptance (#35 follow-up)
+
+- Missing/null `systemPromptOptions` is valid for string/array prompt hosts; the hook cannot crash merely by reading `.sections`.
+- Ordered string arrays remain arrays: preserve all peer elements/bytes, empty elements, and order; never comma-join, stringify, mutate the input, or combine marker fragments across elements. Update a complete existing package block within its element or append one dedicated element; repeated invocation is idempotent.
+- Pi string/structured-section/forced-prompt behavior and other extensions' guidance remain intact in either hook order. Malformed prompt values (including sparse arrays) and malformed structured fields fail loudly before prompt mutation.
+- The packed public entrypoint's registered hook is exercised with OMP-shaped events in full/process-only configurations without UI, plus legacy string and modern Pi-section controls. Existing real SDK feature/shell union proves prompting, reload, and actual spawn agreement. Native OMP/Windows retest remains separate.
+
 ## Residual hardening coverage
 
 Lane A residual hardening is now covered by automated tests. No remaining hardening-only gaps are intentionally left open in this plan. Future feature work should add new rows instead of weakening these gates.

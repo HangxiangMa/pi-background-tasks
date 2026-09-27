@@ -119,6 +119,10 @@ Build `dist/` first and use the isolated environment below. The supplied package
 
 The production-only packed transcript fixture additionally drives one-off/retried calls through both real gateways and the host's `ModelRegistry.streamSimple` API (the public `ModelRuntime.streamSimple` path on legacy hosts, with explicit version assertions). The packed `attribution-host-capabilities.mjs` fixture links actual compiled entrypoints against missing/malformed compat exports: disabled ambient attribution must load without importing its transport; enabled ambient and mandatory child activation must refuse without publishing registrations. Supported controls preserve foreign-provider argument/stream identity. This simulated ESM shim reproduces #35's linking failure but is not native OMP/Windows qualification. Run via `tests/package/lazy-packed-missing-module.test.ts` after building `dist/`, using the explicit installed-host seam and isolation above. No real inference or credentials are used.
 
+### Shell prompt-shape regression (#35 follow-up)
+
+`tests/unit/shell-policy-prompt.test.ts` reproduces OMP 18.3.0's `before_agent_start` shape (no `systemPromptOptions`, `systemPrompt:string[]`) and covers missing/null/legacy options, exact string preservation, empty/frozen arrays, Unicode/commas/line endings, existing embedded blocks, split/unmatched markers, both peer-hook orders, idempotent replacement, structured/forced Pi prompts, and loud malformed-input refusal. The packed transcript fixture invokes the hook **registered by the actual compiled public entrypoint** with OMP-shaped and Pi-shaped events in process-only and full-capability activations, with a UI access trap. It asserts preserved prompt content and repeat behavior, not just successful startup. Existing SDK feature/shell-union tests still drive real Pi prompting, reload, and spawn using the same activation policy. The OMP-shaped fixture is a host-contract witness, not native OMP/Windows certification.
+
 ### Fusion byte-immutability gates
 
 Two unit gates protect Fusion's persisted artifact bytes, which are a frozen format:
