@@ -87,12 +87,21 @@ if (transcriptHost) {
 }
 
 let responseNumber = 0;
+let failConnections = 0;
 const requests = [];
+const wireRequests = [];
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (_input, init) => {
   assert.equal(String(_input), 'https://api.anthropic.com/v1/messages?beta=true');
   const payload = JSON.parse(String(init?.body));
   requests.push(payload);
+  wireRequests.push({ body: String(init.body), headers: [...new Headers(init.headers)] });
+  if (failConnections > 0) {
+    failConnections -= 1;
+    throw new TypeError('fetch failed', {
+      cause: Object.assign(new Error('fixture socket closed'), { code: 'UND_ERR_SOCKET' }),
+    });
+  }
   responseNumber += 1;
   const events = [
     { type: 'message_start', message: { id: `msg_${responseNumber}`, usage: { input_tokens: 1 } } },
@@ -164,10 +173,102 @@ const loader = new sdk.DefaultResourceLoader({
   noContextFiles: true,
   noThemes: true,
 });
+// #35 follow-up: exercise the handler registered by the packed public root, not
+// a direct import of a private chunk. OMP 18.3.0 passes systemPrompt:string[] and
+// no systemPromptOptions (extensions/runner.ts:1806 at tag v18.3.0). This models
+// that event contract only; it is not native OMP/Windows execution evidence.
+async function checkPackedShellGuidance(loaded) {
+  assert.deepEqual(loaded.errors, []);
+  const background = loaded.extensions.find((extension) => extension.tools.has('bg_status'));
+  assert.ok(background, 'background public tool registration must remain intact');
+  const hooks = background.handlers.get('before_agent_start');
+  assert.equal(hooks?.length, 1);
+  const handler = hooks[0];
+  let expectedBlock;
+  for (const mode of ['print', 'tui']) {
+    const noUiContext = {
+      mode,
+      get ui() {
+        throw new Error('prompt guidance must not access UI');
+      },
+    };
+    const prompt = Object.freeze(['HOST_BASE, literal comma\r\nΩ', '', 'PEER_SECTION\n']);
+    const event = {
+      type: 'before_agent_start',
+      prompt: 'hello',
+      images: undefined,
+      systemPrompt: prompt,
+    };
+    const result = await handler(event, noUiContext);
+    assert.ok(Array.isArray(result.systemPrompt));
+    assert.deepEqual(result.systemPrompt.slice(0, -1), [...prompt]);
+    const block = result.systemPrompt.at(-1);
+    assert.match(block, /^<pi_background_shell_policy>\n/u);
+    assert.match(block, /activation shell policy/u);
+    assert.match(block, /<\/pi_background_shell_policy>$/u);
+    expectedBlock ??= block;
+    assert.equal(block, expectedBlock);
+    const second = await handler({ ...event, systemPrompt: result.systemPrompt }, noUiContext);
+    assert.deepEqual(second, result);
+    assert.deepEqual(prompt, ['HOST_BASE, literal comma\r\nΩ', '', 'PEER_SECTION\n']);
+    const peerAfter = [...result.systemPrompt, 'LATER_EXTENSION'];
+    assert.deepEqual(
+      (await handler({ ...event, systemPrompt: peerAfter }, noUiContext)).systemPrompt,
+      peerAfter,
+    );
+  }
+  const stringResult = await handler({ systemPrompt: 'LEGACY_BASE' }, {});
+  assert.equal(stringResult.systemPrompt, `LEGACY_BASE\n\n${expectedBlock}`);
+  const options = { sections: { peer: 'MODERN_PEER' }, forceSystemPrompt: 'FORCED_BASE' };
+  assert.equal(
+    await handler({ systemPrompt: 'RENDERED', systemPromptOptions: options }, {}),
+    undefined,
+  );
+  assert.equal(options.sections.peer, 'MODERN_PEER');
+  assert.equal(options.forceSystemPrompt, `FORCED_BASE\n\n${expectedBlock}`);
+  assert.equal(
+    `<pi_background_shell_policy>\n${options.sections.pi_background_shell_policy}\n</pi_background_shell_policy>`,
+    expectedBlock,
+  );
+}
 let session;
 try {
   await loader.reload();
   assert.deepEqual(loader.getExtensions().errors, []);
+  await checkPackedShellGuidance(loader.getExtensions());
+  const priorFeatures = process.env.PI_BG_FEATURES;
+  let processLoader;
+  try {
+    process.env.PI_BG_FEATURES = 'process';
+    processLoader = new sdk.DefaultResourceLoader({
+      cwd,
+      agentDir,
+      settingsManager: sdk.SettingsManager.inMemory(),
+      additionalExtensionPaths: [
+        join(packedRoot, 'dist/extensions/anthropic-attribution.js'),
+        join(packedRoot, 'dist/extensions/background-tasks.js'),
+      ],
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noContextFiles: true,
+      noThemes: true,
+    });
+    await processLoader.reload();
+    await checkPackedShellGuidance(processLoader.getExtensions());
+    assert.equal(
+      processLoader
+        .getExtensions()
+        .extensions.some((extension) => extension.tools.has('bg_delegate')),
+      false,
+    );
+  } finally {
+    processLoader?.getExtensions().runtime.invalidate('process-only prompt fixture finished');
+    process.env.PI_BG_FEATURES = priorFeatures;
+  }
+  console.log(
+    'packed shell guidance PASS: full/process; legacy string + OMP array + Pi sections; no UI dependency',
+  );
   const modelRuntime = await sdk.ModelRuntime.create({
     authPath: join(agentDir, 'auth.json'),
     modelsPath: null,
@@ -235,6 +336,64 @@ try {
     .runtime.pendingProviderRegistrations.find((r) => r.name === 'anthropic')?.config.streamSimple;
   assert.equal(typeof childTransport, 'function');
   await send(childTransport, context, 'packed-child-transcript');
+  checkPayload(requests.at(-1));
+
+  // #33/#34 and #32 through both actual packed gateways: the one-off identity
+  // and protected wire bytes survive a connection retry without private SDK peers.
+  const oneOffIds = [];
+  for (const transport of [ambient, childTransport]) {
+    const start = wireRequests.length;
+    failConnections = 1;
+    const result = await send(transport, context, undefined);
+    assert.equal(wireRequests.length, start + 2);
+    assert.deepEqual(wireRequests[start], wireRequests[start + 1]);
+    const header = new Headers(wireRequests[start].headers).get('X-Claude-Code-Session-Id');
+    assert.match(header, /^[a-f\d]{8}-[a-f\d]{4}-4[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/u);
+    assert.equal(JSON.parse(requests.at(-1).metadata.user_id).session_id, header);
+    oneOffIds.push(header);
+    assert.equal(
+      result.diagnostics.find((d) => d.type === 'anthropic-connection-retry').details
+        .retries_scheduled,
+      1,
+    );
+    checkPayload(requests.at(-1));
+  }
+  assert.notEqual(oneOffIds[0], oneOffIds[1]);
+
+  // Reproduce the extension-owned modelRegistry.streamSimple call, not just the
+  // transport function. Legacy hosts expose the same operation on ModelRuntime.
+  // Do not let a missing modern facade silently hide a future host regression.
+  const registryHasSimple = typeof registry.streamSimple === 'function';
+  if (!registryHasSimple) assert.match(manifest.version, /^0\.8[1-6]\./u);
+  const sideCaller = registryHasSimple ? registry : modelRuntime;
+  assert.equal(typeof sideCaller.streamSimple, 'function');
+  await modelRuntime.setRuntimeApiKey('anthropic', 'sk-ant-oat-offline');
+  let sidePayloads = 0;
+  let sideResponses = 0;
+  const startSide = wireRequests.length;
+  failConnections = 1;
+  const side = await sideCaller
+    .streamSimple(target, context, {
+      reasoning: 'low',
+      cacheRetention: 'none',
+      maxRetries: 1,
+      onPayload: () => {
+        sidePayloads += 1;
+      },
+      onResponse: () => {
+        sideResponses += 1;
+      },
+    })
+    .result();
+  assert.equal(side.stopReason, 'stop', side.errorMessage);
+  assert.equal(
+    side.diagnostics.find((d) => d.type === 'anthropic-connection-retry').details.retries_scheduled,
+    1,
+  );
+  assert.equal(sidePayloads, 1);
+  assert.equal(sideResponses, 1);
+  assert.equal(wireRequests.length, startSide + 2);
+  assert.deepEqual(wireRequests[startSide], wireRequests[startSide + 1]);
   checkPayload(requests.at(-1));
 
   // The compaction marker must be found after the leading system checkpoint.
@@ -422,7 +581,7 @@ else {
   );
   assert.equal((await readFile(fake.logPath, 'utf8')).trim().split('\n').length, 10);
   console.log(
-    `packed transcript runtime PASS: Pi ${manifest.version}; ${transcriptHost ? 'system replay' : 'legacy context'}; ambient + child Anthropic; delegate + fusion verified results before/after real compaction`,
+    `packed transcript runtime PASS: Pi ${manifest.version}; ${transcriptHost ? 'system replay' : 'legacy context'}; ambient + child Anthropic + ${registryHasSimple ? 'ModelRegistry' : 'legacy ModelRuntime'} one-offs/retries; delegate + fusion verified results before/after real compaction`,
   );
 } finally {
   globalThis.fetch = originalFetch;
