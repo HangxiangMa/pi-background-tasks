@@ -125,7 +125,7 @@ export function resolveFusionChildExtensionPath(moduleUrl = import.meta.url, pat
 }
 /**
  * Provider whose isolated children require the package-owned attribution and
- * exact-match system-prompt sanitization extension.
+ * SPS-derived line-start system-prompt sanitization extension.
  */
 export const FUSION_SANITIZED_PROVIDER = 'anthropic';
 export function assertFusionToolPolicyDisjoint(allowlist = FUSION_INSPECT_TOOLS, denylist = FUSION_FORBIDDEN_TOOLS) {

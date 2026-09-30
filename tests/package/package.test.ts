@@ -1018,7 +1018,14 @@ void describe('package', () => {
     assert.match(attribution, /prompt-caching-scope-2026-01-05/);
     assert.match(attribution, /cacheWrite1h/);
     assert.match(attribution, /CLAUDE_CODE_200K_SUBSCRIPTION_CONTEXT_WINDOW/);
-    assert.match(attribution, /environment variables \(docs\/environment-variables\.md\)/);
+    assert.match(
+      attribution,
+      /'- When asked about: extensions \(docs\/extensions\.md, examples\/extensions\/\)',/,
+    );
+    assert.match(
+      attribution,
+      /'- When working on pi topics, read the docs and examples, and follow \.md cross-references before implementing',/,
+    );
     assert.match(attribution, /ANTHROPIC_ATTRIBUTION_CLAIM_CHANNEL/);
 
     const [compiledCore, compiledAmbientGateway, compiledChildGateway] = await Promise.all([
