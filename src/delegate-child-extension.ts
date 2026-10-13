@@ -64,6 +64,8 @@ interface GuardState {
   artifactDirAbs: string;
   turns: number;
   toolCalls: number;
+  toolFailures: number;
+  toolUsageByName: Record<string, number>;
   totalToolOutputBytes: number;
   spilled: DelegateSpillReceipt[];
   attestations: DelegateRouteAttestation[];
@@ -139,6 +141,33 @@ function suppressedMessages<TMessage extends object>(
 
 function utf8(value: string): Buffer {
   return Buffer.from(value, 'utf8');
+}
+
+/** Short, one-line args preview for a tool start, mirroring the wrapped-agent summary. */
+function progressArgsSummary(input: Record<string, unknown>): string {
+  for (const key of ['path', 'file_path', 'pattern', 'query', 'name']) {
+    const value = input[key];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim().slice(0, 200);
+    }
+  }
+  return '';
+}
+
+/**
+ * Live progress for the parent dock.
+ *
+ * Print mode takes over stdout for the final answer, so progress travels on
+ * stderr as the same `background-task-*` control lines the registry already
+ * parses for telemetry-wrapped agents. Write failures are ignored: progress is
+ * advisory and must never change the delegate's result or commit path.
+ */
+function emitProgressLine(payload: Record<string, unknown>): void {
+  try {
+    process.stderr.write(`${JSON.stringify(payload)}\n`);
+  } catch {
+    // Progress is advisory; a closed stderr must not fail the delegate.
+  }
 }
 
 interface DelegateToolTextPart {
@@ -406,6 +435,8 @@ export default function delegateChildExtension(pi: ExtensionAPI): void {
     artifactDirAbs,
     turns: 0,
     toolCalls: 0,
+    toolFailures: 0,
+    toolUsageByName: {},
     totalToolOutputBytes: 0,
     spilled: [],
     attestations: [],
@@ -745,7 +776,7 @@ export default function delegateChildExtension(pi: ExtensionAPI): void {
     }
   });
 
-  pi.on('tool_call', (_event, ctx) => {
+  pi.on('tool_call', (event, ctx) => {
     if (state.finalizationRequested) {
       return {
         block: true,
@@ -753,6 +784,7 @@ export default function delegateChildExtension(pi: ExtensionAPI): void {
       };
     }
     state.toolCalls += 1;
+    emitToolStart(event.toolName, event.input);
     if (state.toolCalls > seed.limits.max_tool_calls) {
       latch(
         'child_tool_call_limit',
@@ -768,6 +800,7 @@ export default function delegateChildExtension(pi: ExtensionAPI): void {
   });
 
   pi.on('tool_result', (event) => {
+    emitToolEnd(event.toolName, event.isError, event.content);
     // Fail closed for the same reason as the context guard: a throw here would
     // let the ORIGINAL oversized payload flow into the transcript.
     try {
@@ -886,6 +919,79 @@ export default function delegateChildExtension(pi: ExtensionAPI): void {
     };
   }
 
+  function emitToolStart(toolName: string, input: Record<string, unknown>): void {
+    state.toolUsageByName[toolName] = (state.toolUsageByName[toolName] ?? 0) + 1;
+    const argsSummary = progressArgsSummary(input);
+    emitProgressLine({
+      type: 'background-task-activity',
+      kind: 'tool_start',
+      tool: toolName,
+      argsSummary,
+    });
+    emitToolUsage();
+  }
+
+  function emitToolEnd(
+    toolName: string,
+    isError: boolean,
+    content: ReadonlyArray<{ type: string; text?: string }>,
+  ): void {
+    if (!isError) return;
+    state.toolFailures += 1;
+    const text = content
+      .map((part) => (part.type === 'text' && typeof part.text === 'string' ? part.text : ''))
+      .join(' ')
+      .trim();
+    emitProgressLine({
+      type: 'background-task-activity',
+      kind: 'tool_end',
+      tool: toolName,
+      isError: true,
+      error: text.length > 0 ? text : undefined,
+    });
+    // Refresh the failed count now so the dock never lags the activity line.
+    emitToolUsage();
+  }
+
+  /** Publish the cumulative tool snapshot the registry folds into the dock row. */
+  function emitToolUsage(): void {
+    emitProgressLine({
+      type: 'background-task-telemetry',
+      toolUsage: {
+        total: state.toolCalls,
+        failed: state.toolFailures,
+        byName: state.toolUsageByName,
+      },
+    });
+  }
+
+  function emitTurnTelemetry(
+    model: string,
+    usage: Usage | undefined,
+  ): void {
+    const tokens = usage?.totalTokens;
+    const contextWindow = seed.route.context_window_tokens;
+    emitProgressLine({
+      type: 'background-task-telemetry',
+      model: model.length > 0 ? model : seed.route.qualified_id,
+      contextUsage:
+        tokens === undefined
+          ? undefined
+          : { tokens, contextWindow, percent: (tokens / contextWindow) * 100 },
+      tokenUsage:
+        usage === undefined
+          ? undefined
+          : {
+              input: usage.input,
+              output: usage.output,
+              cacheRead: usage.cacheRead,
+              cacheWrite: usage.cacheWrite,
+              totalTokens: usage.totalTokens,
+              costTotal: usage.cost.total,
+            },
+    });
+  }
+
   pi.on('turn_start', () => {
     state.turns += 1;
     if (state.turns > seed.limits.max_turns) {
@@ -931,6 +1037,7 @@ export default function delegateChildExtension(pi: ExtensionAPI): void {
       state.usage = addUsage(state.usage, observedUsage);
       if (!state.usageIncomplete) state.usageUnavailableReason = undefined;
     }
+    emitTurnTelemetry(attestation.model, observedUsage);
     const content: unknown = Reflect.get(event.message, 'content');
     if (!Array.isArray(content)) return;
     if (attestation.stop_reason !== 'stop') {

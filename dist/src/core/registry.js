@@ -1629,6 +1629,8 @@ export class BackgroundTaskRegistry {
             terminalPublishAttempts: 0,
             waiters: [],
         };
+        // Progress for the dock arrives on stderr; stdout stays the raw final answer.
+        task.progressOnStderr = true;
         this.assertTaskAdmissionOpen('a delegate task', admission);
         this.tasks.set(id, task);
         const stream = createWriteStream(outputAbsPath, { flags: 'a', encoding: 'utf8' });
@@ -2281,6 +2283,15 @@ export class BackgroundTaskRegistry {
                 this.writeToStream(task, buffer);
             return;
         }
+        if (task.progressOnStderr) {
+            // Delegate children keep stdout as the raw final answer. Their progress
+            // control lines arrive on stderr and are routed through the same parser.
+            if (source === 'stdout')
+                this.writeToStream(task, buffer);
+            else
+                this.processProgressStderr(task, buffer.toString('utf8'));
+            return;
+        }
         this.ingestTelemetry(task, buffer.toString('utf8'));
         this.writeToStream(task, buffer);
     }
@@ -2294,6 +2305,28 @@ export class BackgroundTaskRegistry {
         const latest = {};
         for (const line of buffered.slice(0, lastNewline).split('\n'))
             this.consumeAgentLine(task, line, latest);
+        this.commitTelemetry(task, latest);
+    }
+    /** Reassemble stderr progress lines for a delegate child; non-control text is kept verbatim. */
+    processProgressStderr(task, text) {
+        const buffered = `${task.progressStderrBuffer ?? ''}${text}`;
+        const lastNewline = buffered.lastIndexOf('\n');
+        task.progressStderrBuffer = lastNewline >= 0 ? buffered.slice(lastNewline + 1) : buffered;
+        if (lastNewline < 0)
+            return;
+        const latest = {};
+        for (const line of buffered.slice(0, lastNewline).split('\n'))
+            this.consumeAgentLine(task, line, latest);
+        this.commitTelemetry(task, latest);
+    }
+    /** Flush a trailing partial progress line on finalize so the last fragment is never lost. */
+    flushProgressStderr(task) {
+        const remainder = task.progressStderrBuffer;
+        if (!remainder)
+            return;
+        task.progressStderrBuffer = '';
+        const latest = {};
+        this.consumeAgentLine(task, remainder, latest);
         this.commitTelemetry(task, latest);
     }
     /** Flush a trailing partial wrapped-agent line on finalize so the last transcript fragment is never lost. */
@@ -3251,13 +3284,16 @@ export class BackgroundTaskRegistry {
         // turn's context snapshot and recreates the same false-completion race the
         // attested producer is required to prevent.
         try {
-            if (task.telemetryWrapped) {
+            if (task.telemetryWrapped || task.progressOnStderr) {
                 // Child-process close can be observed before the wrapper stdout listener has
                 // committed its last parsed telemetry batch. Wait for a short quiet window,
                 // then flush the trailing partial line, so completed status never races
                 // ahead of the final assistant-turn context/token/tool snapshot.
                 await new Promise((resolve) => setTimeout(resolve, 25));
-                this.flushAgentStdout(task);
+                if (task.telemetryWrapped)
+                    this.flushAgentStdout(task);
+                if (task.progressOnStderr)
+                    this.flushProgressStderr(task);
             }
             if (task.stream && !task.stream.destroyed)
                 await closeAndFsyncOutputStream(task.stream);

@@ -2181,6 +2181,87 @@ setInterval(() => {}, 1000);
     }
   });
 
+  void it('streams delegate progress from stderr while keeping stdout as the raw answer', async () => {
+    let childRef: FakeChild | undefined;
+    const h = await createHarness({
+      platform: 'linux',
+      childFactory: (pid) => {
+        childRef = Object.assign(new FakeChild(pid), {
+          stdin: {
+            once: () => undefined,
+            write: (_data: Buffer, callback: (error?: Error | null) => void) => {
+              callback();
+              return true;
+            },
+            end: () => undefined,
+          },
+        });
+        return childRef;
+      },
+    });
+    try {
+      await initCleanGit(h.cwd);
+      const request: StartDelegateTaskOptions = Object.assign(Object.create(null), {
+        name: 'delegate progress stream',
+        argv: [],
+        stdinBytes: Buffer.from('seed', 'utf8'),
+        env: {},
+        facts: {
+          taskId: 'delegate-progress-stream',
+          route: { qualifiedId: 'test/delegate-model' },
+        },
+        notifyOnCompletion: false,
+        triggerOnCompletion: false,
+      });
+      const task = await h.registry.startDelegateTask(h.ctx, request);
+      assert.equal(task.progressOnStderr, true);
+      assert.equal(task.telemetryWrapped, undefined);
+      const child = childRef;
+      assert.ok(child, 'delegate child must be spawned');
+
+      child.writeStderr(
+        `${JSON.stringify({
+          type: 'background-task-activity',
+          kind: 'tool_start',
+          tool: 'grep',
+          argsSummary: 'cam_csiphy',
+        })}\n`,
+      );
+      child.writeStderr(
+        `${JSON.stringify({
+          type: 'background-task-telemetry',
+          toolUsage: { total: 1, failed: 0, byName: { grep: 1 } },
+        })}\n`,
+      );
+      child.writeStderr('plain diagnostic line\n');
+      // Split a control line across chunks to prove the stderr buffer reassembles it.
+      const split = JSON.stringify({
+        type: 'background-task-activity',
+        kind: 'tool_end',
+        tool: 'read',
+        isError: true,
+        error: 'boom',
+      });
+      child.writeStderr(split.slice(0, 20));
+      child.writeStderr(`${split.slice(20)}\n`);
+      child.stdout.emit('data', Buffer.from('FINAL ANSWER\n', 'utf8'));
+      child.close(0, null);
+
+      await waitFor(() => task.status === 'completed', 'delegate task completes');
+      const output = await readFile(task.outputAbsPath, 'utf8');
+      assert.match(output, /→ grep cam_csiphy/u);
+      assert.match(output, /✗ read failed: boom/u);
+      assert.match(output, /plain diagnostic line/u);
+      assert.match(output, /FINAL ANSWER/u);
+      assert.doesNotMatch(output, /background-task-/u);
+      assert.equal(task.toolUsage?.total, 1);
+      assert.equal(task.toolUsage?.failed, 0);
+      assert.deepEqual(task.toolUsage?.byName, { grep: 1 });
+    } finally {
+      await cleanup(h.root);
+    }
+  });
+
   void it('applies the POSIX group barrier to direct attested finalization', async () => {
     let childRef: FakeChild | undefined;
     let groupAlive = true;

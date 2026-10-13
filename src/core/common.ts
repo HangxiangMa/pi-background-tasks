@@ -344,6 +344,13 @@ export interface BgTask extends Omit<BgTaskSnapshot, 'name'> {
   contextUsageBuffer?: string | undefined;
   /** True when this task launched a telemetry-wrapped Pi agent; its stdout carries control lines, not raw output. */
   telemetryWrapped?: boolean | undefined;
+  /**
+   * True for a delegate child: stdout is the raw final answer, while progress
+   * control lines arrive on stderr. Only stderr is parsed; no stdout is consumed.
+   */
+  progressOnStderr?: boolean | undefined;
+  /** Partial trailing stderr line held between chunks while reconstructing progress lines. */
+  progressStderrBuffer?: string | undefined;
   /** Partial trailing stdout line held between chunks while reconstructing wrapped-agent control lines. */
   agentStdoutBuffer?: string | undefined;
   telemetryUnavailableReason?: string | undefined;
