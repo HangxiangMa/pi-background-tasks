@@ -93,6 +93,8 @@ function emitProgressLine(payload) {
         // Progress is advisory; a closed stderr must not fail the delegate.
     }
 }
+/** Streaming deltas arrive per token; throttle heartbeats so stderr stays small. */
+const HEARTBEAT_THROTTLE_MS = 1000;
 function encodeToolResultContent(content) {
     if (content.length === 1) {
         const only = content[0];
@@ -718,8 +720,26 @@ export default function delegateChildExtension(pi) {
             content: [{ type: 'text', text: receiptText }],
         };
     }
+    let lastHeartbeatAt = 0;
+    /**
+     * Report the child's current phase and last-activity time on stderr. Phase-changing
+     * events (turn start, tool start/end, message end) always emit; streaming deltas are
+     * throttled. The registry folds this into memory only, so it never writes metadata.
+     */
+    function emitHeartbeat(phase, force) {
+        const now = Date.now();
+        if (!force && now - lastHeartbeatAt < HEARTBEAT_THROTTLE_MS)
+            return;
+        lastHeartbeatAt = now;
+        emitProgressLine({
+            type: 'background-task-heartbeat',
+            phase,
+            at: now,
+        });
+    }
     function emitToolStart(toolName, input) {
         state.toolUsageByName[toolName] = (state.toolUsageByName[toolName] ?? 0) + 1;
+        emitHeartbeat(`tool:${toolName}`, true);
         const argsSummary = progressArgsSummary(input);
         emitProgressLine({
             type: 'background-task-activity',
@@ -730,6 +750,8 @@ export default function delegateChildExtension(pi) {
         emitToolUsage();
     }
     function emitToolEnd(toolName, isError, content) {
+        // Record activity before the success early-return: a successful tool still counts as progress.
+        emitHeartbeat('thinking', true);
         if (!isError)
             return;
         state.toolFailures += 1;
@@ -780,14 +802,32 @@ export default function delegateChildExtension(pi) {
         });
     }
     pi.on('turn_start', () => {
+        emitHeartbeat('thinking', true);
         state.turns += 1;
         if (state.turns > seed.limits.max_turns) {
             latch('child_turn_limit', `delegate child exceeded its ${String(seed.limits.max_turns)} turn limit`);
         }
     });
+    // Streaming deltas keep the phase current during a long generation, when no
+    // tool or turn event fires. Throttled, so per-token deltas stay cheap.
+    pi.on('message_update', (event) => {
+        const delta = event.assistantMessageEvent;
+        if (delta.type === 'thinking_delta')
+            emitHeartbeat('thinking', false);
+        else if (delta.type === 'text_delta')
+            emitHeartbeat('writing', false);
+        else if (delta.type === 'toolcall_start') {
+            const block = delta.partial.content[delta.contentIndex];
+            const name = block && block.type === 'toolCall' ? block.name : 'tool';
+            emitHeartbeat(`tool:${name}`, false);
+        }
+        else if (delta.type === 'toolcall_delta')
+            emitHeartbeat('tool', false);
+    });
     pi.on('message_end', (event) => {
         if (event.message.role !== 'assistant')
             return;
+        emitHeartbeat('idle', true);
         const provider = Reflect.get(event.message, 'provider');
         const model = Reflect.get(event.message, 'model');
         const stopReason = Reflect.get(event.message, 'stopReason');

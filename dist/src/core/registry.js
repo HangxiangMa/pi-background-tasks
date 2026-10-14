@@ -2216,6 +2216,12 @@ export class BackgroundTaskRegistry {
             task.toolUsage = next.tools;
         if (next.model !== undefined)
             task.model = next.model;
+        if (next.heartbeat !== undefined) {
+            task.phase = next.heartbeat.phase;
+            task.lastActivityAt = next.heartbeat.at;
+            // Heartbeats refresh the dock row only; they never write metadata.
+            this.onChange();
+        }
         const after = JSON.stringify({
             contextUsage: task.contextUsage,
             tokenUsage: task.tokenUsage,
@@ -2366,6 +2372,13 @@ export class BackgroundTaskRegistry {
             const context = normalizeContextUsage(record);
             if (context)
                 latest.context = context;
+            return;
+        }
+        if (type === 'background-task-heartbeat') {
+            const phase = typeof record['phase'] === 'string' ? record['phase'] : undefined;
+            const at = typeof record['at'] === 'number' && Number.isFinite(record['at']) ? record['at'] : undefined;
+            if (phase !== undefined && at !== undefined)
+                latest.heartbeat = { phase, at };
             return;
         }
         if (type === 'background-task-telemetry') {

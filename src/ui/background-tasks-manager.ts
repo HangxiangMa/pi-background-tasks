@@ -133,6 +133,19 @@ function formatTokenDetail(task: BgTask): string {
   return parts.join(' · ');
 }
 
+/**
+ * Phase and seconds since the child's last reported activity. Only running delegate
+ * children carry a heartbeat; the age is computed here at render time, so the
+ * 1 s dock refresh keeps it current without extra events.
+ */
+export function formatHeartbeat(task: BgTask, now = Date.now()): string {
+  if (task.status !== 'running' || task.lastActivityAt === undefined || task.phase === undefined) {
+    return '';
+  }
+  const ageSeconds = Math.max(0, Math.floor((now - task.lastActivityAt) / 1000));
+  return `${task.phase} · ${String(ageSeconds)}s 前活动`;
+}
+
 function formatToolUsage(task: BgTask): string {
   const usage = task.toolUsage;
   if (!usage || (usage.total <= 0 && usage.failed <= 0)) return '';
@@ -663,9 +676,11 @@ export class BackgroundTasksManager implements Component {
         const toolText = toolUsage ? ` ${this.theme.fg('dim', toolUsage)}` : '';
         const activity = this.activityLabel(task);
         const activityText = activity ? ` ${this.theme.fg('warning', activity)}` : '';
+        const heartbeat = formatHeartbeat(task);
+        const heartbeatText = heartbeat ? ` ${this.theme.fg('dim', heartbeat)}` : '';
         const exit =
           task.status !== 'running' ? this.theme.fg('dim', formatExitCodeText(task.exitCode)) : '';
-        let row = ` ${pointer} ${unreadMark} ${name} ${this.theme.fg('dim', task.id)} ${this.theme.fg('dim', '·')} ${status}${exit} ${this.theme.fg('dim', `${runtime} ${size}`)}${contextText}${modelText}${tokenText}${toolText}${activityText}`;
+        let row = ` ${pointer} ${unreadMark} ${name} ${this.theme.fg('dim', task.id)} ${this.theme.fg('dim', '·')} ${status}${exit} ${this.theme.fg('dim', `${runtime} ${size}`)}${contextText}${modelText}${tokenText}${toolText}${heartbeatText}${activityText}`;
         if (selected)
           row = lightBlue(this.theme, padAnsi(truncateToWidth(row, width - 4), width - 4));
         body.push(row);

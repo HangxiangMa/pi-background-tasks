@@ -8,6 +8,7 @@ import { visibleWidth } from '@earendil-works/pi-tui';
 import {
   BackgroundTasksManager,
   type BackgroundTaskForUi,
+  formatHeartbeat,
 } from '../../src/ui/background-tasks-manager.js';
 import { stripAnsi } from '../helpers/normalize.js';
 
@@ -261,6 +262,28 @@ void describe('BackgroundTasksManager component', () => {
     } finally {
       h.instance.dispose();
     }
+  });
+
+  void it('shows a running delegate phase and seconds since its last activity, and nothing once finished', () => {
+    const now = 1_000_000;
+    const running = task({
+      status: 'running',
+      phase: 'tool:grep',
+      lastActivityAt: now - 7_500,
+    });
+    assert.equal(formatHeartbeat(running, now), 'tool:grep · 7s 前活动');
+    // The age is computed at render time, so a later render shows a larger number.
+    assert.equal(formatHeartbeat(running, now + 3_000), 'tool:grep · 10s 前活动');
+
+    const finished = task({
+      status: 'completed',
+      phase: 'idle',
+      lastActivityAt: now - 1_000,
+    });
+    assert.equal(formatHeartbeat(finished, now), '', 'a finished task shows no heartbeat');
+
+    const silent = task({ status: 'running' });
+    assert.equal(formatHeartbeat(silent, now), '', 'a running task with no heartbeat shows nothing');
   });
 
   void it('renders task-owned context, model, token, and tool telemetry in list/detail rows and placeholder when absent', async () => {

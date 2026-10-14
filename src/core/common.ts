@@ -247,6 +247,10 @@ export interface BgTaskSnapshot {
   tokenUsage?: TaskTokenUsage | undefined;
   toolUsage?: TaskToolUsage | undefined;
   model?: string | undefined;
+  /** Current phase reported by a delegate child: thinking, tool:<name>, or idle. */
+  phase?: string | undefined;
+  /** Epoch ms of the child's last reported activity; the dock derives the age at render time. */
+  lastActivityAt?: number | undefined;
   telemetryUnavailableReason?: string | undefined;
   /** Immutable non-secret shell selection for ordinary shell tasks. */
   shellPolicy?: ShellPolicySnapshot | undefined;

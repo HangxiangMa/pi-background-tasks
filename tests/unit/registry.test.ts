@@ -2262,6 +2262,64 @@ setInterval(() => {}, 1000);
     }
   });
 
+  void it('folds delegate heartbeats into memory without transcript or metadata writes', async () => {
+    let childRef: FakeChild | undefined;
+    const h = await createHarness({
+      platform: 'linux',
+      childFactory: (pid) => {
+        childRef = Object.assign(new FakeChild(pid), {
+          stdin: {
+            once: () => undefined,
+            write: (_data: Buffer, callback: (error?: Error | null) => void) => {
+              callback();
+              return true;
+            },
+            end: () => undefined,
+          },
+        });
+        return childRef;
+      },
+    });
+    try {
+      await initCleanGit(h.cwd);
+      const request: StartDelegateTaskOptions = Object.assign(Object.create(null), {
+        name: 'delegate heartbeat',
+        argv: [],
+        stdinBytes: Buffer.from('seed', 'utf8'),
+        env: {},
+        facts: {
+          taskId: 'delegate-heartbeat',
+          route: { qualifiedId: 'test/delegate-model' },
+        },
+        notifyOnCompletion: false,
+        triggerOnCompletion: false,
+      });
+      const task = await h.registry.startDelegateTask(h.ctx, request);
+      const child = childRef;
+      assert.ok(child, 'delegate child must be spawned');
+      assert.equal(task.phase, undefined, 'no phase before the first heartbeat');
+      assert.equal(task.lastActivityAt, undefined, 'no activity before the first heartbeat');
+
+      const before = Date.now();
+      child.writeStderr(
+        `${JSON.stringify({ type: 'background-task-heartbeat', phase: 'tool:grep', at: before })}\n`,
+      );
+      await waitFor(() => task.phase === 'tool:grep', 'heartbeat phase is folded into the task');
+      assert.equal(task.lastActivityAt, before, 'the heartbeat timestamp is recorded as given');
+
+      // A heartbeat must never leak into the transcript, even though the child is stderr-driven.
+      child.stdout.emit('data', Buffer.from('FINAL ANSWER\n', 'utf8'));
+      child.close(0, null);
+      await waitFor(() => task.status === 'completed', 'delegate task completes');
+      const output = await readFile(task.outputAbsPath, 'utf8');
+      assert.doesNotMatch(output, /background-task-heartbeat/u);
+      assert.doesNotMatch(output, /tool:grep/u);
+      assert.match(output, /FINAL ANSWER/u);
+    } finally {
+      await cleanup(h.root);
+    }
+  });
+
   void it('applies the POSIX group barrier to direct attested finalization', async () => {
     let childRef: FakeChild | undefined;
     let groupAlive = true;
