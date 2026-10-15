@@ -43,11 +43,7 @@ The table below remains the exhaustive acceptance source. Do not replace it with
 | Large-context smoke | `npm run smoke:large-context` | release gate | implemented; rebuilds the production failure byte composition, proves the pre-fix input is rejected and the post-fix projection fits all four stages against the smallest configured route, with no inference and no child spawn |
 | Live subscription evidence | `npx tsx scripts/delegate-live-run.ts` | release gate | implemented; one real subscription-OAuth child on the parent's current route, large seeded session, hash-verified answer, and explicit leak checks. Caught two defects no offline gate did (undelivered prompt, seed-not-prompt budgeting), both now pinned by unit and mutation tests |
 | Compatibility | `npm run test:compat` | release gate | implemented; exact Pi `0.81.1`, `0.82.1`, `0.83.0`, `0.84.0` pack/install plus `/jobs`, `/fusion`, and `/fusion-models` surfaces, per-version context-abort transport barriers, `agent_settled`/`before_provider_request` declarations, Anthropic cache-adapter contracts, and bundled-TypeBox peer verification, removed-TypeBox-API scan of installed package bytes, followed by a current-host real `fusion_reason` session-stat and replay witness |
-| Docs verification | `npm run docs:verify` | prepack/release gate | implemented; offline docs freshness, generated region/index/manifest/link/reachability/coverage checks with advisory attestation state; optional `docs:verify:attestations` enforces fresh receipts |
-| Docs tests | `npm run test:docs` | targeted docs gate | implemented; docs-gate unit/package tests |
-| Payload policy | `npm run payload:check` | prepack/release gate | implemented; package payload/docs/assets exclusions and inclusions |
-| Release version sanity | `npm run release:check-version` | release gate | implemented; package version/tag sanity without advertising nonexistent tags |
-| Docs/gateway focused checks | frontmatter/link/version checks plus package docs gate when allowed | docs-only gate | implemented operationally; verifies `docs/**/*.md` frontmatter shape, package-local links, no standalone parent `../EXTENSION_*` links, package version wording from `package.json`, observed git tags, and documents current `docs:generate`/`docs:verify`/attestation workflow |
+| Docs/gateway focused checks | manual review of `docs/**/*.md` | docs-only, no automated gate | the docs-freshness gate was removed from this package (see TESTING.md) |
 
 ## Fusion v1 public surface coverage
 

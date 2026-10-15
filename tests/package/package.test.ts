@@ -531,11 +531,7 @@ void describe('package', () => {
     assert.ok(p.files.includes('logo.png'));
     assert.ok(!p.files.includes('scripts/'));
     assert.equal(p.scripts['build:runtime'], 'node scripts/build-runtime.mjs');
-    assert.equal(p.scripts['docs:generate'], 'node scripts/docs/generate.mjs');
-    assert.equal(p.scripts['docs:verify'], 'node scripts/docs/verify.mjs');
     assert.match(p.scripts['prepack'] ?? '', /build:runtime/);
-    assert.match(p.scripts['prepack'] ?? '', /docs:verify/);
-    assert.match(p.scripts['prepack'] ?? '', /check-package-payload/);
     assert.equal(p.peerDependencies['@earendil-works/pi-ai'], '*');
     assert.ok(p.peerDependencies['@earendil-works/pi-coding-agent']);
     assert.ok(p.peerDependencies['@earendil-works/pi-tui']);

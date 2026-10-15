@@ -199,7 +199,7 @@ Smoke proves loadability only; completion requires `npm run test`, `npm run test
 
 ### Docs/gateway focused checks
 
-Current package docs gates are `npm run docs:generate` and `npm run docs:verify`; semantic receipt freshness is advisory there. Use `npm run docs:verify:attestations` only when a release or operator explicitly requires fresh independent receipts, and record them with `npm run docs:attest/record -- <doc_id> --reviewer <identity-after-semantic-review> --verdict PASS --notes <review-notes>`.
+The docs-freshness gate (`docs:generate`, `docs:verify`, attestation recording) was removed from this package. The `docs/` pages remain as reference content and are checked by hand.
 
 ## Required isolated environment
 
