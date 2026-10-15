@@ -29,10 +29,16 @@ import {
 const extensionPath = resolve('extensions/background-tasks.ts');
 const roots: string[] = [];
 const originalMaxOutputBytes = process.env['PI_BG_MAX_OUTPUT_BYTES'];
+const originalPosixShellPolicy = process.env['PI_BG_POSIX_SHELL'];
 process.env['PI_BG_MAX_OUTPUT_BYTES'] = '1024';
+// Pin a POSIX shell for every test in this file. Without it, the inherited user
+// shell ($SHELL, e.g. tcsh) parses the JSON-escaped `node -e` probes and exits 1.
+process.env['PI_BG_POSIX_SHELL'] = 'sh';
 after(() => {
   if (originalMaxOutputBytes === undefined) delete process.env['PI_BG_MAX_OUTPUT_BYTES'];
   else process.env['PI_BG_MAX_OUTPUT_BYTES'] = originalMaxOutputBytes;
+  if (originalPosixShellPolicy === undefined) delete process.env['PI_BG_POSIX_SHELL'];
+  else process.env['PI_BG_POSIX_SHELL'] = originalPosixShellPolicy;
 });
 
 type JsonRecord = Record<string, unknown>;
