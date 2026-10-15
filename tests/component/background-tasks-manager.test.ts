@@ -559,4 +559,47 @@ void describe('BackgroundTasksManager component', () => {
       esc.instance.dispose();
     }
   });
+
+  void it('fits the detail view to the terminal height so the footer and output box are never cut off', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'pi-bg-fit-'));
+    try {
+      const outputAbsPath = join(dir, 'task.output');
+      const fileLines = Array.from({ length: 200 }, (_, i) => `LINE-${String(i + 1)}`);
+      await writeFile(outputAbsPath, `${fileLines.join('\n')}\n`, 'utf8');
+      let rows = 60;
+      const h = manager({ initialTaskId: 'b12345678', viewportRows: () => rows }, [
+        task({ outputAbsPath, bytesWritten: 2000 }),
+      ]);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        // Roomy terminal keeps the full view within its height.
+        let lines = h.instance.render(100);
+        assert.ok(lines.length <= rows);
+        assert.match(stripAnsi(lines.join('\n')), /x close/);
+
+        for (const height of [24, 14]) {
+          rows = height;
+          lines = h.instance.render(100);
+          const text = stripAnsi(lines.join('\n'));
+          assert.ok(lines.length <= height, `height ${String(height)}: ${String(lines.length)} rows`);
+          assert.ok(
+            stripAnsi(lines[lines.length - 1] ?? '').startsWith('\u2570'),
+            `height ${String(height)}: bottom border must be the last row`,
+          );
+          assert.match(text, /x close/, `height ${String(height)}: footer visible`);
+          assert.match(text, /Output tail:/, `height ${String(height)}: output box visible`);
+          assert.match(text, /LINE-200/, `height ${String(height)}: latest output visible`);
+        }
+
+        // Scroll range follows the shrunken 3-row window at a 14-row terminal: one step up shows 197-199.
+        h.instance.handleInput('\x1b[A');
+        const scrolled = stripAnsi(h.instance.render(100).join('\n'));
+        assert.match(scrolled, /lines 197\u2013199 of 200/);
+      } finally {
+        h.instance.dispose();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { formatSize } from '@earendil-works/pi-coding-agent';
-import { matchesKey, truncateToWidth, visibleWidth, } from '@earendil-works/pi-tui';
+import { matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, } from '@earendil-works/pi-tui';
 import { boundedRead, compactWhitespace, formatCompactNumber, formatDuration, taskDisplayName, truncateChars, } from '../core/common.js';
 const STATUS_INTERVAL_MS = 1000;
 // Detail-view scrollback reservoir. Larger than the model-facing log cap because
@@ -8,8 +8,9 @@ const STATUS_INTERVAL_MS = 1000;
 // gives thousands of lines of scrollback when the user pauses the live tail.
 const DETAIL_TAIL_BYTES = 128 * 1024;
 const LIST_VISIBLE_ROWS = 14;
-// Keep detail content compact enough for bottom overlays while retaining scrollback.
-const DETAIL_VISIBLE_OUTPUT_LINES = 6;
+// Output window: up to 6 rows, shrinking with the viewport so the overlay never has its bottom cut off.
+const DETAIL_OUTPUT_MAX_ROWS = 6;
+const DETAIL_OUTPUT_MIN_ROWS = 3;
 function formatTime(timestamp) {
     return new Date(timestamp).toLocaleTimeString();
 }
@@ -177,6 +178,8 @@ export class BackgroundTasksManager {
     detailLines = [];
     detailFollow = true;
     detailScrollTop = 0;
+    /** Rows in the output window for the current viewport; see renderDetail. */
+    outputWindowRows = DETAIL_OUTPUT_MAX_ROWS;
     tailBytesRead = 0;
     tailTotalBytes = 0;
     tailTruncated = false;
@@ -239,7 +242,38 @@ export class BackgroundTasksManager {
         // Overlay supplies its actual viewport width. Do not clamp to a smaller
         // constant: that leaves an unpainted strip inside the overlay on wide terminals.
         const boxWidth = Math.max(2, width);
-        return this.mode === 'detail' ? this.renderDetail(boxWidth) : this.renderList(boxWidth);
+        if (this.mode === 'detail')
+            return this.fitDetailToViewport(boxWidth);
+        return this.renderList(boxWidth);
+    }
+    /**
+     * Render the detail view so it fits the terminal height. pi-tui cuts an overlay at its
+     * maxHeight from the bottom, which hides the output box and footer. Shrink the output window
+     * first (down to a minimum), then trim metadata rows above the output box, keeping the header,
+     * output box and footer intact.
+     */
+    fitDetailToViewport(width) {
+        const viewport = this.options.viewportRows?.();
+        this.outputWindowRows = DETAIL_OUTPUT_MAX_ROWS;
+        let lines = this.renderDetail(width);
+        if (viewport === undefined || !Number.isFinite(viewport) || viewport <= 0)
+            return lines;
+        const excess = lines.length - viewport;
+        if (excess > 0) {
+            const shrink = Math.min(excess, DETAIL_OUTPUT_MAX_ROWS - DETAIL_OUTPUT_MIN_ROWS);
+            this.outputWindowRows = DETAIL_OUTPUT_MAX_ROWS - shrink;
+            lines = this.renderDetail(width);
+        }
+        if (lines.length > viewport) {
+            // Window is at its minimum and the view still overflows: drop metadata rows above the output box.
+            const outputStart = lines.findIndex((line) => stripTerminalSequences(line).includes('Output tail:'));
+            const cut = lines.length - viewport;
+            if (outputStart > 0 && cut > 0) {
+                const removable = Math.min(cut, Math.max(0, outputStart - 1));
+                lines = [...lines.slice(0, outputStart - removable), ...lines.slice(outputStart)];
+            }
+        }
+        return lines;
     }
     close() {
         this.done('closed');
@@ -332,11 +366,11 @@ export class BackgroundTasksManager {
             return;
         }
         if (matchesKey(data, 'pageUp')) {
-            this.scrollDetail(-DETAIL_VISIBLE_OUTPUT_LINES);
+            this.scrollDetail(-this.outputWindowRows);
             return;
         }
         if (matchesKey(data, 'pageDown')) {
-            this.scrollDetail(DETAIL_VISIBLE_OUTPUT_LINES);
+            this.scrollDetail(this.outputWindowRows);
             return;
         }
         if (data === 'r') {
@@ -461,7 +495,7 @@ export class BackgroundTasksManager {
     }
     /** Scroll the detail output window. Scrolling up pauses the live tail; reaching the bottom resumes it. */
     scrollDetail(delta) {
-        const maxTop = Math.max(0, this.detailLines.length - DETAIL_VISIBLE_OUTPUT_LINES);
+        const maxTop = Math.max(0, this.detailLines.length - this.outputWindowRows);
         if (maxTop === 0)
             return;
         if (this.detailFollow) {
@@ -675,13 +709,13 @@ export class BackgroundTasksManager {
             lines.push(row(this.theme.fg('dim', 'No output yet')));
         }
         else {
-            const maxTop = Math.max(0, this.detailLines.length - DETAIL_VISIBLE_OUTPUT_LINES);
+            const maxTop = Math.max(0, this.detailLines.length - this.outputWindowRows);
             const start = this.detailFollow ? maxTop : Math.min(this.detailScrollTop, maxTop);
-            const windowLines = this.detailLines.slice(start, start + DETAIL_VISIBLE_OUTPUT_LINES);
+            const windowLines = this.detailLines.slice(start, start + this.outputWindowRows);
             for (const line of windowLines)
                 lines.push(row(this.theme.fg('toolOutput', line)));
         }
-        while (lines.length < DETAIL_VISIBLE_OUTPUT_LINES + 1)
+        while (lines.length < this.outputWindowRows + 1)
             lines.push(row());
         lines.push(bottom);
         lines.push(` ${this.theme.fg('dim', this.outputStatusLine())}`);
@@ -690,9 +724,9 @@ export class BackgroundTasksManager {
     outputStatusLine() {
         const total = this.detailLines.length;
         if (!this.detailFollow && total > 0) {
-            const maxTop = Math.max(0, total - DETAIL_VISIBLE_OUTPUT_LINES);
+            const maxTop = Math.max(0, total - this.outputWindowRows);
             const start = Math.min(this.detailScrollTop, maxTop);
-            const end = Math.min(total, start + DETAIL_VISIBLE_OUTPUT_LINES);
+            const end = Math.min(total, start + this.outputWindowRows);
             return `lines ${formatCount(start + 1)}\u2013${formatCount(end)} of ${formatCount(total)} · ↑/↓ PgUp/PgDn scroll · ↓ at bottom follows`;
         }
         const suffix = this.tailTruncated ? ` of ${formatSize(this.tailTotalBytes)}` : '';

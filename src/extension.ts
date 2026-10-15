@@ -71,6 +71,8 @@ import { LazyModule, SynchronousActivationCloseFence } from './core/lazy-module.
 
 const STATUS_INTERVAL_MS = 1000;
 const COMMAND_PREVIEW_CHARS = 90;
+/** Overlay margin shared by the /bg manager overlay and its viewport height, so the two cannot drift apart. */
+const BG_OVERLAY_MARGIN = { top: 0, bottom: 1, left: 1, right: 1 } as const;
 const GIT_INSTALL_TARGET = 'git:github.com/ismailsaleekh/pi-background-tasks';
 
 const packageInfo = readPackageInfo(new URL('../package.json', import.meta.url), (error) => {
@@ -609,6 +611,9 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
       await ctx.ui.custom<TaskManagerResult>(
         (tui, theme, _keybindings, done) => {
           const managerOptions = {
+            // Read the live terminal height so the overlay fits on resize; see BackgroundTasksManager.
+            viewportRows: () =>
+              tui.terminal.rows - BG_OVERLAY_MARGIN.top - BG_OVERLAY_MARGIN.bottom,
             getTasks: () => registry.allTasks(),
             stopTask: async (task: BackgroundTaskForUi) => {
               await registry.stopTask(registry.resolveTask(task.id), 'user');
@@ -668,8 +673,9 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
             anchor: 'bottom-center',
             width: '96%',
             minWidth: 64,
-            maxHeight: '60%',
-            margin: { bottom: 1, left: 1, right: 1 },
+            // The manager fits its own height to the terminal, so the overlay is never cut from the bottom.
+            maxHeight: '100%',
+            margin: BG_OVERLAY_MARGIN,
           },
         },
       );
