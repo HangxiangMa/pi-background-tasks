@@ -306,7 +306,7 @@ Use with `fusion_validate` for advisory read-only review.
   <img src="docs/assets/footer-dock.svg" alt="Illustration of the pi-background-tasks footer dock with running and completed tasks" width="760">
 </p>
 
-While any `/bg` task is running, a footer dock stays visible below the editor. It shows `bg · N running`, then one row per running task with its name, id, elapsed time, and output size (for example `Dock Probe b9303fed1 · 16s · 0B out`). It repaints each second, and it clears when no task is running. More than four running tasks show a `+K more` line. When tasks are running or unseen completions exist, the footer also shows a compact `bg ...` segment. Press the configured **Shift↓** (default) or **Ctrl+Alt+B** binding to open the focused bottom dock, or use `/tasks` when the key is off. Use `/bg-clear` to acknowledge finished-task footer notices in any terminal.
+While any `/bg` task is running, a footer dock stays visible below the editor. It shows `bg · N running`, then one row per running task with its name, id, elapsed time, and total output written so far (for example `Dock Probe b9303fed1 · 16s · 0B out`). The size is cumulative, not the change since the last tick. It repaints each second, and it clears when no task is running. More than four running tasks show a `+K more` line. When tasks are running or unseen completions exist, the footer also shows a compact `bg ...` segment. Press the configured **Shift↓** (default) or **Ctrl+Alt+B** binding to open the focused bottom dock, or use `/tasks` when the key is off. Use `/bg-clear` to acknowledge finished-task footer notices in any terminal.
 
 | Control | Action |
 |---|---|
