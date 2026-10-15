@@ -54,6 +54,7 @@ import {
   type BackgroundTaskExtensionService,
 } from './core/extension-api.js';
 import type { BackgroundTaskForUi, TaskManagerResult } from './ui/background-tasks-manager.js';
+import { BG_DOCK_WIDGET_KEY, renderBgDock } from './ui/bg-dock.js';
 import { dockShortcutFooterHint, parseBackgroundTasksConfig } from './core/config.js';
 import { LazyModule, SynchronousActivationCloseFence } from './core/lazy-module.js';
 
@@ -329,6 +330,9 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
   });
   pi.on('session_shutdown', (event) => {
     shutdownReason = event.reason;
+    // The dock's repaint handle belongs to the TUI that is going away; drop it so a late tick cannot call it.
+    bgDockRequestRender = undefined;
+    lastBgDockSignature = undefined;
     activationCloseFence.close();
   });
 
@@ -468,6 +472,56 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
     );
   }
 
+  /** Last drawn footer dock signature, so an unchanged dock is not re-registered each tick. */
+  let lastBgDockSignature: string | undefined;
+  /** Repaint the registered dock. Elapsed time changes every tick, so the dock needs a repaint each second. */
+  let bgDockRequestRender: (() => void) | undefined;
+
+  /**
+   * Draw the /bg footer dock for running shell tasks. Fail-open: a dock error is logged and
+   * never skips the status line, which the rest of updateUi depends on.
+   */
+  function updateBgDock(ctx: ExtensionContext, running: BgTask[]): void {
+    try {
+      const rows = running.map((task) => ({
+        name: task.name,
+        id: task.id,
+        startTime: task.startTime,
+        bytesWritten: task.bytesWritten,
+      }));
+      if (rows.length === 0) {
+        if (lastBgDockSignature === undefined) return;
+        lastBgDockSignature = undefined;
+        bgDockRequestRender = undefined;
+        ctx.ui.setWidget(BG_DOCK_WIDGET_KEY, undefined);
+        return;
+      }
+      const signature = JSON.stringify(rows.map((row) => [row.id, row.name, row.bytesWritten]));
+      if (signature === lastBgDockSignature) {
+        // Same rows: only elapsed time moved, so repaint the registered dock.
+        bgDockRequestRender?.();
+        return;
+      }
+      lastBgDockSignature = signature;
+      ctx.ui.setWidget(
+        BG_DOCK_WIDGET_KEY,
+        (tui, theme) => {
+          bgDockRequestRender = () => tui.requestRender();
+          return {
+            render: (width: number) =>
+              renderBgDock({ rows, now: Date.now() }, (color, text) => theme.fg(color, text), width),
+            invalidate: () => tui.requestRender(),
+          };
+        },
+        { placement: 'belowEditor' },
+      );
+    } catch (error) {
+      console.error(
+        `[background-tasks] dock update failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   function updateUi(ctx = currentCtx): void {
     if (registry.isShuttingDown() || !ctx) return;
     try {
@@ -486,6 +540,7 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
       const unseenFinishedCount = unseenFailed.length + unseenStopped.length + unseenDone.length;
       const updateSegment = formatUpdateSegment(latestKnownVersion, PACKAGE_VERSION ?? '');
       ctx.ui.setWidget('background-tasks', undefined);
+      updateBgDock(ctx, running);
       if (running.length === 0 && unseenFinishedCount === 0) {
         ctx.ui.setStatus(
           'background-tasks',

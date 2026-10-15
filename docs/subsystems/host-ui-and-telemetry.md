@@ -5,7 +5,7 @@ mode: authored
 review_policy: behavioral
 stability: stable
 covers_surfaces: []
-covers_sources: [extensions/background-tasks.ts, src/core/config.ts, src/core/update-check.ts, src/extension.ts, src/ui/background-tasks-manager.ts]
+covers_sources: [extensions/background-tasks.ts, src/core/config.ts, src/core/update-check.ts, src/extension.ts, src/ui/background-tasks-manager.ts, src/ui/bg-dock.ts]
 ---
 # Host UI and telemetry
 
@@ -15,7 +15,7 @@ This subsystem owns the extension entrypoint, command/tool registration, footer 
 
 The published `dist/extensions/background-tasks.js` entrypoint is compiled from `extensions/background-tasks.ts`, which re-exports the authoritative `src/extension.ts`. Only the ordered paths in `package.json.pi.extensions` and the package-owned child extension paths are supported extension roots. Files under `dist/src/**` are private compiled implementation chunks, not standalone Node entrypoints. Importing one directly from an unrelated natively loaded extension bypasses Pi's Jiti host-module aliases and is unsupported. The packed-package gate instead exercises every public lazy lane through the real package entrypoint with no package-local Pi SDK or TypeBox installation.
 
-Before creating the registry or registering a surface, the extension strictly parses the shared capability/shortcut configuration. It dynamically imports delegate/Fusion facade registration only for enabled capabilities; the dock component is imported only when an interactive manager is opened. `process` is mandatory and registers:
+Before creating the registry or registering a surface, the extension strictly parses the shared capability/shortcut configuration. It dynamically imports delegate/Fusion facade registration only for enabled capabilities; the interactive task manager component (`src/ui/background-tasks-manager.ts`) is imported only when that manager is opened. The footer dock renderer (`src/ui/bg-dock.ts`) is a small pure module and is imported statically. `process` is mandatory and registers:
 
 - commands: `/bg`, `/tasks`, `/bg-tasks`, `/bg-clear`, `/bg-update`, `/jobs`, `/logs`, `/kill`;
 - tools: `bg_run`, `bg_status`, `bg_logs`, `bg_kill`;
@@ -34,6 +34,19 @@ An inherited Nu, fish, csh, or unknown shell is explicitly described as `user-no
 ## Footer status
 
 The footer widget is updated on task changes and once per second while a session is active. If there are no running tasks and no unseen finished tasks, the background-task footer is cleared unless an update segment is available.
+
+## /bg footer dock
+
+While any task is running, a dock is drawn below the editor under its own widget key, `background-tasks-dock` (`BG_DOCK_WIDGET_KEY` in `src/ui/bg-dock.ts`). It is separate from the `background-tasks` modal key, which is cleared on every tick and must not be used for the dock.
+
+- The dock lists **running** tasks only. Finished tasks appear in the status segment below, not in the dock.
+- It shows a `bg · N running` header, then one row per task with its name, id, elapsed time, and output size.
+- At most four rows are drawn (`BG_DOCK_MAX_ROWS`). Any further running tasks collapse into a `+K more` line.
+- It repaints on the existing one-second status tick. It adds no timer of its own. Elapsed time advances only while that tick runs.
+- When no task is running, the widget is cleared with `setWidget(key, undefined)`.
+- Rendering is fail-open: an error in the dock is logged to `console.error` and does not break the footer.
+
+`renderBgDock` in `src/ui/bg-dock.ts` is pure: it has no timers or I/O, so the same frame always gives the same lines.
 
 When visible, the footer label includes counts in this order:
 
@@ -95,4 +108,4 @@ Shutdown terminal metadata and task waiters remain truthful even when old-activa
 
 ## Source ownership/reference
 
-Primary source ownership for this document is `extensions/background-tasks.ts`, `src/extension.ts`, `src/core/update-check.ts`, and `src/ui/background-tasks-manager.ts`.
+Primary source ownership for this document is `extensions/background-tasks.ts`, `src/core/config.ts`, `src/extension.ts`, `src/core/update-check.ts`, `src/ui/background-tasks-manager.ts`, and `src/ui/bg-dock.ts`.

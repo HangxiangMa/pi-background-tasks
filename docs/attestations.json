@@ -166,22 +166,26 @@
       "verdict": "PASS"
     },
     {
-      "authored_body_sha256": "sha256:185e4ec320770ededfce51e1e8a5a166be8b4b11275b7515737f0305820555fe",
+      "authored_body_sha256": "sha256:c4e66d9e6db4345d02415641f2cd332c78a60143cf7ade759d398ead20bb1463",
       "covers_sources": [
         "extensions/background-tasks.ts",
+        "src/core/config.ts",
         "src/core/update-check.ts",
         "src/extension.ts",
-        "src/ui/background-tasks-manager.ts"
+        "src/ui/background-tasks-manager.ts",
+        "src/ui/bg-dock.ts"
       ],
       "doc_id": "subsystems/host-ui-and-telemetry",
-      "notes": "Existing independent GPT-5.5 panel reviewed the host subsystem; operator delta review verified /bg-update no longer derives git tags from npm versions and SDK assertions pin main plus explicit tag verification.",
-      "reviewer": "existing-gpt-5.5-host-panel-plus-operator-update-delta",
+      "notes": "Line-by-line check of each claim against src/extension.ts, src/ui/bg-dock.ts, src/core/registry.ts, src/core/reload-shell-owner.ts, src/core/config.ts, src/core/common.ts, src/core/update-check.ts and src/ui/background-tasks-manager.ts. Fixed two wording issues (dock import, source ownership). Strict verify still fails on docs/api/eventbus-v1.md, which is pre-existing at HEAD.",
+      "reviewer": "claude-haiku-5-5 agent, line-by-line code review (user-approved option A)",
       "schema_version": "pi-background-tasks.docs-attestation.v1",
       "source_sha256": {
         "extensions/background-tasks.ts": "sha256:b221129d3a1449606de6e7c04bd8989c6b7feee3eaf5122339c2d45cffadf74f",
-        "src/core/update-check.ts": "sha256:7f754a43288c8c7dae1518f4a8c3fa7f1b5499864c5c54ae279188661aa0412d",
-        "src/extension.ts": "sha256:65b8d2a23555a244eb1ed1ef5ad5ab3aa1d70eb59e3f4f4d69efdfb553e34218",
-        "src/ui/background-tasks-manager.ts": "sha256:96c71807767499887ab3417e5eabac973a19221e4f2e985e2218d4ad672dd687"
+        "src/core/config.ts": "sha256:24b368933cf9fe136cba3bb81505e872dcdc23fc8a0b17cccb90de35312c3111",
+        "src/core/update-check.ts": "sha256:11305af5819a32d3950693053845271268737038c054a5b134e37c91d60205e5",
+        "src/extension.ts": "sha256:8dc03958888089eaee10f4d27af3543bb14c8528e2a85d12dea950161868b06e",
+        "src/ui/background-tasks-manager.ts": "sha256:ee70081deadfd01988b00de3ef812e43112afbfb57514d088321c67030779249",
+        "src/ui/bg-dock.ts": "sha256:28addd87a6d229f5cdbfe69290ac5ca9d7deaaf2372b9edf3ccf844120139764"
       },
       "verdict": "PASS"
     }

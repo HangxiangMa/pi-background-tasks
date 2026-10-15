@@ -34,6 +34,7 @@ import {
 } from '../../src/core/extension-api.js';
 import { parsePackageInfo } from '../../src/core/update-check.js';
 import backgroundTasksExtension from '../../src/extension.js';
+import { BG_DOCK_WIDGET_KEY } from '../../src/ui/bg-dock.js';
 
 const extensionPath = resolve('extensions/background-tasks.ts');
 const scriptedProviderPath = resolve('tests/scripted-provider/scripted-provider-extension.ts');
@@ -1560,6 +1561,58 @@ console.log(JSON.stringify({ type: "message_end", message: secondMessage }));
       assert.match(statuses.at(-1) ?? '', /bg 1 running · Shift↓/);
       assert.doesNotMatch(statuses.at(-1) ?? '', /done|\/bg-clear/);
       await exec(session, 'bg_kill', { taskId: taskFromResult(running).id });
+    } finally {
+      await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+      session.dispose();
+    }
+  });
+
+  void it('draws the /bg footer dock while a shell task runs and clears it when the task finishes', async () => {
+    const { session } = await harness();
+    // Record the dock widget by its own key. The modal key is cleared on every tick, so it must not be counted here.
+    const dockFrames: Array<string[] | undefined> = [];
+    let dockRepaints = 0;
+    const statuses: Array<string | undefined> = [];
+    const notifications: UiNotification[] = [];
+    const base = makeStatusUi(session.extensionRunner.getUIContext(), statuses, notifications);
+    session.extensionRunner.setUIContext({
+      ...base,
+      setWidget: (key: string, factory: unknown) => {
+        if (key !== BG_DOCK_WIDGET_KEY) return;
+        if (typeof factory !== 'function') {
+          dockFrames.push(undefined);
+          return;
+        }
+        const widget = (factory as (tui: unknown, theme: unknown) => { render(width: number): string[] })(
+          { requestRender() { dockRepaints += 1; } },
+          { fg: (_color: string, text: string) => text },
+        );
+        dockFrames.push(widget.render(200));
+      },
+    });
+    try {
+      // The 1 s status tick that repaints the dock is created by session_start, which harness() does not emit.
+      await session.extensionRunner.emit({ type: 'session_start', reason: 'startup' });
+      const running = await exec(session, 'bg_run', {
+        isAgent: false,
+        name: 'Dock Probe',
+        command: `node -e ${JSON.stringify('setTimeout(() => {}, 10000)')}`,
+        notifyOnCompletion: false,
+        triggerOnCompletion: false,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const shown = dockFrames.filter((frame) => frame !== undefined).at(-1) ?? [];
+      assert.equal(shown[0], 'bg · 1 running');
+      assert.match(shown[1] ?? '', /Dock Probe/);
+      // Elapsed time only moves if the dock is repainted each tick; a registered-but-never-repainted dock would freeze.
+      const repaintsBefore = dockRepaints;
+      await new Promise((resolve) => setTimeout(resolve, 2200));
+      assert.ok(dockRepaints > repaintsBefore, 'the dock must repaint on the status tick while a task runs (got ' + (dockRepaints - repaintsBefore) + ')');
+
+      await exec(session, 'bg_kill', { taskId: taskFromResult(running).id });
+      await wait(session, taskFromResult(running).id);
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      assert.equal(dockFrames.at(-1), undefined, 'the dock must be cleared once no task is running');
     } finally {
       await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
       session.dispose();

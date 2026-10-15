@@ -135,19 +135,21 @@
       "state": "stale-authored-prose"
     },
     {
-      "authored_body_sha256": "sha256:5f3b9307c4e159c6e7f0ce52474c98222446dd670bd23826618f7437d7f3b39e",
+      "authored_body_sha256": "sha256:c4e66d9e6db4345d02415641f2cd332c78a60143cf7ade759d398ead20bb1463",
       "covers_sources": [
         "extensions/background-tasks.ts",
         "src/core/config.ts",
         "src/core/update-check.ts",
         "src/extension.ts",
-        "src/ui/background-tasks-manager.ts"
+        "src/ui/background-tasks-manager.ts",
+        "src/ui/bg-dock.ts"
       ],
       "doc_id": "subsystems/host-ui-and-telemetry",
+      "notes": "Line-by-line check of each claim against src/extension.ts, src/ui/bg-dock.ts, src/core/registry.ts, src/core/reload-shell-owner.ts, src/core/config.ts, src/core/common.ts, src/core/update-check.ts and src/ui/background-tasks-manager.ts. Fixed two wording issues (dock import, source ownership). Strict verify still fails on docs/api/eventbus-v1.md, which is pre-existing at HEAD.",
       "rel": "docs/subsystems/host-ui-and-telemetry.md",
       "required": true,
-      "reviewer": "existing-gpt-5.5-host-panel-plus-operator-update-delta",
-      "state": "stale-authored-prose"
+      "reviewer": "claude-haiku-5-5 agent, line-by-line code review (user-approved option A)",
+      "state": "pass"
     }
   ],
   "configuration_variants": {
@@ -582,7 +584,8 @@
         "src/core/config.ts",
         "src/core/update-check.ts",
         "src/extension.ts",
-        "src/ui/background-tasks-manager.ts"
+        "src/ui/background-tasks-manager.ts",
+        "src/ui/bg-dock.ts"
       ],
       "covers_surfaces": [],
       "mode": "authored",
@@ -954,7 +957,7 @@
         "id": "command:bg",
         "kind": "command",
         "name": "bg",
-        "source": "src/extension.ts:750"
+        "source": "src/extension.ts:805"
       },
       {
         "availability": "always",
@@ -963,7 +966,7 @@
         "id": "command:bg-clear",
         "kind": "command",
         "name": "bg-clear",
-        "source": "src/extension.ts:793"
+        "source": "src/extension.ts:848"
       },
       {
         "availability": "always",
@@ -972,7 +975,7 @@
         "id": "command:bg-tasks",
         "kind": "command",
         "name": "bg-tasks",
-        "source": "src/extension.ts:785"
+        "source": "src/extension.ts:840"
       },
       {
         "availability": "always",
@@ -981,7 +984,7 @@
         "id": "command:bg-update",
         "kind": "command",
         "name": "bg-update",
-        "source": "src/extension.ts:801"
+        "source": "src/extension.ts:856"
       },
       {
         "availability": "feature:attribution",
@@ -1017,7 +1020,7 @@
         "id": "command:jobs",
         "kind": "command",
         "name": "jobs",
-        "source": "src/extension.ts:850"
+        "source": "src/extension.ts:905"
       },
       {
         "availability": "always",
@@ -1026,7 +1029,7 @@
         "id": "command:kill",
         "kind": "command",
         "name": "kill",
-        "source": "src/extension.ts:894"
+        "source": "src/extension.ts:949"
       },
       {
         "availability": "always",
@@ -1035,7 +1038,7 @@
         "id": "command:logs",
         "kind": "command",
         "name": "logs",
-        "source": "src/extension.ts:863"
+        "source": "src/extension.ts:918"
       },
       {
         "availability": "always",
@@ -1044,7 +1047,7 @@
         "id": "command:tasks",
         "kind": "command",
         "name": "tasks",
-        "source": "src/extension.ts:777"
+        "source": "src/extension.ts:832"
       }
     ],
     "eventbus": [
@@ -1076,7 +1079,7 @@
         "id": "renderer:background-task-notification",
         "kind": "renderer",
         "name": "background-task-notification",
-        "source": "src/extension.ts:627"
+        "source": "src/extension.ts:682"
       },
       {
         "availability": "feature:fusion",
@@ -1095,7 +1098,7 @@
         "id": "shortcut:ctrl+alt+b",
         "kind": "shortcut",
         "name": "ctrl+alt+b",
-        "source": "src/extension.ts:834"
+        "source": "src/extension.ts:889"
       },
       {
         "availability": "always",
@@ -1104,7 +1107,7 @@
         "id": "shortcut:ctrl+alt+c",
         "kind": "shortcut",
         "name": "ctrl+alt+c",
-        "source": "src/extension.ts:842"
+        "source": "src/extension.ts:897"
       },
       {
         "availability": "dock:shift+down",
@@ -1113,7 +1116,7 @@
         "id": "shortcut:shift+down",
         "kind": "shortcut",
         "name": "shift+down",
-        "source": "src/extension.ts:825"
+        "source": "src/extension.ts:880"
       }
     ],
     "tool": [
@@ -1230,7 +1233,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:1181"
+        "source": "src/extension.ts:1236"
       },
       {
         "availability": "always",
@@ -1266,7 +1269,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:1136"
+        "source": "src/extension.ts:1191"
       },
       {
         "availability": "any(feature:delegate,feature:fusion)",
@@ -1361,7 +1364,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:927"
+        "source": "src/extension.ts:982"
       },
       {
         "availability": "feature:attested",
@@ -1424,7 +1427,7 @@
           ],
           "type": "object"
         },
-        "source": "src/extension.ts:1036"
+        "source": "src/extension.ts:1091"
       },
       {
         "availability": "always",
@@ -1450,7 +1453,7 @@
           "required": [],
           "type": "object"
         },
-        "source": "src/extension.ts:1105"
+        "source": "src/extension.ts:1160"
       },
       {
         "availability": "feature:fusion",
@@ -1991,6 +1994,9 @@
       "subsystems/fusion"
     ],
     "src/ui/background-tasks-manager.ts": [
+      "subsystems/host-ui-and-telemetry"
+    ],
+    "src/ui/bg-dock.ts": [
       "subsystems/host-ui-and-telemetry"
     ],
     "src/ui/fusion-model-selector.ts": [
