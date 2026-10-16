@@ -150,6 +150,17 @@ export default async function backgroundTasksExtension(pi) {
         registry,
         getContext: () => currentRegistryCtx,
         isShuttingDown: () => registry.isShuttingDown(),
+        // The manager stays open until the user dismisses it, so the event response must not wait
+        // on it. Failures are reported through the UI instead of an unhandled rejection.
+        openManager: (taskId) => {
+            const ctx = currentCtx;
+            if (ctx === undefined) {
+                throw new Error('pi-background-tasks has no active session to open the task manager in');
+            }
+            openTaskManager(ctx, taskId).catch((error) => {
+                ctx.ui.notify(`Background task manager failed to open: ${error instanceof Error ? error.message : String(error)}`, 'error');
+            });
+        },
     });
     const beginSessionShutdown = (reason) => {
         let handoffError;

@@ -31,7 +31,13 @@ export class BackgroundTaskExtensionServiceClosedError extends Error {
 const MAX_ERROR_CHARS = 240;
 const MAX_REQUEST_ID_CHARS = 200;
 
-export type BackgroundTaskExtensionOperation = 'capabilities' | 'run' | 'status' | 'logs' | 'kill';
+export type BackgroundTaskExtensionOperation =
+  | 'capabilities'
+  | 'run'
+  | 'status'
+  | 'logs'
+  | 'kill'
+  | 'open';
 
 export interface BackgroundTaskExtensionCapabilities {
   api_version: 1;
@@ -42,6 +48,7 @@ export interface BackgroundTaskExtensionCapabilities {
   logs: boolean;
   logs_bounded: boolean;
   kill: boolean;
+  open: boolean;
 }
 
 export const BG_EXTENSION_CAPABILITIES: BackgroundTaskExtensionCapabilities = Object.freeze({
@@ -53,6 +60,7 @@ export const BG_EXTENSION_CAPABILITIES: BackgroundTaskExtensionCapabilities = Ob
   logs: true,
   logs_bounded: true,
   kill: true,
+  open: true,
 });
 
 export interface BackgroundTaskExtensionRunPayload {
@@ -78,12 +86,17 @@ export interface BackgroundTaskExtensionKillPayload {
   taskId: string;
 }
 
+export interface BackgroundTaskExtensionOpenPayload {
+  taskId?: string | undefined;
+}
+
 export type BackgroundTaskExtensionPayload =
   | Record<PropertyKey, never>
   | BackgroundTaskExtensionRunPayload
   | BackgroundTaskExtensionStatusPayload
   | BackgroundTaskExtensionLogsPayload
-  | BackgroundTaskExtensionKillPayload;
+  | BackgroundTaskExtensionKillPayload
+  | BackgroundTaskExtensionOpenPayload;
 
 export interface BackgroundTaskExtensionRequest {
   schema_version: typeof BG_REQUEST_SCHEMA;
@@ -97,7 +110,8 @@ export type BackgroundTaskExtensionResult =
   | BgTaskSnapshot
   | { tasks: BgTaskSnapshot[] }
   | (BgLogsDetails & { text: string })
-  | { task: BgTaskSnapshot; message: string };
+  | { task: BgTaskSnapshot; message: string }
+  | { opened: true; taskId?: string | undefined; message: string };
 
 export type BackgroundTaskExtensionResponse =
   | {
@@ -131,6 +145,12 @@ export interface BackgroundTaskExtensionServiceOptions {
   registry: BackgroundTaskRegistry;
   getContext: () => BackgroundTaskContext | undefined;
   isShuttingDown: () => boolean;
+  /**
+   * Opens the interactive task manager, optionally focused on one task id.
+   * Optional: a host without an interactive UI omits it, and the `open` operation
+   * then fails with a clear error instead of silently doing nothing.
+   */
+  openManager?: ((taskId?: string) => void) | undefined;
   logger?: Pick<Console, 'error'> | undefined;
 }
 
@@ -193,11 +213,12 @@ function requireOperation(value: unknown, label: string): BackgroundTaskExtensio
     value === 'run' ||
     value === 'status' ||
     value === 'logs' ||
-    value === 'kill'
+    value === 'kill' ||
+    value === 'open'
   ) {
     return value;
   }
-  throw new Error(`${label} must be one of capabilities, run, status, logs, kill`);
+  throw new Error(`${label} must be one of capabilities, run, status, logs, kill, open`);
 }
 
 function operationEcho(value: unknown): string {
@@ -266,6 +287,16 @@ function parseLogsPayload(value: unknown): BackgroundTaskExtensionLogsPayload {
   return out;
 }
 
+function parseOpenPayload(value: unknown): BackgroundTaskExtensionOpenPayload {
+  const payload = requireRecord(value, 'open.payload');
+  assertClosed(payload, ['taskId'], 'open.payload');
+  const out: BackgroundTaskExtensionOpenPayload = {};
+  if (hasOwn(payload, 'taskId')) {
+    out.taskId = requireNonEmptyString(payload['taskId'], 'open.payload.taskId');
+  }
+  return out;
+}
+
 function parseKillPayload(value: unknown): BackgroundTaskExtensionKillPayload {
   const payload = requireRecord(value, 'kill.payload');
   assertClosed(payload, ['taskId'], 'kill.payload');
@@ -287,6 +318,8 @@ function parsePayload(
       return parseLogsPayload(value);
     case 'kill':
       return parseKillPayload(value);
+    case 'open':
+      return parseOpenPayload(value);
   }
 }
 
@@ -416,6 +449,7 @@ class InstalledBackgroundTaskExtensionService implements BackgroundTaskExtension
   private readonly registry: BackgroundTaskRegistry;
   private readonly getContext: () => BackgroundTaskContext | undefined;
   private readonly isShuttingDown: () => boolean;
+  private readonly openManager: ((taskId?: string) => void) | undefined;
   private readonly logger: Pick<Console, 'error'>;
   private readonly seenRequestIds = new Set<string>();
   private readonly unsubscribe: () => void;
@@ -426,6 +460,7 @@ class InstalledBackgroundTaskExtensionService implements BackgroundTaskExtension
     this.registry = options.registry;
     this.getContext = options.getContext;
     this.isShuttingDown = options.isShuttingDown;
+    this.openManager = options.openManager;
     this.logger = options.logger ?? console;
     this.unsubscribe = this.events.on(BG_REQUEST_CHANNEL, (data) => {
       void this.handle(data);
@@ -555,6 +590,20 @@ class InstalledBackgroundTaskExtensionService implements BackgroundTaskExtension
         return {
           task: snapshot,
           message: `Killed background task ${snapshot.name ?? snapshot.id} (${snapshot.id}). Output: ${snapshot.outputPath}`,
+        };
+      }
+      case 'open': {
+        const payload = request.payload as BackgroundTaskExtensionOpenPayload;
+        if (this.openManager === undefined) {
+          throw new Error('pi-background-tasks task manager cannot open in this host');
+        }
+        this.openManager(payload.taskId);
+        return {
+          opened: true,
+          taskId: payload.taskId,
+          message: payload.taskId
+            ? `Opened task manager for ${payload.taskId}`
+            : 'Opened task manager',
         };
       }
     }

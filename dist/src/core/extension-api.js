@@ -24,6 +24,7 @@ export const BG_EXTENSION_CAPABILITIES = Object.freeze({
     logs: true,
     logs_bounded: true,
     kill: true,
+    open: true,
 });
 function isRecord(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -65,10 +66,11 @@ function requireOperation(value, label) {
         value === 'run' ||
         value === 'status' ||
         value === 'logs' ||
-        value === 'kill') {
+        value === 'kill' ||
+        value === 'open') {
         return value;
     }
-    throw new Error(`${label} must be one of capabilities, run, status, logs, kill`);
+    throw new Error(`${label} must be one of capabilities, run, status, logs, kill, open`);
 }
 function operationEcho(value) {
     return typeof value === 'string' && value.length > 0 ? value : 'malformed';
@@ -118,6 +120,15 @@ function parseLogsPayload(value) {
         out.tail = requireBoolean(payload['tail'], 'logs.payload.tail');
     return out;
 }
+function parseOpenPayload(value) {
+    const payload = requireRecord(value, 'open.payload');
+    assertClosed(payload, ['taskId'], 'open.payload');
+    const out = {};
+    if (hasOwn(payload, 'taskId')) {
+        out.taskId = requireNonEmptyString(payload['taskId'], 'open.payload.taskId');
+    }
+    return out;
+}
 function parseKillPayload(value) {
     const payload = requireRecord(value, 'kill.payload');
     assertClosed(payload, ['taskId'], 'kill.payload');
@@ -135,6 +146,8 @@ function parsePayload(operation, value) {
             return parseLogsPayload(value);
         case 'kill':
             return parseKillPayload(value);
+        case 'open':
+            return parseOpenPayload(value);
     }
 }
 function parseRequest(data) {
@@ -244,6 +257,7 @@ class InstalledBackgroundTaskExtensionService {
     registry;
     getContext;
     isShuttingDown;
+    openManager;
     logger;
     seenRequestIds = new Set();
     unsubscribe;
@@ -253,6 +267,7 @@ class InstalledBackgroundTaskExtensionService {
         this.registry = options.registry;
         this.getContext = options.getContext;
         this.isShuttingDown = options.isShuttingDown;
+        this.openManager = options.openManager;
         this.logger = options.logger ?? console;
         this.unsubscribe = this.events.on(BG_REQUEST_CHANNEL, (data) => {
             void this.handle(data);
@@ -363,6 +378,20 @@ class InstalledBackgroundTaskExtensionService {
                 return {
                     task: snapshot,
                     message: `Killed background task ${snapshot.name ?? snapshot.id} (${snapshot.id}). Output: ${snapshot.outputPath}`,
+                };
+            }
+            case 'open': {
+                const payload = request.payload;
+                if (this.openManager === undefined) {
+                    throw new Error('pi-background-tasks task manager cannot open in this host');
+                }
+                this.openManager(payload.taskId);
+                return {
+                    opened: true,
+                    taskId: payload.taskId,
+                    message: payload.taskId
+                        ? `Opened task manager for ${payload.taskId}`
+                        : 'Opened task manager',
                 };
             }
         }

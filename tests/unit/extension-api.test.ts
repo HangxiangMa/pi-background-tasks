@@ -75,6 +75,7 @@ interface Harness {
   bus: MemoryEventBus;
   registry: BackgroundTaskRegistry;
   service: BackgroundTaskExtensionService;
+  opened: (string | undefined)[];
   setCtx(value: BackgroundTaskContext | undefined): void;
   setShutdown(value: boolean): void;
   close(): void;
@@ -89,6 +90,7 @@ async function createHarness(): Promise<Harness> {
   let currentCtx: BackgroundTaskContext | undefined;
   let shuttingDown = false;
   let spawns = 0;
+  const opened: (string | undefined)[] = [];
   const registry = new BackgroundTaskRegistry({
     sendCompletionNotification: () => {},
     spawn: () => {
@@ -108,6 +110,9 @@ async function createHarness(): Promise<Harness> {
     registry,
     getContext: () => currentCtx,
     isShuttingDown: () => shuttingDown,
+    openManager: (taskId) => {
+      opened.push(taskId);
+    },
   });
   return {
     root,
@@ -115,6 +120,7 @@ async function createHarness(): Promise<Harness> {
     bus,
     registry,
     service,
+    opened,
     setCtx(value) {
       currentCtx = value;
     },
@@ -424,7 +430,7 @@ void describe('background EventBus protocol', () => {
       });
       assert.equal(unknown.ok, false);
       assert.equal(unknown.operation, 'bogus');
-      assert.match(unknown.ok ? '' : unknown.error, /capabilities, run, status, logs, kill/u);
+      assert.match(unknown.ok ? '' : unknown.error, /capabilities, run, status, logs, kill, open/u);
 
       const extra = await emitRequest(h.bus, {
         schema_version: BG_REQUEST_SCHEMA,
@@ -496,6 +502,7 @@ void describe('background EventBus protocol', () => {
         'kill',
         'logs',
         'logs_bounded',
+        'open',
         'run',
         'run_completion_trigger',
         'run_is_agent',
@@ -526,6 +533,77 @@ void describe('background EventBus protocol', () => {
     } finally {
       h.close();
       await rm(h.root, { recursive: true, force: true });
+    }
+  });
+
+  void it('opens the manager for a requested task id and reports a missing opener clearly', async () => {
+    const h = await createHarness();
+    try {
+      const withId = await emitRequest(h.bus, {
+        schema_version: BG_REQUEST_SCHEMA,
+        request_id: 'open-with-id',
+        operation: 'open',
+        payload: { taskId: 'be300a0a2' },
+      });
+      assert.equal(withId.ok, true, withId.ok ? '' : withId.error);
+      assert.deepEqual(h.opened, ['be300a0a2']);
+
+      const withoutId = await emitRequest(h.bus, {
+        schema_version: BG_REQUEST_SCHEMA,
+        request_id: 'open-without-id',
+        operation: 'open',
+        payload: {},
+      });
+      assert.equal(withoutId.ok, true, withoutId.ok ? '' : withoutId.error);
+      assert.deepEqual(h.opened, ['be300a0a2', undefined]);
+    } finally {
+      h.close();
+      await rm(h.root, { recursive: true, force: true });
+    }
+  });
+
+  void it('reports a clear error, not a crash, when the host has no task manager to open', async () => {
+    // A host with no UI (for example print mode) installs the service without an opener. The open
+    // request must come back as a correlated failure the caller can show, never an uncaught throw.
+    const root = await mkdtemp(join(tmpdir(), 'pi-bg-api-noopen-'));
+    const cwd = join(root, 'project');
+    await mkdir(cwd, { recursive: true });
+    const bus = new MemoryEventBus();
+    const ctx: BackgroundTaskContext = {
+      cwd,
+      sessionId: 'extension-api-no-opener',
+      modelRegistry: { getAll: () => [] },
+      model: undefined,
+    };
+    const registry = new BackgroundTaskRegistry({
+      sendCompletionNotification: () => {},
+      spawn: () => {
+        throw new Error('spawn should not be reached by this protocol test');
+      },
+    });
+    const service = installBackgroundTaskExtensionApi({
+      events: bus,
+      registry,
+      getContext: () => ctx,
+      isShuttingDown: () => false,
+      // No openManager: this host cannot show a task manager.
+    });
+    try {
+      const response = await emitRequest(bus, {
+        schema_version: BG_REQUEST_SCHEMA,
+        request_id: 'open-no-opener',
+        operation: 'open',
+        payload: { taskId: 'be300a0a2' },
+      });
+      assert.equal(response.ok, false, 'an open with no opener must be refused, not reported as success');
+      assert.match(
+        response.ok ? '' : response.error,
+        /cannot open in this host/,
+        'the refusal must name the cause so the caller can explain it',
+      );
+    } finally {
+      service.close();
+      await rm(root, { recursive: true, force: true });
     }
   });
 
