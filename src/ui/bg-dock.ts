@@ -7,6 +7,14 @@ export const BG_DOCK_WIDGET_KEY = 'background-tasks-dock';
 /** Most rows the dock draws before collapsing the rest into `+K more`. */
 export const BG_DOCK_MAX_ROWS = 4;
 
+/**
+ * Whether the footer dock widget is registered at all. Only the widget switch decides: with it off
+ * nothing is drawn, but the dock shortcut and the /tasks manager still work.
+ */
+export function shouldShowBgDock(widget: 'on' | 'off'): boolean {
+  return widget === 'on';
+}
+
 export interface BgDockRow {
   name: string;
   id: string;

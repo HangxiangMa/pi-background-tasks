@@ -54,7 +54,7 @@ import {
   type BackgroundTaskExtensionService,
 } from './core/extension-api.js';
 import type { BackgroundTaskForUi, TaskManagerResult } from './ui/background-tasks-manager.js';
-import { BG_DOCK_WIDGET_KEY, renderBgDock } from './ui/bg-dock.js';
+import { BG_DOCK_WIDGET_KEY, renderBgDock, shouldShowBgDock } from './ui/bg-dock.js';
 import { dockShortcutFooterHint, parseBackgroundTasksConfig } from './core/config.js';
 import { LazyModule, SynchronousActivationCloseFence } from './core/lazy-module.js';
 
@@ -484,6 +484,15 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
    * never skips the status line, which the rest of updateUi depends on.
    */
   function updateBgDock(ctx: ExtensionContext, running: BgTask[]): void {
+    // Widget switch off: never register the footer dock. Clear anything an earlier run left.
+    if (!shouldShowBgDock(config.dockWidget)) {
+      if (lastBgDockSignature !== undefined) {
+        lastBgDockSignature = undefined;
+        bgDockRequestRender = undefined;
+        ctx.ui.setWidget(BG_DOCK_WIDGET_KEY, undefined);
+      }
+      return;
+    }
     try {
       const rows = running.map((task) => ({
         name: task.name,

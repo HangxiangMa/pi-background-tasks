@@ -92,4 +92,29 @@ void describe('background task capability configuration', () => {
     assert.ok(message.length > 0 && message.length < 700, message.length.toString());
     assert.doesNotMatch(message, /x{200}/);
   });
+
+  void it('shows the bg dock widget by default, and hides it only when PI_BG_DOCK_WIDGET=off', () => {
+    assert.equal(parseBackgroundTasksConfig({}).dockWidget, 'on');
+    assert.equal(parseBackgroundTasksConfig({ PI_BG_DOCK_WIDGET: 'off' }).dockWidget, 'off');
+    assert.equal(parseBackgroundTasksConfig({ PI_BG_DOCK_WIDGET: 'on' }).dockWidget, 'on');
+  });
+
+  void it('rejects any dock widget value other than on or off, naming the variable', () => {
+    for (const bad of ['yes', 'true', '1', 'OFF', 'Off']) {
+      assert.throws(
+        () => parseBackgroundTasksConfig({ PI_BG_DOCK_WIDGET: bad }),
+        /PI_BG_DOCK_WIDGET/,
+        `rejects ${bad}`,
+      );
+    }
+  });
+
+  void it('keeps the dock shortcut bound when the widget is off', () => {
+    const config = parseBackgroundTasksConfig({
+      PI_BG_DOCK_WIDGET: 'off',
+      PI_BG_DOCK_SHORTCUT: 'ctrl+alt+b',
+    });
+    assert.equal(config.dockWidget, 'off');
+    assert.equal(config.dockShortcut, 'ctrl+alt+b');
+  });
 });

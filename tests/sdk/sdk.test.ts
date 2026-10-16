@@ -1567,6 +1567,49 @@ console.log(JSON.stringify({ type: "message_end", message: secondMessage }));
     }
   });
 
+  void it('registers no footer dock when PI_BG_DOCK_WIDGET=off, while the task still runs', async () => {
+    const previous = process.env['PI_BG_DOCK_WIDGET'];
+    process.env['PI_BG_DOCK_WIDGET'] = 'off';
+    try {
+      const { session } = await harness();
+      const dockCalls: unknown[] = [];
+      const base = makeStatusUi(session.extensionRunner.getUIContext(), [], []);
+      session.extensionRunner.setUIContext({
+        ...base,
+        setWidget: (key: string, factory: unknown) => {
+          if (key === BG_DOCK_WIDGET_KEY) dockCalls.push(factory);
+        },
+      });
+      try {
+        await session.extensionRunner.emit({ type: 'session_start', reason: 'startup' });
+        const running = await exec(session, 'bg_run', {
+          isAgent: false,
+          name: 'Dock Off Probe',
+          command: `node -e ${JSON.stringify('setTimeout(() => {}, 10000)')}`,
+          notifyOnCompletion: false,
+          triggerOnCompletion: false,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 2200));
+        // The switch hides the dock: no widget is ever registered with a factory.
+        assert.equal(
+          dockCalls.filter((factory) => typeof factory === 'function').length,
+          0,
+          'no dock factory may be registered while PI_BG_DOCK_WIDGET=off',
+        );
+        // Hiding the dock must not break the task itself.
+        const id = taskFromResult(running).id;
+        await exec(session, 'bg_kill', { taskId: id });
+        await wait(session, id);
+      } finally {
+        await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+        session.dispose();
+      }
+    } finally {
+      if (previous === undefined) delete process.env['PI_BG_DOCK_WIDGET'];
+      else process.env['PI_BG_DOCK_WIDGET'] = previous;
+    }
+  });
+
   void it('draws the /bg footer dock while a shell task runs and clears it when the task finishes', async () => {
     const { session } = await harness();
     // Record the dock widget by its own key. The modal key is cleared on every tick, so it must not be counted here.

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { renderBgDock, type BgDockRow } from '../../src/ui/bg-dock.js';
+import { renderBgDock, shouldShowBgDock, type BgDockRow } from '../../src/ui/bg-dock.js';
 
 // Plain-text colour: the assertions check words and layout, not escape codes.
 const fg = (_color: 'dim' | 'muted', text: string): string => text;
@@ -54,5 +54,10 @@ void describe('renderBgDock', () => {
   void it('clamps a negative elapsed time to zero rather than printing a negative duration', () => {
     const lines = renderBgDock({ rows: [row('b1', 'job', 0, 5000)], now: 1000 }, fg, 80);
     assert.match(lines[1] ?? '', /· 0ms ·/);
+  });
+
+  void it('shows the dock only when the widget switch is on, whatever the task count', () => {
+    assert.equal(shouldShowBgDock('on'), true);
+    assert.equal(shouldShowBgDock('off'), false);
   });
 });

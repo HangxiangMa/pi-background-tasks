@@ -12,6 +12,8 @@ export const PI_BG_DOCK_SHORTCUT_VALUES = Object.freeze([
     'off',
 ]);
 export const PI_BG_DEFAULT_DOCK_SHORTCUT = 'shift+down';
+export const PI_BG_DOCK_WIDGET_VALUES = Object.freeze(['on', 'off']);
+export const PI_BG_DEFAULT_DOCK_WIDGET = 'on';
 const CONFIG_VALUE_EXCERPT_CHARS = 96;
 function boundedConfigValue(value) {
     if (value.length <= CONFIG_VALUE_EXCERPT_CHARS)
@@ -63,10 +65,18 @@ function parseDockShortcut(rawValue) {
     }
     return raw;
 }
+function parseDockWidget(rawValue) {
+    const raw = rawValue ?? PI_BG_DEFAULT_DOCK_WIDGET;
+    if (!PI_BG_DOCK_WIDGET_VALUES.includes(raw)) {
+        invalidConfig('PI_BG_DOCK_WIDGET', `accepted values are exactly ${PI_BG_DOCK_WIDGET_VALUES.join(',')}`, raw);
+    }
+    return raw;
+}
 export function parseBackgroundTasksConfig(env = process.env) {
     const features = parseFeatures(env['PI_BG_FEATURES']);
     const dockShortcut = parseDockShortcut(env['PI_BG_DOCK_SHORTCUT']);
-    return Object.freeze({ features, dockShortcut });
+    const dockWidget = parseDockWidget(env['PI_BG_DOCK_WIDGET']);
+    return Object.freeze({ features, dockShortcut, dockWidget });
 }
 export function dockShortcutFooterHint(shortcut) {
     if (shortcut === 'shift+down')

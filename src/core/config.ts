@@ -18,6 +18,11 @@ export type PiBackgroundDockShortcut = (typeof PI_BG_DOCK_SHORTCUT_VALUES)[numbe
 
 export const PI_BG_DEFAULT_DOCK_SHORTCUT: PiBackgroundDockShortcut = 'shift+down';
 
+export const PI_BG_DOCK_WIDGET_VALUES = Object.freeze(['on', 'off'] as const);
+export type PiBackgroundDockWidget = (typeof PI_BG_DOCK_WIDGET_VALUES)[number];
+
+export const PI_BG_DEFAULT_DOCK_WIDGET: PiBackgroundDockWidget = 'on';
+
 export interface PiBackgroundFeatureSelection {
   readonly process: true;
   readonly delegate: boolean;
@@ -29,6 +34,7 @@ export interface PiBackgroundFeatureSelection {
 export interface PiBackgroundConfig {
   readonly features: PiBackgroundFeatureSelection;
   readonly dockShortcut: PiBackgroundDockShortcut;
+  readonly dockWidget: PiBackgroundDockWidget;
 }
 
 const CONFIG_VALUE_EXCERPT_CHARS = 96;
@@ -106,12 +112,25 @@ function parseDockShortcut(rawValue: string | undefined): PiBackgroundDockShortc
   return raw as PiBackgroundDockShortcut;
 }
 
+function parseDockWidget(rawValue: string | undefined): PiBackgroundDockWidget {
+  const raw = rawValue ?? PI_BG_DEFAULT_DOCK_WIDGET;
+  if (!(PI_BG_DOCK_WIDGET_VALUES as readonly string[]).includes(raw)) {
+    invalidConfig(
+      'PI_BG_DOCK_WIDGET',
+      `accepted values are exactly ${PI_BG_DOCK_WIDGET_VALUES.join(',')}`,
+      raw,
+    );
+  }
+  return raw as PiBackgroundDockWidget;
+}
+
 export function parseBackgroundTasksConfig(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): PiBackgroundConfig {
   const features = parseFeatures(env['PI_BG_FEATURES']);
   const dockShortcut = parseDockShortcut(env['PI_BG_DOCK_SHORTCUT']);
-  return Object.freeze({ features, dockShortcut });
+  const dockWidget = parseDockWidget(env['PI_BG_DOCK_WIDGET']);
+  return Object.freeze({ features, dockShortcut, dockWidget });
 }
 
 export function dockShortcutFooterHint(shortcut: PiBackgroundDockShortcut): string {
